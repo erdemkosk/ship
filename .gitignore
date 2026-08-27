@@ -1,0 +1,18 @@
+# Godot editor data — never commit
+.godot/
+
+# Export artifacts
+*.apk
+*.aab
+*.ipa
+*.exe
+*.x86_64
+*.pck
+*.zip
+export/
+
+# IDE and OS files
+.vscode/settings.json
+.idea/
+*.swp
+.DS_Store
