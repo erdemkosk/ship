@@ -36,6 +36,11 @@ const TIDE_PERIOD := 420.0
 const CURRENT_SAMPLE := 30.0   # finite-difference step for the stream function
 const OCEAN_LAYER := 2
 const SEABED_LAYER := 4
+## Ground tackle. Kept out of the mirror: the anchor spends its life BELOW the
+## water, and a planar reflection of something below the plane comes back as a
+## ghost of it hanging in the air above — which is exactly what a sinking anchor
+## looked like.
+const TACKLE_LAYER := 8
 
 # Clipmap: dense 0.5 m quads around the boat, coarser rings outward.
 const CLOSE_SIZE := 48.0
@@ -471,8 +476,11 @@ func _build_reflection() -> void:
 	_refl_env.tonemap_exposure = 1.0
 
 	_refl_cam = Camera3D.new()
+	# Moved from _process to track the main camera. Global physics interpolation
+	# would warn every frame (Camera3D::_notification) if this stayed ON.
+	_refl_cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	# Everything except the water itself and the seabed.
-	_refl_cam.cull_mask = 0xFFFFF & ~(OCEAN_LAYER | SEABED_LAYER)
+	_refl_cam.cull_mask = 0xFFFFF & ~(OCEAN_LAYER | SEABED_LAYER | TACKLE_LAYER)
 	_refl_cam.near = 0.1
 	# Far enough to hold the lighthouse and the full length of its beams; they
 	# are the one thing on this sea worth seeing reflected from a distance.

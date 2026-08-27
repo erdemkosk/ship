@@ -95,7 +95,9 @@ func _place_islands() -> void:
 	var half := TERRAIN_SIZE * 0.5
 	for gy in GRID:
 		for gx in GRID:
-			if rng.randf() > 0.52:
+			# Sparse on purpose. This is a deep-water place; the point of the
+			# horizon is that there is nothing on it.
+			if rng.randf() > 0.15:
 				continue
 			var cx := -half + (float(gx) + rng.randf_range(0.22, 0.78)) * cell
 			var cz := -half + (float(gy) + rng.randf_range(0.22, 0.78)) * cell
@@ -115,12 +117,37 @@ func _place_islands() -> void:
 				peak = rng.randf_range(0.8, 1.55)
 			_islands.append(Vector4(cx, cz, _min_radius(radius), peak))
 	# A couple of close cays — small, not extra landmasses.
-	for i in 4:
+	for i in 2:
 		var ang := rng.randf_range(0.0, TAU)
 		var dist := rng.randf_range(95.0, 190.0)
 		_islands.append(Vector4(
 			cos(ang) * dist, sin(ang) * dist,
 			_min_radius(rng.randf_range(2.4, 4.4)), rng.randf_range(0.28, 0.75)))
+
+	# --- real landmasses -----------------------------------------------------
+	# Everything above is rocks: nothing wider than seven metres. Land you can
+	# see from a long way off, steer for, and pile up on has to be a different
+	# order of thing entirely, so it is placed by hand rather than scattered —
+	# a handful of headlands at the distances a boat actually crosses.
+	# Two, and both a long way off. Five of them turned the horizon into an
+	# archipelago; the sea here is supposed to be empty, and land is supposed to
+	# be an event.
+	for big in [
+		Vector4(-352.0, -138.0, 96.0, 19.0),    # high western headland
+		Vector4(-188.0, 512.0, 124.0, 26.0),    # the big one, far southward
+	]:
+		_islands.append(big)
+
+	# --- stacks and reefs ----------------------------------------------------
+	# Rock that stands out of the water in its own right: sea stacks off the
+	# headlands, and reefs in open water that you will not see until you are on
+	# them. These are what make the chart worth reading.
+	for st in [
+		Vector4(-248.0, -196.0, 15.0, 8.5), Vector4(-268.0, -60.0, 12.0, 6.0),
+		Vector4(-96.0, 396.0, 16.0, 9.0), Vector4(-300.0, 610.0, 14.0, 7.0),
+		Vector4(150.0, -300.0, 11.0, 3.0),
+	]:
+		_islands.append(Vector4(st.x, st.y, _min_radius(st.z), st.w))
 
 
 func _min_radius(r: float) -> float:
@@ -183,9 +210,18 @@ func _stamp_island(isl: Vector4) -> void:
 			wo = wo * wo * (3.0 - 2.0 * wo)
 			var lifted := maxf(h, lerpf(h, shelf, wo))
 			# Landmark rocks keep a flat top so buildings don't hang off a dome.
+			# Scaled off the radius now that there is more than one of them —
+			# the old 40/95 was the lighthouse rock's shape, hard-coded.
 			if radius >= 14.0:
-				var plateau := 40.0
-				var outer := 95.0
+				# Lobed, not circular. A perfect disc of land reads as a stamp
+				# the moment you get close to it; two sine terms keyed off the
+				# island's own coordinates give each one headlands and bays of
+				# its own without any extra cost.
+				var ang := atan2(dz, dx)
+				var wob := 1.0 + 0.23 * sin(ang * 3.0 + isl.x * 0.05) \
+						+ 0.13 * sin(ang * 5.0 - isl.y * 0.04)
+				var plateau: float = radius * 0.69 * wob
+				var outer: float = radius * 1.64 * wob
 				if d <= plateau:
 					lifted = maxf(lifted, peak)
 				elif d < outer:
@@ -238,19 +274,13 @@ func _build_mesh() -> void:
 
 
 func _build_colliders() -> void:
-	for isl in _islands:
-		if isl.w < 0.55 or isl.z >= 14.0:
-			continue
-		var body := StaticBody3D.new()
-		body.position = Vector3(isl.x, 0.0, isl.y)
-		var col := CollisionShape3D.new()
-		var shape := CylinderShape3D.new()
-		shape.radius = isl.z * 0.62
-		shape.height = maxf(isl.w * 2.0 + 0.8, 1.4)
-		col.shape = shape
-		col.position.y = isl.w * 0.15
-		body.add_child(col)
-		add_child(body)
+	## Nothing here any more, and deliberately. There used to be a cylinder per
+	## island, which meant a boat bounced off an invisible drum around a rock
+	## and sailed straight over any island wider than fourteen metres — which is
+	## every island worth the name. The bottom IS a heightmap, so the boat feels
+	## for it directly (boat.gd/_run_aground) and grounds on whatever is
+	## actually there: a shoal, a beach, a reef, the face of a headland.
+	pass
 
 
 func _build_seaweed() -> void:

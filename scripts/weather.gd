@@ -50,6 +50,10 @@ var _lightning_timer: Timer
 var _cloud_offset := Vector2.ZERO
 var _cloud_time := 0.0
 var _underwater := false
+var _wind_pl: AudioStreamPlayer
+var _storm_pl: AudioStreamPlayer
+var _wind_lin := 0.0
+var _storm_lin := 0.0
 
 
 func _ready() -> void:
@@ -148,6 +152,7 @@ func _ready() -> void:
 	add_child(_lightning_timer)
 
 	_build_rain()
+	_build_weather_audio()
 	_apply_atmosphere()
 	_apply_rain()
 	if storm:
@@ -309,17 +314,27 @@ func _apply_atmosphere() -> void:
 
 func _build_rain() -> void:
 	_rain = GPUParticles3D.new()
-	_rain.amount = 420
-	_rain.lifetime = 0.36
-	_rain.fixed_fps = 30
+	# 420 drops spread over 56 x 56 m is drizzle you have to look for. Rain you
+	# can hear needs an order more, packed into a much smaller box around the
+	# camera — density where you are standing is the whole effect, and drops
+	# 30 m away were never doing any work.
+	_rain.amount = 3600
+	# Long enough to FALL PAST YOU. At 0.36 s a drop covered seven metres, so
+	# emitting eleven metres overhead it died four metres above the camera and
+	# the rain was a band in the sky you never stood in.
+	_rain.lifetime = 0.85
+	_rain.fixed_fps = 60
 	_rain.transform_align = GPUParticles3D.TRANSFORM_ALIGN_DISABLED
 	_rain.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	_rain.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# A drop with no size cannot hit anything; the default is a hundredth of a
+	# metre. Give it a real radius or the shields never fire.
+	_rain.collision_base_size = 0.35
 	_rain.visibility_aabb = AABB(Vector3(-40, -20, -40), Vector3(80, 40, 80))
 
 	var pm := ParticleProcessMaterial.new()
 	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	pm.emission_box_extents = Vector3(28.0, 0.8, 28.0)
+	pm.emission_box_extents = Vector3(12.0, 1.0, 12.0)
 	pm.direction = Vector3(0, -1, 0)
 	pm.spread = 2.0
 	pm.initial_velocity_min = 16.0
@@ -334,18 +349,23 @@ func _build_rain() -> void:
 	var fade_tex := GradientTexture1D.new()
 	fade_tex.gradient = fade
 	pm.color_ramp = fade_tex
+	# Drops die where they land instead of falling on through the boat: the
+	# roofs and decks carry GPUParticlesCollisionBox3D volumes (see
+	# boat.gd/_build_rain_shields), so no rain falls inside the cabin or the
+	# wheelhouse — and none falls THROUGH the deck either.
+	pm.collision_mode = ParticleProcessMaterial.COLLISION_HIDE_ON_CONTACT
 	_rain.process_material = pm
 
 	var quad := QuadMesh.new()
-	quad.size = Vector2(0.006, 0.22)
+	quad.size = Vector2(0.011, 0.36)
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(0.55, 0.62, 0.70, 0.07)
+	mat.albedo_color = Color(0.60, 0.67, 0.74, 0.20)
 	mat.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y
 	mat.distance_fade_mode = BaseMaterial3D.DISTANCE_FADE_PIXEL_ALPHA
-	mat.distance_fade_min_distance = 18.0
-	mat.distance_fade_max_distance = 5.5
+	mat.distance_fade_min_distance = 22.0
+	mat.distance_fade_max_distance = 2.2
 	quad.material = mat
 	_rain.draw_pass_1 = quad
 	add_child(_rain)
@@ -355,7 +375,10 @@ func _apply_rain() -> void:
 	if _rain == null:
 		return
 	_rain.emitting = rain_amount > 0.01
-	_rain.amount_ratio = clampf(rain_amount, 0.0, 1.0)
+	# Bend the slider: rain does not feel twice as heavy at 100% as at 50%, it
+	# feels a little heavier. Front-load it so a middling setting already looks
+	# like weather you would not go out in.
+	_rain.amount_ratio = clampf(pow(rain_amount, 0.55), 0.0, 1.0)
 	var pm: ParticleProcessMaterial = _rain.process_material
 	var a := deg_to_rad(wind_direction_deg)
 	pm.gravity = Vector3(cos(a), 0.0, sin(a)) * wind_speed * 0.55 + Vector3(0, -18.0, 0)
@@ -364,7 +387,7 @@ func _apply_rain() -> void:
 func _process(delta: float) -> void:
 	var cam := get_viewport().get_camera_3d()
 	if cam != null and _rain != null:
-		_rain.global_position = cam.global_position + Vector3(0.0, 11.0, 0.0)
+		_rain.global_position = cam.global_position + Vector3(0.0, 7.0, 0.0)
 
 	# clouds drift with the wind; lightning lights the deck from within
 	var wa := deg_to_rad(wind_direction_deg)
@@ -373,6 +396,7 @@ func _process(delta: float) -> void:
 	_set_sky("cloud_offset", _cloud_offset)
 	_set_sky("cloud_time", _cloud_time)
 	_set_sky("flash_energy", _flash.light_energy)
+	_update_weather_audio(delta)
 
 
 func _schedule_lightning() -> void:
@@ -389,3 +413,52 @@ func _do_flash() -> void:
 	tw.tween_property(_flash, "light_energy", 5.0, 0.06)
 	tw.tween_property(_flash, "light_energy", 0.0, 0.4)
 	tw.finished.connect(_schedule_lightning)
+
+
+func _build_weather_audio() -> void:
+	## Real loops from assets/audio/. Volume follows the weather; they never
+	## try to match individual waves (that is what sounded fake last time).
+	_wind_pl = _loop_player("res://assets/audio/wind.mp3")
+	_storm_pl = _loop_player("res://assets/audio/storm.mp3")
+	add_child(_wind_pl)
+	add_child(_storm_pl)
+	_wind_pl.play()
+
+
+func _loop_player(path: String) -> AudioStreamPlayer:
+	var p := AudioStreamPlayer.new()
+	var s: AudioStream = load(path)
+	if s is AudioStreamMP3:
+		(s as AudioStreamMP3).loop = true
+	elif s is AudioStreamOggVorbis:
+		(s as AudioStreamOggVorbis).loop = true
+	p.stream = s
+	p.bus = "Master"
+	p.volume_db = -80.0
+	return p
+
+
+func _update_weather_audio(delta: float) -> void:
+	if _wind_pl == null:
+		return
+	# Calm (a few knots) is barely there; a working breeze (~18 kn) is full.
+	# Storms with 30+ kn stay at full rather than clipping louder.
+	var w_tgt := clampf((wind_speed - 2.0) / 16.0, 0.0, 1.0)
+	var s_tgt := 1.0 if storm else 0.0
+	if _underwater:
+		w_tgt *= 0.22
+		s_tgt *= 0.18
+	var k := 1.0 - exp(-2.4 * delta)
+	_wind_lin = lerpf(_wind_lin, w_tgt, k)
+	_storm_lin = lerpf(_storm_lin, s_tgt, 1.0 - exp(-1.6 * delta))
+	_wind_pl.volume_db = linear_to_db(maxf(_wind_lin, 0.0001))
+	_storm_pl.volume_db = linear_to_db(maxf(_storm_lin, 0.0001))
+	if s_tgt > 0.02 and not _storm_pl.playing:
+		_storm_pl.play()
+	elif _storm_lin < 0.012 and _storm_pl.playing and not storm:
+		_storm_pl.stop()
+		_storm_lin = 0.0
+		_storm_pl.volume_db = -80.0
+	if not _wind_pl.playing:
+		_wind_pl.play()
+

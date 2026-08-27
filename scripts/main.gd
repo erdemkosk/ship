@@ -12,7 +12,14 @@ func _enter_tree() -> void:
 	_add_action("boat_right", [KEY_D, KEY_RIGHT])
 	_add_action("toggle_panel", [KEY_TAB])
 	_add_action("toggle_camera", [KEY_F])
-	_add_action("throw_rock", [KEY_T])
+	_add_action("use", [KEY_E])
+	_add_action("jump", [KEY_SPACE])
+	_add_action("anchor", [KEY_G])
+	_add_action("light_cabin", [KEY_1])
+	_add_action("light_helm", [KEY_2])
+	_add_action("light_beacon", [KEY_3])
+	_add_action("light_flood", [KEY_6])
+	_add_action("wiper", [KEY_5])
 
 
 func _add_action(action: String, keys: Array) -> void:
@@ -33,16 +40,22 @@ func _ready() -> void:
 	var ui: CanvasLayer = $UI
 
 	boat.ocean = ocean
+	boat.weather = weather
 	boat.camera_rig = rig
-	boat.global_position = Vector3(0.0, 1.2, 0.0)
 	ocean.follow_target = boat
 	var seabed: Node3D = $Seabed
 	seabed.follow_target = boat
 	ocean.bind_seabed(seabed)
+	_place_boat(boat, ocean)
 	rig.target = boat
 	rig.ocean = ocean
 	rig.weather = weather
 	weather.ocean = ocean
+	var tackle: Node3D = (load("res://scripts/ground_tackle.gd") as GDScript).new()
+	tackle.boat = boat
+	tackle.ocean = ocean
+	add_child(tackle)
+	boat.tackle = tackle
 	ui.setup(ocean, weather)
 	_spawn_flotsam(ocean)
 
@@ -57,8 +70,6 @@ func _ready() -> void:
 		elif arg == "--drive":
 			Input.action_press("boat_forward")
 			$Boat.linear_velocity = -$Boat.global_basis.z * 5.5
-		elif arg == "--throw":
-			_test_throw()
 		elif arg == "--fps":
 			$CameraRig.set_mode(1)
 		elif arg == "--debug-buoy":
@@ -81,32 +92,42 @@ func _ready() -> void:
 			_take_test_screenshot()
 
 
-func _unhandled_input(event: InputEvent) -> void:
-	# left click: drop a rock where you clicked on the water
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-		var cam := get_viewport().get_camera_3d()
-		if cam == null:
-			return
-		var click_pos: Vector2 = event.position
-		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-			click_pos = get_viewport().get_visible_rect().size * 0.5  # FPS: look center
-		var origin := cam.project_ray_origin(click_pos)
-		var dir := cam.project_ray_normal(click_pos)
-		if dir.y >= -0.02:
-			return  # clicked at/above the horizon
-		var ocean: Node3D = $Ocean
-		# iterate ray vs. wave surface (start from the y=0 plane)
-		var p := origin + dir * (-origin.y / dir.y)
-		for i in 3:
-			var h: float = ocean.get_height(p)
-			p = origin + dir * ((h - origin.y) / dir.y)
-		if origin.distance_to(p) > 250.0:
-			return
-		var rock := preload("res://scripts/rock.gd").new()
-		rock.ocean = ocean
-		add_child(rock)
-		rock.global_position = p + Vector3(0.0, 4.0, 0.0)
-		rock.linear_velocity = Vector3(0.0, -1.5, 0.0)
+func _place_boat(boat: RigidBody3D, ocean: Node3D) -> void:
+	## Open water only. Origin used to be a reserved basin; now we pick a
+	## heading and a patch of sea that will actually float a 9 m hull — not a
+	## beach, not a reef, not the face of a headland.
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var half := 920.0
+	for _i in 80:
+		var x := rng.randf_range(-half, half)
+		var z := rng.randf_range(-half, half)
+		if not _is_open_water(ocean, x, z):
+			continue
+		boat.global_position = Vector3(x, 1.2, z)
+		boat.rotation = Vector3(0.0, rng.randf() * TAU, 0.0)
+		boat.linear_velocity = Vector3.ZERO
+		boat.angular_velocity = Vector3.ZERO
+		return
+	boat.global_position = Vector3(0.0, 1.2, 0.0)
+
+
+func _is_open_water(ocean: Node3D, x: float, z: float) -> bool:
+	## Keel sits ~0.7 m below the marks. -8 m under the whole hull is enough
+	## that the first swell will not put a bilge on a shelf we did not see.
+	const MIN_BED := -8.0
+	const HULL_R := 8.0
+	const OFFSETS: Array[Vector2] = [
+		Vector2.ZERO,
+		Vector2(1.0, 0.0), Vector2(-1.0, 0.0), Vector2(0.0, 1.0), Vector2(0.0, -1.0),
+		Vector2(0.71, 0.71), Vector2(-0.71, 0.71),
+		Vector2(0.71, -0.71), Vector2(-0.71, -0.71),
+	]
+	for o: Vector2 in OFFSETS:
+		var p := Vector3(x + o.x * HULL_R, 0.0, z + o.y * HULL_R)
+		if ocean.get_seafloor_height(p) > MIN_BED:
+			return false
+	return true
 
 
 func _spawn_flotsam(ocean: Node3D) -> void:
@@ -135,16 +156,6 @@ func _spawn_flotsam(ocean: Node3D) -> void:
 		debris.spawn_yaw = rng.randf() * TAU
 		add_child(debris)
 		debris.global_position = pos
-
-
-func _test_throw() -> void:
-	# drop a rock at a camera-visible spot beside the boat
-	await get_tree().create_timer(2.22).timeout
-	var rock := preload("res://scripts/rock.gd").new()
-	rock.ocean = $Ocean
-	add_child(rock)
-	rock.global_position = $Boat.global_position + Vector3(-2.5, 3.5, 2.0)
-	rock.linear_velocity = Vector3(0, -3.0, 0)
 
 
 func _debug_buoyancy(boat: RigidBody3D, ocean: Node3D) -> void:

@@ -60,6 +60,7 @@ const PRESETS: Array[Dictionary] = [
 
 
 func setup(o: Node3D, w: Node3D) -> void:
+	add_to_group("ui_panel")
 	ocean = o
 	weather = w
 	_build()
@@ -82,7 +83,7 @@ func _build() -> void:
 	add_child(_fps_label)
 
 	var help := Label.new()
-	help.text = "W/S: ileri-geri   A/D: dümen   F: kamera   Serbest: Q dal / E çık   T: taş at   Sol tık: taş bırak   Tab: panel"
+	help.text = "W/S: ileri-geri   A/D: dümen   F: kamera   Serbest: Q dal / E çık   Tab: panel"
 	help.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	help.position = Vector2(12, -34)
 	help.add_theme_color_override("font_color", Color(0.65, 0.68, 0.65))
@@ -193,6 +194,11 @@ func _set_all(wind: float, dir: float, height: float, steep: float, time: float,
 	_s_cloud.value = cloud
 	_s_rain.value = rain
 	_c_storm.button_pressed = storm
+
+
+func is_open() -> bool:
+	## The camera asks: while this is up the mouse belongs to the sliders.
+	return _panel != null and _panel.visible
 
 
 func _input(event: InputEvent) -> void:
