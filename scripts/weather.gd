@@ -54,6 +54,9 @@ var _wind_pl: AudioStreamPlayer
 var _storm_pl: AudioStreamPlayer
 var _wind_lin := 0.0
 var _storm_lin := 0.0
+var _open_lin := 1.0
+var _lp: AudioEffectLowPassFilter
+var boat: Node3D
 
 
 func _ready() -> void:
@@ -418,11 +421,30 @@ func _do_flash() -> void:
 func _build_weather_audio() -> void:
 	## Real loops from assets/audio/. Volume follows the weather; they never
 	## try to match individual waves (that is what sounded fake last time).
+	## A Weather bus holds a low-pass so the cabin can muffle them without
+	## touching the stove, which lives on Master and in the room.
+	_ensure_weather_bus()
 	_wind_pl = _loop_player("res://assets/audio/wind.mp3")
 	_storm_pl = _loop_player("res://assets/audio/storm.mp3")
 	add_child(_wind_pl)
 	add_child(_storm_pl)
 	_wind_pl.play()
+
+
+func _ensure_weather_bus() -> void:
+	var idx := AudioServer.get_bus_index("Weather")
+	if idx < 0:
+		AudioServer.add_bus()
+		idx = AudioServer.bus_count - 1
+		AudioServer.set_bus_name(idx, "Weather")
+		AudioServer.set_bus_send(idx, "Master")
+	if AudioServer.get_bus_effect_count(idx) == 0:
+		_lp = AudioEffectLowPassFilter.new()
+		_lp.cutoff_hz = 12000.0
+		_lp.resonance = 0.35
+		AudioServer.add_bus_effect(idx, _lp)
+	else:
+		_lp = AudioServer.get_bus_effect(idx, 0) as AudioEffectLowPassFilter
 
 
 func _loop_player(path: String) -> AudioStreamPlayer:
@@ -433,9 +455,18 @@ func _loop_player(path: String) -> AudioStreamPlayer:
 	elif s is AudioStreamOggVorbis:
 		(s as AudioStreamOggVorbis).loop = true
 	p.stream = s
-	p.bus = "Master"
+	p.bus = "Weather"
 	p.volume_db = -80.0
 	return p
+
+
+func _weather_openness() -> float:
+	if boat == null or not boat.has_method("weather_openness"):
+		return 1.0
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return 1.0
+	return float(boat.weather_openness(cam.global_position))
 
 
 func _update_weather_audio(delta: float) -> void:
@@ -445,9 +476,19 @@ func _update_weather_audio(delta: float) -> void:
 	# Storms with 30+ kn stay at full rather than clipping louder.
 	var w_tgt := clampf((wind_speed - 2.0) / 16.0, 0.0, 1.0)
 	var s_tgt := 1.0 if storm else 0.0
+	# Enclosure. Fast enough that shutting a door is an event, not a fade
+	# you notice afterwards.
+	var k_open := 1.0 - exp(-7.5 * delta)
+	_open_lin = lerpf(_open_lin, _weather_openness(), k_open)
+	var hear := lerpf(0.12, 1.0, _open_lin)
+	w_tgt *= hear
+	s_tgt *= hear
 	if _underwater:
 		w_tgt *= 0.22
 		s_tgt *= 0.18
+	if _lp != null:
+		# Shut cabin: woolly, no highs. Deck: the recording as-is.
+		_lp.cutoff_hz = lerpf(720.0, 11000.0, pow(_open_lin, 0.65))
 	var k := 1.0 - exp(-2.4 * delta)
 	_wind_lin = lerpf(_wind_lin, w_tgt, k)
 	_storm_lin = lerpf(_storm_lin, s_tgt, 1.0 - exp(-1.6 * delta))

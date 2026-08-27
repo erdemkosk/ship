@@ -51,6 +51,7 @@ func _ready() -> void:
 	rig.ocean = ocean
 	rig.weather = weather
 	weather.ocean = ocean
+	weather.boat = boat
 	var tackle: Node3D = (load("res://scripts/ground_tackle.gd") as GDScript).new()
 	tackle.boat = boat
 	tackle.ocean = ocean

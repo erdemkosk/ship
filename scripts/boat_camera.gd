@@ -245,7 +245,7 @@ func _process_fps(delta: float) -> void:
 	var eye: Vector3 = _walker.eye_local()
 
 	var cand := {}
-	if engaged == "":
+	if engaged != "chart":
 		# Ray against a sphere per fitting, nearest hit wins. It used to score by
 		# alignment alone, which meant a big target behind a small one could take
 		# the aim off it — you could be looking straight down a switch and get
@@ -266,22 +266,36 @@ func _process_fps(delta: float) -> void:
 			sway = clampf(rb.angular_velocity.length() * 1.6, 0.0, 1.4)
 		var nearest := 1e9
 		for it in target.INTERACT:
+			var iid := str(it["id"])
+			# Already on the wheel: the helm must not eat the key beside it.
+			if engaged == "helm" and iid == "helm":
+				continue
+			if engaged == "telegraph" and iid == "telegraph":
+				continue
 			var to: Vector3 = it["pos"] - eye
 			var along := look_l.dot(to)
 			if along <= 0.02 or along > 2.2:
 				continue
 			var rr: float = float(it["r"]) * (1.0 + sway)
-			if str(it["id"]) == _last_aim:
+			if iid == _last_aim:
 				rr *= 1.75
 			if (to - look_l * along).length() > rr:
 				continue
-			if along < nearest:
+			# The key sits next to the wheel. Nearest-along always picks the
+			# helm first; a look toward the barrel should take the ignition.
+			var take := along < nearest
+			if iid == "ignition" and str(cand.get("id", "")) == "helm":
+				take = true
+			if take:
 				nearest = along
 				cand = it
 		_last_aim = str(cand["id"]) if not cand.is_empty() else ""
 
 	if Input.is_action_just_pressed("use"):
-		if engaged == "helm":
+		if not cand.is_empty() and str(cand["id"]) == "ignition" \
+				and target.has_method("toggle_switch"):
+			target.toggle_switch("ignition")
+		elif engaged == "helm":
 			target.set("helm_engaged", false)
 			_walker.spawn_at(target.HELM_STAND)
 		elif engaged == "telegraph":
@@ -324,7 +338,12 @@ func _process_fps(delta: float) -> void:
 					else "Denizdesin — tekneye yüz"
 			_prompt.visible = true
 		elif engaged == "helm":
-			_prompt.text = "E — dümeni bırak"
+			if not cand.is_empty() and str(cand["id"]) == "ignition":
+				var st := int(target.get("engine"))
+				_prompt.text = "E — Kontak  (%s)" % (
+						"durdur" if st == 2 else ("bekleniyor" if st == 1 else "çalıştır"))
+			else:
+				_prompt.text = "E — dümeni bırak"
 			_prompt.visible = true
 		elif engaged == "telegraph":
 			_prompt.text = "E — gaz kolunu bırak"
@@ -338,6 +357,10 @@ func _process_fps(delta: float) -> void:
 		elif not cand.is_empty():
 			if cand["id"] == "radio" and bool(target.get("radio_held")):
 				_prompt.text = "E — telsizi yerine as"
+			elif str(cand["id"]) == "ignition":
+				var st := int(target.get("engine"))
+				_prompt.text = "E — Kontak  (%s)" % (
+						"durdur" if st == 2 else ("bekleniyor" if st == 1 else "çalıştır"))
 			elif (str(cand["id"]).begins_with("sw_") or str(cand["id"]).begins_with("door_")) \
 					and target.has_method("switch_state"):
 				_prompt.text = "E — %s  (%s)" % [cand["name"],

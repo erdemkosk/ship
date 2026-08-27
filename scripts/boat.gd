@@ -65,11 +65,13 @@ var _cabin_lamp: OmniLight3D
 var _stove_lamp: OmniLight3D
 var _stove_ember: StandardMaterial3D
 var _stove_heat: GPUParticles3D
+var _stove_snd: AudioStreamPlayer3D
 var _helm_lamp: OmniLight3D
 var _beacon: OmniLight3D
 var _beacon_mat: StandardMaterial3D
 var _floods: Array[SpotLight3D] = []
 var _flood_lens_mat: StandardMaterial3D
+var _flood_beam_mat: ShaderMaterial
 ## Switch panel at the helm. Toggled with 1/2/3 while you are aboard.
 var light_cabin := true
 var light_helm := true
@@ -93,6 +95,18 @@ var helm_engaged := true
 var throttle := 0.0        # what the telegraph lever is asking for
 var _rpm := 0.0            # what the shaft is actually doing
 var _helm := 0.0           # where the rudder actually is, not where you asked
+## The diesel. Off until you turn the key; the shaft does not answer a dead
+## engine, and the bar on the right goes dark with it.
+enum EngineState { OFF, CRANKING, RUNNING }
+var engine: EngineState = EngineState.OFF
+var _crank_left := 0.0
+var _ign_key: Node3D
+var _ign_led: StandardMaterial3D
+var _starter_snd: AudioStreamPlayer3D
+var _engine_snd: AudioStreamPlayer3D
+var _ign_click: AudioStreamPlayer3D
+var _eng_lp: AudioEffectLowPassFilter
+var _eng_open := 1.0
 var aground := false
 ## True while you stand at the telegraph alone: W/S work the lever, no steering.
 var telegraph_engaged := false
@@ -108,15 +122,18 @@ var _switch_levers := {}
 var _switch_leds := {}
 var _door_fwd: Node3D
 var _door_aft: Node3D
+var _door_wh: Node3D
 ## Shut at the start of the game: you open her up yourself.
 var door_fwd_open := false
 var door_aft_open := false
+var door_wh_open := false
 ## Doorways get a blocker only while their door is SHUT. BLOCKERS is a const —
 ## it has to be, the walker reads it every tick — so the two that move live
 ## here, and deck_walker.gd resolves against both lists.
 var door_blockers: Array[AABB] = []
 const DOOR_Z0 := -0.45
 const DOOR_Z1 := 4.65
+const WH_DOOR_Z := 4.05
 var _supply := 1.0
 var _blackout := 0.0
 var _depth_hist := PackedFloat32Array()
@@ -159,6 +176,7 @@ func _ready() -> void:
 	_build_rain_shields()
 	_build_visuals()
 	_build_motor()
+	_build_engine_sound()
 	_build_water_fx()
 	# Roughly m(L^2+H^2)/12 about each axis: pitch, yaw, roll. Roll is left
 	# heavier than the box formula so she rolls slow and deep like timber.
@@ -231,35 +249,37 @@ const FLOORS: Array = [
 	[Rect2(-1.92, 4.55, 3.84, 0.97), 0.63],    # aft deck, up to the door sill
 	[Rect2(-1.70, -0.38, 3.40, 4.96), 0.68],   # cabin sole
 	# Upper deck, in four pieces around the STAIRWELL — the opening the
-	# companionway comes up through, port side.
+	# companionway comes up through, port side. The well is 1.18 m: still
+	# enough to turn on (0.58 m of body-room) but the hatch mouth is not a
+	# flue the stove can breathe up through.
 	[Rect2(-1.83, -0.52, 0.16, 5.62), 2.91],
-	[Rect2(-0.37, -0.52, 2.20, 5.62), 2.91],
-	[Rect2(-1.67, -0.52, 1.30, 1.47), 2.91],
-	[Rect2(-1.67, 3.95, 1.30, 1.15), 2.91],
+	[Rect2(-0.49, -0.52, 2.32, 5.62), 2.91],
+	[Rect2(-1.67, -0.52, 1.18, 1.47), 2.91],
+	[Rect2(-1.67, 3.95, 1.18, 1.15), 2.91],
 	# The companionway. TEN treads now, 0.223 m of rise on 0.30 m of going:
 	# 36.6 degrees, which is a staircase. It was eight treads at 0.279 on 0.238
 	# — 49.6 degrees — and that is not a staircase, it is a ladder with the
 	# rungs filled in, which is why it never felt right to come down. The extra
 	# metre and a bit of going is most of what the boat was lengthened for.
 	# They are still plain floors: no mode, no grabbing, ordinary walking.
-	[Rect2(-1.67, 0.95, 1.30, 0.30), 2.910],
-	[Rect2(-1.67, 1.25, 1.30, 0.30), 2.687],
-	[Rect2(-1.67, 1.55, 1.30, 0.30), 2.464],
-	[Rect2(-1.67, 1.85, 1.30, 0.30), 2.241],
-	[Rect2(-1.67, 2.15, 1.30, 0.30), 2.018],
-	[Rect2(-1.67, 2.45, 1.30, 0.30), 1.795],
-	[Rect2(-1.67, 2.75, 1.30, 0.30), 1.572],
-	[Rect2(-1.67, 3.05, 1.30, 0.30), 1.349],
-	[Rect2(-1.67, 3.35, 1.30, 0.30), 1.126],
-	[Rect2(-1.67, 3.65, 1.30, 0.30), 0.903],
+	[Rect2(-1.67, 0.95, 1.18, 0.30), 2.910],
+	[Rect2(-1.67, 1.25, 1.18, 0.30), 2.687],
+	[Rect2(-1.67, 1.55, 1.18, 0.30), 2.464],
+	[Rect2(-1.67, 1.85, 1.18, 0.30), 2.241],
+	[Rect2(-1.67, 2.15, 1.18, 0.30), 2.018],
+	[Rect2(-1.67, 2.45, 1.18, 0.30), 1.795],
+	[Rect2(-1.67, 2.75, 1.18, 0.30), 1.572],
+	[Rect2(-1.67, 3.05, 1.18, 0.30), 1.349],
+	[Rect2(-1.67, 3.35, 1.18, 0.30), 1.126],
+	[Rect2(-1.67, 3.65, 1.18, 0.30), 0.903],
 ]
 
 const CEILINGS: Array = [
 	# Cabin deckhead, cut around the stairwell so you do not crack your head on
 	# the way up.
-	[Rect2(-0.37, -0.38, 2.07, 4.96), 2.73],
-	[Rect2(-1.70, -0.38, 1.33, 1.33), 2.73],
-	[Rect2(-1.70, 3.95, 1.33, 0.63), 2.73],
+	[Rect2(-0.49, -0.38, 2.19, 4.96), 2.73],
+	[Rect2(-1.70, -0.38, 1.21, 1.33), 2.73],
+	[Rect2(-1.70, 3.95, 1.21, 0.63), 2.73],
 	[Rect2(-1.73, -0.30, 3.46, 4.35), 5.32],   # wheelhouse deckhead
 ]
 
@@ -277,8 +297,8 @@ const BLOCKERS: Array[AABB] = [
 	AABB(Vector3(-1.80, 2.91, -0.31), Vector3(0.13, 2.43, 4.48)),
 	AABB(Vector3(1.67, 2.91, -0.31), Vector3(0.13, 2.43, 4.48)),
 	AABB(Vector3(-1.80, 2.91, -0.32), Vector3(3.60, 2.43, 0.13)),
-	AABB(Vector3(-1.80, 2.91, 3.99), Vector3(1.43, 2.43, 0.13)),
-	AABB(Vector3(0.60, 2.91, 3.99), Vector3(1.20, 2.43, 0.13)),
+	AABB(Vector3(-1.80, 2.91, 3.99), Vector3(1.25, 2.43, 0.13)),
+	AABB(Vector3(0.55, 2.91, 3.99), Vector3(1.25, 2.43, 0.13)),
 	# bulwarks and the ends of the boat
 	AABB(Vector3(-2.08, 0.63, -4.05), Vector3(0.16, 0.60, 9.65)),
 	AABB(Vector3(1.92, 0.63, -4.05), Vector3(0.16, 0.60, 9.65)),
@@ -295,16 +315,16 @@ const BLOCKERS: Array[AABB] = [
 	# and passes clean over the head of someone on the stairs. At deck level it
 	# caught them and would not let them down.
 	#
-	# And the well it guards is 1.30 m wide, not 1.10. A 0.60 m body between the
-	# wheelhouse side and this rail had 0.50 m of room to move in, which is
-	# enough on paper and cramped in the hand — you scrape the rail on the way
-	# down and cannot turn on the steps. At 1.30 there is 0.70 m, and it walks.
+	# And the well it guards is 1.18 m wide. 1.10 left a 0.60 m body with 0.50 m
+	# of room — enough on paper and cramped in the hand. 1.30 walked, but the
+	# hatch mouth on the upper deck was a flue: stove heat and crackle came
+	# straight up. 1.18 keeps 0.58 m of body-room and closes the mouth a little.
 	# It starts at 1.55, not at 0.95: the first two treads are level with the
 	# deck and are the WAY IN. Running the rail the full length of the well
 	# walled the entrance off — coming aft from the wheel you met it head on and
 	# had to go right forward again to get round its end. A companionway rail
 	# has a gap in it where you step through, and now this one does.
-	AABB(Vector3(-0.37, 3.05, 1.55), Vector3(0.10, 0.81, 2.40)),
+	AABB(Vector3(-0.49, 3.05, 1.55), Vector3(0.10, 0.81, 2.40)),
 	# Under the companionway. The treads are floors, which made them walkable —
 	# and made the space UNDER them empty, so from the cabin sole you strolled
 	# straight in through the side of the staircase and stood inside it. One
@@ -323,14 +343,14 @@ const BLOCKERS: Array[AABB] = [
 	# The bottom two steps get none at all: they are a single step off the sole
 	# and one more above it, they are the way in, and the same arithmetic would
 	# wall the entrance off.
-	AABB(Vector3(-1.67, 0.68, 0.95), Vector3(1.30, 1.730, 0.30)),
-	AABB(Vector3(-1.67, 0.68, 1.25), Vector3(1.30, 1.507, 0.30)),
-	AABB(Vector3(-1.67, 0.68, 1.55), Vector3(1.30, 1.284, 0.30)),
-	AABB(Vector3(-1.67, 0.68, 1.85), Vector3(1.30, 1.061, 0.30)),
-	AABB(Vector3(-1.67, 0.68, 2.15), Vector3(1.30, 0.838, 0.30)),
-	AABB(Vector3(-1.67, 0.68, 2.45), Vector3(1.30, 0.615, 0.30)),
-	AABB(Vector3(-1.67, 0.68, 2.75), Vector3(1.30, 0.392, 0.30)),
-	AABB(Vector3(-1.67, 0.68, 3.05), Vector3(1.30, 0.169, 0.30)),
+	AABB(Vector3(-1.67, 0.68, 0.95), Vector3(1.18, 1.730, 0.30)),
+	AABB(Vector3(-1.67, 0.68, 1.25), Vector3(1.18, 1.507, 0.30)),
+	AABB(Vector3(-1.67, 0.68, 1.55), Vector3(1.18, 1.284, 0.30)),
+	AABB(Vector3(-1.67, 0.68, 1.85), Vector3(1.18, 1.061, 0.30)),
+	AABB(Vector3(-1.67, 0.68, 2.15), Vector3(1.18, 0.838, 0.30)),
+	AABB(Vector3(-1.67, 0.68, 2.45), Vector3(1.18, 0.615, 0.30)),
+	AABB(Vector3(-1.67, 0.68, 2.75), Vector3(1.18, 0.392, 0.30)),
+	AABB(Vector3(-1.67, 0.68, 3.05), Vector3(1.18, 0.169, 0.30)),
 	# windlass on the foredeck
 	AABB(Vector3(-0.30, 0.63, -3.55), Vector3(0.60, 0.55, 0.40)),
 	# the wheel and its column
@@ -348,6 +368,7 @@ const BLOCKERS: Array[AABB] = [
 	AABB(Vector3(0.92, 0.68, 1.30), Vector3(0.76, 0.75, 2.00)),    # bunk
 	AABB(Vector3(-1.64, 0.68, -0.05), Vector3(0.74, 0.70, 0.86)),  # table
 	AABB(Vector3(1.05, 0.68, 4.05), Vector3(0.46, 0.90, 0.46)),    # stove
+	AABB(Vector3(1.02, 2.91, 4.26), Vector3(0.52, 1.70, 0.52)),    # funnel, on the balcony
 	AABB(Vector3(1.20, 0.68, -0.25), Vector3(0.46, 1.05, 0.40)),   # cupboard
 	AABB(Vector3(1.16, 0.68, 0.35), Vector3(0.45, 0.62, 0.45)),    # sea chest
 ]
@@ -373,8 +394,8 @@ const CHART_LOOK := Vector3(1.30, 3.72, 2.88)
 const HELM_REACH := 1.05
 ## Spawn point when you step into first person: at the wheel.
 const CREW_START := Vector3(0.0, 2.93, 1.10)
-## Cabin stove: body centre, where the fire sits. Heat is a field in her
-## air, not a lamp — it fills the cabin and barely breathes up the hatch.
+## Cabin stove: body centre, where the fire sits. Heat is the air around
+## the plate, not the whole cabin — door sills and the hatch stay cold.
 const STOVE := Vector3(1.28, 1.05, 4.28)
 const CABIN_XZ := Rect2(-1.70, -0.38, 3.40, 5.03)
 ## Where you stand to work the telegraph alone.
@@ -384,12 +405,14 @@ const TELEGRAPH_STAND := Vector3(0.58, 2.91, 0.70)
 const INTERACT: Array = [
 	{"id": "helm", "pos": Vector3(0.0, 3.75, 0.30), "r": 0.36, "name": "Dümen"},
 	{"id": "telegraph", "pos": Vector3(0.70, 3.78, 0.02), "r": 0.18, "name": "Gaz kolu"},
+	{"id": "ignition", "pos": Vector3(0.50, 3.54, 0.06), "r": 0.28, "name": "Kontak"},
 	{"id": "windlass", "pos": Vector3(0.0, 1.00, -3.35), "r": 0.55, "name": "Irgat (çapa)"},
 	# The switch console between the radar and the chart table. Every one of
 	# these is a real switch you walk up to and throw; the keyboard shortcut is
 	# the same circuit, not a different system.
 	{"id": "door_fwd", "pos": Vector3(0.0, 1.55, -0.45), "r": 0.50, "name": "Baş kapı"},
 	{"id": "door_aft", "pos": Vector3(0.0, 1.55, 4.65), "r": 0.50, "name": "Kıç kapı"},
+	{"id": "door_wh", "pos": Vector3(0.0, 3.85, 4.05), "r": 0.50, "name": "Balkon kapısı"},
 	{"id": "sw_cabin", "pos": Vector3(1.10, 3.78, 1.34), "r": 0.10, "name": "Kamara ışığı"},
 	{"id": "sw_helm", "pos": Vector3(1.30, 3.78, 1.34), "r": 0.10, "name": "Dümen evi ışığı"},
 	{"id": "sw_beacon", "pos": Vector3(1.50, 3.78, 1.34), "r": 0.10, "name": "İkaz feneri"},
@@ -502,11 +525,11 @@ func _build_visuals() -> void:
 	_box(Vector3(1.14, 0.06, 0.10), Vector3(0.0, CH_Y0 + 0.03, CH_Z0), Vector3.ZERO, trim)
 	# Roof of the deckhouse — the walkable upper deck.
 	# Roof / upper deck, laid in four pieces so the companionway has an opening
-	# to come up through on the port side aft.
+	# to come up through on the port side aft. Hatch mouth 1.18 m, not 1.30.
 	_box(Vector3(0.16, 0.16, 5.62), Vector3(-1.75, CH_Y1 + 0.08, 2.29), Vector3.ZERO, paint_dark)
-	_box(Vector3(2.20, 0.16, 5.62), Vector3(0.73, CH_Y1 + 0.08, 2.29), Vector3.ZERO, paint_dark)
-	_box(Vector3(1.30, 0.16, 1.47), Vector3(-1.02, CH_Y1 + 0.08, 0.215), Vector3.ZERO, paint_dark)
-	_box(Vector3(1.30, 0.16, 1.15), Vector3(-1.02, CH_Y1 + 0.08, 4.525), Vector3.ZERO, paint_dark)
+	_box(Vector3(2.32, 0.16, 5.62), Vector3(0.67, CH_Y1 + 0.08, 2.29), Vector3.ZERO, paint_dark)
+	_box(Vector3(1.18, 0.16, 1.47), Vector3(-1.08, CH_Y1 + 0.08, 0.215), Vector3.ZERO, paint_dark)
+	_box(Vector3(1.18, 0.16, 1.15), Vector3(-1.08, CH_Y1 + 0.08, 4.525), Vector3.ZERO, paint_dark)
 
 	# Side windows: three a side, glazed.
 	for i in 3:
@@ -610,12 +633,13 @@ func _build_visuals() -> void:
 	_stove_lamp.position = Vector3(1.28, 1.02, 4.08)
 	_stove_lamp.light_color = Color(1.0, 0.42, 0.14)
 	_stove_lamp.light_energy = 1.55
-	_stove_lamp.omni_range = 2.55
-	_stove_lamp.omni_attenuation = 2.4
+	_stove_lamp.omni_range = 1.85
+	_stove_lamp.omni_attenuation = 3.2
 	_stove_lamp.light_volumetric_fog_energy = 2.4
 	_stove_lamp.shadow_enabled = false
 	add_child(_stove_lamp)
 	_build_stove_heat()
+	_build_cabin_lived(trim, metal)
 
 	# Doors that actually work. Each leaf hangs on a pivot at its hinge and
 	# swings; E on it opens or shuts it. Shut, it puts a blocker across the
@@ -680,14 +704,33 @@ func _build_visuals() -> void:
 	var wiper_arm := _mat(Color(0.06, 0.06, 0.06), 0.6, 0.4)
 	_box(Vector3(0.035, 1.05, 0.02), Vector3(0.0, 0.52, 0.0), Vector3.ZERO, wiper_arm, _wiper_pivot)
 	_box(Vector3(0.05, 0.30, 0.025), Vector3(0.0, 1.00, 0.005), Vector3.ZERO, wiper_arm, _wiper_pivot)
-	# Aft face. The doorway is to PORT, straight over the companionway, so you
-	# walk up the stairs and through it without ducking round a post. What is
-	# left is a corner pillar outboard of it and one broad glazed panel to
-	# starboard, with a header carrying across the opening.
+	# Aft face. The doorway is on the centreline, out onto the roof balcony.
+	# Port of it is a solid panel (it also closes the stairwell). Starboard is
+	# glass over a sill, with a jamb so the door has something to hang on.
 	_box(Vector3(1.23, wh, 0.09), Vector3(-1.185, wy, WH_Z1), Vector3.ZERO, paint)
-	_box(Vector3(1.20, 0.50, 0.09), Vector3(1.14, 3.16, WH_Z1), Vector3.ZERO, paint)
+	_box(Vector3(1.07, 0.50, 0.09), Vector3(1.205, 3.16, WH_Z1), Vector3.ZERO, paint)
+	_box(Vector3(0.12, wh, 0.09), Vector3(0.61, wy, WH_Z1), Vector3.ZERO, paint)
 	_box(Vector3(3.48, 0.25, 0.09), Vector3(0.0, 5.215, WH_Z1), Vector3.ZERO, paint)
-	_glass(Vector3(1.20, 1.68, 0.05), Vector3(1.14, 4.25, WH_Z1))
+	_box(Vector3(1.14, 0.26, 0.09), Vector3(0.0, 4.96, WH_Z1), Vector3.ZERO, paint)
+	_box(Vector3(1.14, 0.06, 0.10), Vector3(0.0, WH_Y0 + 0.03, WH_Z1), Vector3.ZERO, trim)
+	_glass(Vector3(1.07, 1.68, 0.05), Vector3(1.205, 4.25, WH_Z1))
+
+	# The balcony door. Hinged starboard so it parks against the glass, not
+	# over the companionway. Inward, the way the cabin doors do — the balcony
+	# is only a metre deep and a leaf that size would hit the aft rail.
+	var wh_piv := Node3D.new()
+	wh_piv.position = Vector3(0.55, WH_Y0, WH_Z1 - 0.04)
+	add_child(wh_piv)
+	_box(Vector3(1.06, 1.88, 0.045), Vector3(-0.53, 0.96, 0.0), Vector3.ZERO, trim, wh_piv)
+	_box(Vector3(0.72, 0.58, 0.055), Vector3(-0.53, 1.42, 0.0), Vector3.ZERO,
+			_mat(Color(0.105, 0.072, 0.048), 0.85), wh_piv)
+	_box(Vector3(0.72, 0.68, 0.055), Vector3(-0.53, 0.58, 0.0), Vector3.ZERO,
+			_mat(Color(0.105, 0.072, 0.048), 0.85), wh_piv)
+	_cyl(0.022, 0.022, 0.07, Vector3(-0.94, 0.94, 0.0), Vector3(90.0, 0.0, 0.0), metal, wh_piv)
+	_box(Vector3(0.05, 0.16, 0.012), Vector3(-0.94, 0.94, -0.032), Vector3.ZERO, metal, wh_piv)
+	for hy in [0.38, 1.50]:
+		_cyl(0.014, 0.014, 0.07, Vector3(-0.02, hy, 0.0), Vector3(0.0, 0.0, 90.0), metal, wh_piv)
+	_door_wh = wh_piv
 
 	# The centre of the room stays EMPTY: aft door -> wheel is a straight walk.
 	_build_chart_table(trim, metal)
@@ -722,12 +765,11 @@ func _build_visuals() -> void:
 	_cyl(0.11, 0.075, 5.20, Vector3(0.0, 3.10, -2.35), Vector3(0.0, 0.0, 3.0), trim)
 	_box(Vector3(1.70, 0.07, 0.07), Vector3(0.0, 4.55, -2.35), Vector3.ZERO, trim)
 	# Funnel on the starboard aft corner of the roof — directly above the cabin
-	# stove, whose pipe runs up through the deckhead into it. Centred it blocked
-	# the ladder and the aft doorway; a real fitter would never have put it there.
-	# Straight up out of the stove now. The dog-leg was only ever there to get
-	# round the wheelhouse, and the stove has moved aft of it.
-	_cyl(0.26, 0.24, 1.55, Vector3(1.28, 3.72, 4.28), Vector3.ZERO, metal)
-	_cyl(0.29, 0.29, 0.10, Vector3(1.28, 4.54, 4.28), Vector3.ZERO, dark)
+	# stove, whose pipe runs up through the deckhead into it. It used to sit
+	# in the aft glass; it lives on the balcony now, clear of the pane and of
+	# the door.
+	_cyl(0.26, 0.24, 1.55, Vector3(1.28, 3.72, 4.52), Vector3.ZERO, metal)
+	_cyl(0.29, 0.29, 0.10, Vector3(1.28, 4.54, 4.52), Vector3.ZERO, dark)
 	# Foredeck rail: stanchions plus a top rail.
 	for i in 7:
 		var t := float(i) / 6.0
@@ -755,6 +797,8 @@ func _build_visuals() -> void:
 		_cyl(0.03, 0.03, 0.56, Vector3(-1.78 + float(i) * 0.89, 3.11, 5.06),
 				Vector3.ZERO, metal)
 
+	_build_deck_gear(trim, metal)
+
 	# --- companionway ------------------------------------------------------
 	# Eight treads up the port side of the cabin, through an opening in the
 	# deckhead. Walked, not climbed.
@@ -767,12 +811,12 @@ func _build_visuals() -> void:
 		# on it instead, every step stands three centimetres proud of the surface
 		# your feet are actually on, and you spend the whole flight shin-deep in
 		# the treads.
-		_box(Vector3(1.28, 0.06, 0.30), Vector3(-1.02, ty - 0.03, tz), Vector3.ZERO, trim)
-		_box(Vector3(1.28, 0.163, 0.05), Vector3(-1.02, ty - 0.1415, tz + 0.125),
+		_box(Vector3(1.16, 0.06, 0.30), Vector3(-1.08, ty - 0.03, tz), Vector3.ZERO, trim)
+		_box(Vector3(1.16, 0.163, 0.05), Vector3(-1.08, ty - 0.1415, tz + 0.125),
 				Vector3.ZERO, trim)
 	# Stringer and handrail down the inboard side, hard against the edge of the
 	# opening so they frame the stair rather than stand in it.
-	_box(Vector3(0.05, 0.30, 3.10), Vector3(-0.40, 1.86, 2.42), Vector3(-36.6, 0.0, 0.0), trim)
+	_box(Vector3(0.05, 0.30, 3.10), Vector3(-0.52, 1.86, 2.42), Vector3(-36.6, 0.0, 0.0), trim)
 	# Closing boards down the inboard side, stepping with the treads, so the
 	# stair reads as a solid piece of joinery from the cabin rather than a
 	# flight of planks with daylight under it.
@@ -780,27 +824,47 @@ func _build_visuals() -> void:
 		# Trim only, so these can close right up under the tread even though the
 		# collision volume behind them has to stop short.
 		var by := 2.910 - float(k) * 0.223 - 0.03
-		_box(Vector3(0.05, by - 0.68, 0.30), Vector3(-0.395, (0.68 + by) * 0.5,
+		_box(Vector3(0.05, by - 0.68, 0.30), Vector3(-0.515, (0.68 + by) * 0.5,
 				1.10 + float(k) * 0.30), Vector3.ZERO, trim)
-	_cyl(0.028, 0.028, 3.35, Vector3(-0.40, 2.66, 2.42), Vector3(53.4, 0.0, 0.0), metal)
+	_cyl(0.028, 0.028, 3.35, Vector3(-0.52, 2.66, 2.42), Vector3(53.4, 0.0, 0.0), metal)
 	for i in 4:
-		_cyl(0.022, 0.022, 0.90, Vector3(-0.40, 1.42 + float(i) * 0.50,
+		_cyl(0.022, 0.022, 0.90, Vector3(-0.52, 1.42 + float(i) * 0.50,
 				3.35 - float(i) * 0.67), Vector3.ZERO, metal)
 	# Coaming round the opening on the upper deck, so it reads as a stairwell.
 	# Trim only — it used to be a collider too, and between it and the wheelhouse
 	# side that left a three-centimetre gap to squeeze the top step through.
-	_box(Vector3(0.05, 0.26, 2.40), Vector3(-0.40, 3.04, 2.75), Vector3.ZERO, trim)
-	_box(Vector3(1.34, 0.26, 0.05), Vector3(-1.02, 3.04, 3.95), Vector3.ZERO, trim)
+	_box(Vector3(0.05, 0.26, 2.40), Vector3(-0.52, 3.04, 2.75), Vector3.ZERO, trim)
+	_box(Vector3(1.22, 0.26, 0.05), Vector3(-1.08, 3.04, 3.95), Vector3.ZERO, trim)
 	# Guard rail on top of the coaming, matching the collider. A 26 cm kerb is
 	# something you trip over on the way past; this is something you hold.
-	_box(Vector3(0.05, 0.05, 2.40), Vector3(-0.40, 3.80, 2.75), Vector3.ZERO, metal)
+	_box(Vector3(0.05, 0.05, 2.40), Vector3(-0.52, 3.80, 2.75), Vector3.ZERO, metal)
 	for i in 4:
-		_cyl(0.025, 0.025, 0.62, Vector3(-0.40, 3.48, 1.70 + float(i) * 0.72),
+		_cyl(0.025, 0.025, 0.62, Vector3(-0.52, 3.48, 1.70 + float(i) * 0.72),
 				Vector3.ZERO, metal)
 
 	# --- forward floodlights ------------------------------------------------
 	# Two of them, on the roof edge between the decks, throwing light out ahead
 	# of the bow. Their own circuit: 6, or the panel's master switch.
+	# The lens material has to exist BEFORE the loop — it used to be created
+	# after, so the glasses were assigned null and never lit, which is why
+	# throwing the switch did nothing you could see.
+	_flood_lens_mat = StandardMaterial3D.new()
+	_flood_lens_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_flood_lens_mat.albedo_color = Color(0.16, 0.14, 0.11)
+	_flood_lens_mat.emission_enabled = true
+	_flood_lens_mat.emission = Color(1.0, 0.95, 0.82)
+	_flood_lens_mat.emission_energy_multiplier = 0.0
+	_flood_beam_mat = ShaderMaterial.new()
+	_flood_beam_mat.shader = load("res://shaders/lighthouse_beam.gdshader")
+	_flood_beam_mat.set_shader_parameter("intensity", 0.0)
+	_flood_beam_mat.set_shader_parameter("gain", 0.9)
+	_flood_beam_mat.set_shader_parameter("reach", 0.72)
+	_flood_beam_mat.set_shader_parameter("edge_soft", 1.35)
+	_flood_beam_mat.set_shader_parameter("soft_metres", 8.0)
+	_flood_beam_mat.set_shader_parameter("haze", 1.0)
+	_flood_beam_mat.set_shader_parameter("beam_color", Color(1.0, 0.94, 0.80))
+	const BLEN := 28.0
+	var bdip := deg_to_rad(12.0)
 	for sx in [-1.0, 1.0]:
 		var fp := Vector3(sx * 1.22, 3.06, -0.56)
 		_box(Vector3(0.10, 0.16, 0.10), fp + Vector3(0.0, -0.09, 0.0), Vector3.ZERO, metal)
@@ -817,24 +881,38 @@ func _build_visuals() -> void:
 		lens.rotation_degrees = Vector3(-72.0, 0.0, 0.0)
 		add_child(lens)
 		var fl := SpotLight3D.new()
-		fl.position = fp + Vector3(0.0, -0.04, -0.14)
-		fl.rotation_degrees = Vector3(-14.0, 0.0, 0.0)
+		fl.position = fp + Vector3(0.0, -0.02, -0.12)
+		fl.rotation_degrees = Vector3(-12.0, 0.0, 0.0)
 		fl.light_color = Color(1.0, 0.94, 0.80)
 		fl.light_energy = 0.0
-		fl.spot_range = 62.0
-		fl.spot_angle = 30.0
-		fl.spot_attenuation = 0.9
-		fl.spot_angle_attenuation = 0.7
-		fl.light_volumetric_fog_energy = 2.2
+		fl.spot_range = 48.0
+		fl.spot_angle = 28.0
+		fl.spot_attenuation = 0.55
+		fl.spot_angle_attenuation = 0.55
+		fl.light_specular = 0.85
+		fl.light_volumetric_fog_energy = 14.0
 		fl.shadow_enabled = false
 		add_child(fl)
 		_floods.append(fl)
-
-	_flood_lens_mat = StandardMaterial3D.new()
-	_flood_lens_mat.albedo_color = Color(0.55, 0.52, 0.44)
-	_flood_lens_mat.emission_enabled = true
-	_flood_lens_mat.emission = Color(1.0, 0.95, 0.82)
-	_flood_lens_mat.emission_energy_multiplier = 0.0
+		# A short shaft you can actually see. The spot's volumetric fog dies
+		# in the froxels; this cone is the same trick the lighthouse uses.
+		var shaft := MeshInstance3D.new()
+		var sc := CylinderMesh.new()
+		sc.top_radius = 7.2
+		sc.bottom_radius = 0.07
+		sc.height = BLEN
+		sc.radial_segments = 16
+		sc.rings = 1
+		sc.cap_top = false
+		sc.cap_bottom = false
+		sc.material = _flood_beam_mat
+		shaft.mesh = sc
+		shaft.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		shaft.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+		shaft.rotation_degrees = Vector3(-102.0, 0.0, 0.0)
+		shaft.position = fp + Vector3(0.0, -sin(bdip) * BLEN * 0.5,
+				-cos(bdip) * BLEN * 0.5)
+		add_child(shaft)
 
 	# Masthead beacon. Nothing hangs off her stern any more — the cabin and the
 	# wheelhouse light her well enough from inside — but a working boat carries
@@ -962,6 +1040,34 @@ func _build_console(trim: Material, metal: Material) -> void:
 	add_child(_pwr_needle)
 	_box(Vector3(0.016, 0.020, 0.006), Vector3.ZERO, Vector3(0.0, 0.0, 45.0),
 			_mat(Color(0.52, 0.40, 0.16), 0.35, 0.7), _pwr_needle)
+
+	# Ignition. A key in a barrel, not a switch on a panel — you turn it, you
+	# wait, and the diesel catches. Same place your right hand already is.
+	var ign := Vector3(0.50, 3.495, 0.06)
+	_box(Vector3(0.07, 0.04, 0.07), ign + Vector3(0.0, -0.02, 0.0), Vector3.ZERO, metal)
+	_cyl(0.022, 0.022, 0.04, ign, Vector3.ZERO, bronze)
+	_cyl(0.010, 0.010, 0.03, ign + Vector3(0.0, 0.018, 0.0), Vector3.ZERO, metal)
+	_ign_key = Node3D.new()
+	_ign_key.position = ign + Vector3(0.0, 0.028, 0.0)
+	add_child(_ign_key)
+	_box(Vector3(0.010, 0.004, 0.055), Vector3(0.0, 0.0, 0.018), Vector3.ZERO, metal, _ign_key)
+	_cyl(0.016, 0.016, 0.005, Vector3(0.0, 0.0, 0.050), Vector3(90.0, 0.0, 0.0), bronze, _ign_key)
+	_box(Vector3(0.022, 0.003, 0.008), Vector3(0.0, 0.0, 0.050), Vector3.ZERO, metal, _ign_key)
+	_ign_led = _mat(Color(0.09, 0.09, 0.09), 0.30)
+	_ign_led.emission_enabled = true
+	_ign_led.emission = Color(1.0, 0.16, 0.10)
+	_ign_led.emission_energy_multiplier = 1.1
+	_box(Vector3(0.018, 0.010, 0.018), ign + Vector3(0.055, -0.008, 0.02), Vector3.ZERO, bronze)
+	var iled := MeshInstance3D.new()
+	var ilm := SphereMesh.new()
+	ilm.radius = 0.007
+	ilm.height = 0.014
+	ilm.material = _ign_led
+	iled.mesh = ilm
+	iled.position = ign + Vector3(0.055, -0.002, 0.02)
+	iled.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(iled)
+	_console_label("KONTAK", ign + Vector3(0.0, -0.018, 0.055), 28)
 
 	# --- main breaker on the bulkhead ----------------------------------------
 	# The flush plate that used to be here is gone: its job belongs to the switch
@@ -1280,6 +1386,8 @@ func toggle_switch(id: String) -> void:
 				tackle.toggle()
 		"door_fwd": door_fwd_open = not door_fwd_open
 		"door_aft": door_aft_open = not door_aft_open
+		"door_wh": door_wh_open = not door_wh_open
+		"ignition": _turn_ignition()
 
 
 func switch_state(id: String) -> bool:
@@ -1292,6 +1400,8 @@ func switch_state(id: String) -> bool:
 		"sw_anchor": return tackle != null and int(tackle.state) != 0
 		"door_fwd": return door_fwd_open
 		"door_aft": return door_aft_open
+		"door_wh": return door_wh_open
+		"ignition": return engine != EngineState.OFF
 	return false
 
 
@@ -1720,6 +1830,153 @@ func _build_motor() -> void:
 		add_child(blade)
 
 
+func _turn_ignition() -> void:
+	## The key is the whole start. Off → crank (and wait) → running. Turn it
+	## again and she dies, shaft and all. Cranking again aborts the start.
+	_play_ign_click()
+	if engine == EngineState.OFF:
+		engine = EngineState.CRANKING
+		_crank_left = 2.15
+		if _starter_snd != null:
+			_starter_snd.play()
+		if _engine_snd != null:
+			_engine_snd.stop()
+	else:
+		engine = EngineState.OFF
+		_crank_left = 0.0
+		if _starter_snd != null:
+			_starter_snd.stop()
+		# Engine loop fades in _update_engine_audio.
+
+
+func _play_ign_click() -> void:
+	if _ign_click != null:
+		_ign_click.play()
+
+
+func _build_engine_sound() -> void:
+	## Diesel under the aft sole. Own bus with a low-pass so timber muffles
+	## it in the rooms; on deck it is the exhaust, not a speaker in your ear.
+	_ensure_engine_bus()
+	_starter_snd = AudioStreamPlayer3D.new()
+	_starter_snd.position = Vector3(0.0, 0.42, 3.70)
+	_starter_snd.stream = _wav_starter()
+	_starter_snd.bus = "Engine"
+	_starter_snd.unit_size = 2.4
+	_starter_snd.max_distance = 14.0
+	_starter_snd.max_db = 0.0
+	_starter_snd.volume_db = -8.0
+	_starter_snd.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	add_child(_starter_snd)
+	_engine_snd = AudioStreamPlayer3D.new()
+	_engine_snd.position = Vector3(0.0, 0.42, 3.70)
+	_engine_snd.stream = _wav_idle()
+	_engine_snd.bus = "Engine"
+	_engine_snd.unit_size = 3.2
+	_engine_snd.max_distance = 18.0
+	_engine_snd.max_db = 0.0
+	_engine_snd.pitch_scale = 0.78
+	_engine_snd.volume_db = -16.0
+	_engine_snd.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	add_child(_engine_snd)
+	_ign_click = AudioStreamPlayer3D.new()
+	_ign_click.position = Vector3(0.50, 3.54, 0.06)
+	_ign_click.stream = _wav_click()
+	_ign_click.bus = "Master"
+	_ign_click.unit_size = 1.2
+	_ign_click.max_distance = 6.0
+	_ign_click.max_db = 0.0
+	_ign_click.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	add_child(_ign_click)
+
+
+func _ensure_engine_bus() -> void:
+	var idx := AudioServer.get_bus_index("Engine")
+	if idx < 0:
+		AudioServer.add_bus()
+		idx = AudioServer.bus_count - 1
+		AudioServer.set_bus_name(idx, "Engine")
+		AudioServer.set_bus_send(idx, "Master")
+	if AudioServer.get_bus_effect_count(idx) == 0:
+		_eng_lp = AudioEffectLowPassFilter.new()
+		_eng_lp.cutoff_hz = 900.0
+		_eng_lp.resonance = 0.28
+		AudioServer.add_bus_effect(idx, _eng_lp)
+	else:
+		_eng_lp = AudioServer.get_bus_effect(idx, 0) as AudioEffectLowPassFilter
+
+
+func _wav_click() -> AudioStreamWAV:
+	var rate := 22050
+	var n := int(rate * 0.06)
+	var s := PackedFloat32Array()
+	s.resize(n)
+	var lp := 0.0
+	for i in n:
+		var t := float(i) / float(n)
+		var raw := (randf() * 2.0 - 1.0) * (1.0 - t) * (1.0 - t) * 0.45
+		lp = lp * 0.7 + raw * 0.3
+		s[i] = lp
+	return _pcm(s, rate, false)
+
+
+func _wav_starter() -> AudioStreamWAV:
+	var rate := 22050
+	var n := int(rate * 2.4)
+	var s := PackedFloat32Array()
+	s.resize(n)
+	var lp := 0.0
+	for i in n:
+		var t := float(i) / float(rate)
+		var spin := 8.5 + t * 1.6
+		var pulse := pow(0.5 + 0.5 * sin(t * TAU * spin), 3.2)
+		var grind := (randf() * 2.0 - 1.0) * 0.35 + sin(t * TAU * 42.0) * 0.12
+		lp = lp * 0.82 + grind * pulse * 0.18
+		s[i] = clampf(lp, -0.7, 0.7)
+	return _pcm(s, rate, false)
+
+
+func _wav_idle() -> AudioStreamWAV:
+	## A wooden boat's diesel: low thump, no hiss. The loop is long so the
+	## chug does not read as a sample. Highs are cooked out here; the bus
+	## low-pass only decides how much timber is in the way.
+	var rate := 22050
+	var n := int(rate * 2.6)
+	var s := PackedFloat32Array()
+	s.resize(n)
+	var brown := 0.0
+	var lp := 0.0
+	for i in n:
+		var t := float(i) / float(rate)
+		brown = brown * 0.96 + (randf() * 2.0 - 1.0) * 0.04
+		var fire := 0.5 + 0.5 * sin(t * TAU * 23.5)
+		fire *= fire * 0.38
+		var sub := sin(t * TAU * 11.75) * 0.28
+		var mid := sin(t * TAU * 47.0) * 0.08
+		var raw := sub + fire + mid + brown * 0.40
+		lp = lp * 0.90 + raw * 0.10
+		s[i] = clampf(lp * 0.92, -0.85, 0.85)
+	return _pcm(s, rate, true)
+
+
+func _pcm(samples: PackedFloat32Array, rate: int, loop: bool) -> AudioStreamWAV:
+	var w := AudioStreamWAV.new()
+	w.format = AudioStreamWAV.FORMAT_16_BITS
+	w.mix_rate = rate
+	w.stereo = false
+	var n := samples.size()
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	for i in n:
+		data.encode_s16(i * 2, int(clampf(samples[i], -1.0, 1.0) * 32767.0))
+	w.data = data
+	if loop:
+		w.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		w.loop_begin = 0
+		w.loop_end = n
+	return w
+
+
 func _drop_mesh(r: float) -> SphereMesh:
 	var m := SphereMesh.new()
 	m.radius = r
@@ -1801,15 +2058,22 @@ func _process(delta: float) -> void:
 		throttle = 0.0  # detent at stop — no ghost creep from a nudged lever
 
 	# --- the engine ----------------------------------------------------------
-	# The lever is a REQUEST, not a throttle pedal. A shaft with a screw on the
-	# end and four and a half tonnes of boat behind it does not answer at once:
-	# she spools up over several seconds, runs down slower still, and to go from
-	# ahead to astern the engine has to be stopped and restarted, which takes
-	# longer than either. This lag is most of what "big" feels like — and it is
-	# why you ring down for slow ahead long before you need it.
-	var want := throttle
+	# The lever is a REQUEST, not a throttle pedal. A dead engine answers
+	# nothing: turn the key, wait for her to catch, then the shaft follows.
+	# Kill it and the bar on the right dies with the shaft.
+	if engine == EngineState.CRANKING:
+		_crank_left -= delta
+		if _crank_left <= 0.0:
+			engine = EngineState.RUNNING
+			if _starter_snd != null:
+				_starter_snd.stop()
+			if _engine_snd != null and not _engine_snd.playing:
+				_engine_snd.play()
+	var want := throttle if engine == EngineState.RUNNING else 0.0
 	var tau := 1.9                                   # spooling up
-	if absf(want) < absf(_rpm):
+	if engine != EngineState.RUNNING:
+		tau = 0.85                                   # shaft dies with the motor
+	elif absf(want) < absf(_rpm):
 		tau = 1.5                                    # coming off the power
 	if want * _rpm < -0.001:
 		tau = 3.6                                    # reversing through stop
@@ -1823,20 +2087,70 @@ func _process(delta: float) -> void:
 	if _thr_lever != null:
 		_thr_lever.rotation_degrees.x = lerpf(38.0, -44.0,
 				(throttle + 0.4) / 1.4)
+	if _ign_key != null:
+		var kang := 0.0
+		if engine == EngineState.CRANKING:
+			kang = -2.45
+		elif engine == EngineState.RUNNING:
+			kang = -1.75
+		_ign_key.rotation.y = lerpf(_ign_key.rotation.y, kang, 1.0 - exp(-11.0 * delta))
+	if _ign_led != null:
+		if engine == EngineState.RUNNING:
+			_ign_led.emission = Color(0.22, 1.0, 0.34)
+			_ign_led.emission_energy_multiplier = 2.4
+		elif engine == EngineState.CRANKING:
+			_ign_led.emission = Color(1.0, 0.72, 0.16)
+			_ign_led.emission_energy_multiplier = 2.0
+		else:
+			_ign_led.emission = Color(1.0, 0.16, 0.10)
+			_ign_led.emission_energy_multiplier = 1.0
+	if _engine_snd != null:
+		var cam := get_viewport().get_camera_3d()
+		var open_t := 1.0
+		if cam != null:
+			open_t = weather_openness(cam.global_position)
+		_eng_open = lerpf(_eng_open, open_t, 1.0 - exp(-6.5 * delta))
+		if _eng_lp != null:
+			# Rooms: a dull thump through the sole. Deck: the exhaust, still
+			# round — never a hiss.
+			_eng_lp.cutoff_hz = lerpf(720.0, 1900.0, _eng_open)
+		if engine == EngineState.RUNNING:
+			if not _engine_snd.playing:
+				_engine_snd.play()
+			var load := clampf(absf(_rpm), 0.0, 1.0)
+			_engine_snd.pitch_scale = lerpf(_engine_snd.pitch_scale,
+					0.76 + load * 0.40, 1.0 - exp(-2.4 * delta))
+			var vol := lerpf(-12.5, -10.0, _eng_open) + load * lerpf(6.0, 8.0, _eng_open)
+			_engine_snd.volume_db = lerpf(_engine_snd.volume_db, minf(vol, -3.0),
+					1.0 - exp(-2.2 * delta))
+		elif _engine_snd.playing:
+			_engine_snd.volume_db = lerpf(_engine_snd.volume_db, -52.0,
+					1.0 - exp(-5.0 * delta))
+			if _engine_snd.volume_db < -44.0:
+				_engine_snd.stop()
+				_engine_snd.volume_db = -16.0
+				_engine_snd.pitch_scale = 0.78
 	if not _pwr_segs.is_empty():
 		# Ahead runs 0..1 over eight segments, astern 0..-0.4 over four, and the
-		# stop mark in the middle is always faintly lit so the instrument reads
-		# as alive even at rest. The top lit segment glows brighter — a real bar
-		# graph's leading element always does, and it is what your eye lands on.
+		# stop mark in the middle is alive only while the diesel is running —
+		# kill the engine and the whole bar goes dark, the way a real shaft
+		# indicator does when the motor stops.
+		var alive := engine == EngineState.RUNNING
 		for i in _pwr_segs.size():
 			var idx := i - 4
 			var lvl := 0.0
-			if idx > 0:
-				lvl = clampf((_rpm - float(idx - 1) * 0.125) / 0.125, 0.0, 1.0)
-			elif idx < 0:
-				lvl = clampf((-_rpm - float(-idx - 1) * 0.10) / 0.10, 0.0, 1.0)
+			if alive:
+				if idx > 0:
+					lvl = clampf((_rpm - float(idx - 1) * 0.125) / 0.125, 0.0, 1.0)
+				elif idx < 0:
+					lvl = clampf((-_rpm - float(-idx - 1) * 0.10) / 0.10, 0.0, 1.0)
+				else:
+					lvl = 0.30
 			else:
-				lvl = 0.30
+				if idx > 0:
+					lvl = clampf((_rpm - float(idx - 1) * 0.125) / 0.125, 0.0, 1.0)
+				elif idx < 0:
+					lvl = clampf((-_rpm - float(-idx - 1) * 0.10) / 0.10, 0.0, 1.0)
 			var lit_e: float = lvl * (2.6 if lvl > 0.55 else 1.5)
 			_pwr_segs[i].emission_energy_multiplier = lit_e \
 					* (0.12 if _blackout > 0.0 else (0.55 + 0.45 * _supply))
@@ -1868,6 +2182,14 @@ func _process(delta: float) -> void:
 					Vector3(1.10, 1.92, 0.16)))
 		if absf(_door_aft.rotation.y) < 0.9:
 			door_blockers.append(AABB(Vector3(-0.55, 0.68, DOOR_Z1 - 0.14),
+					Vector3(1.10, 1.92, 0.16)))
+	if _door_wh != null:
+		# Starboard hinge, parks back against the glass. 2.90 rad is almost
+		# folded on itself — 90 degrees would put a wall across the room.
+		var tw: float = 2.90 if door_wh_open else 0.0
+		_door_wh.rotation.y = lerpf(_door_wh.rotation.y, tw, 1.0 - exp(-6.0 * delta))
+		if absf(_door_wh.rotation.y) < 0.9:
+			door_blockers.append(AABB(Vector3(-0.55, 2.91, WH_DOOR_Z - 0.08),
 					Vector3(1.10, 1.92, 0.16)))
 
 	for id: String in _switch_levers:
@@ -2060,11 +2382,18 @@ func _update_lantern(delta: float) -> void:
 				(1.2 * _flicker) if light_helm else 0.0, 1.0 - exp(-9.0 * delta))
 	if _lit_window != null:
 		_lit_window.emission_energy_multiplier = 2.2 * _flicker if light_cabin else 0.0
-	var flood_e := (18.0 * _flicker) if light_flood else 0.0
+	var flood_e := (42.0 * _flicker) if light_flood else 0.0
 	for fl: SpotLight3D in _floods:
 		fl.light_energy = lerpf(fl.light_energy, flood_e, 1.0 - exp(-7.0 * delta))
 	if _flood_lens_mat != null:
-		_flood_lens_mat.emission_energy_multiplier = (4.0 if light_flood else 0.0)
+		_flood_lens_mat.emission_energy_multiplier = (8.0 * _flicker) if light_flood else 0.0
+	if _flood_beam_mat != null:
+		var haze := 1.0
+		if weather != null:
+			haze = 1.0 + clampf(float(weather.get("rain_amount")), 0.0, 1.0) * 0.6
+		_flood_beam_mat.set_shader_parameter("intensity",
+				(1.35 * _flicker) if light_flood else 0.0)
+		_flood_beam_mat.set_shader_parameter("haze", haze)
 	if _helm_glow != null:
 		_helm_glow.emission_energy_multiplier = 2.2 * _flicker if light_helm else 0.0
 
@@ -2079,19 +2408,63 @@ func _update_lantern(delta: float) -> void:
 			_beacon_mat.emission_energy_multiplier = _beacon.light_energy * 1.6
 
 
+func weather_openness(world_pos: Vector3) -> float:
+	## How much of the weather reaches the ear. 1 is the deck; 0 is a shut
+	## cabin. The doors themselves are the valve — their actual swing, not the
+	## switch — so pulling one closed is something you hear happen.
+	if not world_pos.is_finite():
+		return 1.0
+	var p: Vector3 = global_transform.affine_inverse() * world_pos
+	var in_cabin := p.y >= 0.55 and p.y < 2.82 \
+			and CABIN_XZ.has_point(Vector2(p.x, p.z))
+	var in_wheel := p.y >= 2.82 and p.y < 5.40 \
+			and absf(p.x) < 1.74 and p.z > -0.32 and p.z < 4.12
+	if not in_cabin and not in_wheel:
+		return 1.0
+	var fwd := 0.0
+	var aft := 0.0
+	var whd := 0.0
+	if _door_fwd != null:
+		fwd = clampf(absf(_door_fwd.rotation.y) / 1.85, 0.0, 1.0)
+	if _door_aft != null:
+		aft = clampf(absf(_door_aft.rotation.y) / 1.85, 0.0, 1.0)
+	if _door_wh != null:
+		whd = clampf(absf(_door_wh.rotation.y) / 2.90, 0.0, 1.0)
+	if in_wheel:
+		# Glass all round. The balcony door is the valve, not the cabin's.
+		var d := Vector2(p.x, p.z - WH_DOOR_Z).length()
+		return lerpf(0.12, lerpf(0.90, 0.30, clampf(d / 3.2, 0.0, 1.0)), whd)
+	# Companionway hatch always leaks a little. An open door is a hole in
+	# the wall: standing in it is almost the deck; the far end of the cabin
+	# still hears it, just less.
+	var o := 0.10
+	if fwd > 0.02:
+		var d := Vector2(p.x, p.z - DOOR_Z0).length()
+		o = maxf(o, lerpf(0.88, 0.26, clampf(d / 3.6, 0.0, 1.0)) * fwd)
+	if aft > 0.02:
+		var d := Vector2(p.x, p.z - DOOR_Z1).length()
+		o = maxf(o, lerpf(0.88, 0.26, clampf(d / 3.6, 0.0, 1.0)) * aft)
+	return o
+
+
 func heat_at(local_pos: Vector3) -> float:
 	## How much of the stove's air this point is sitting in. The fire does not
-	## care about the batteries, and it only reaches rooms that share a volume
-	## with it — the cabin fills, the hatch lets a breath into the wheelhouse,
-	## the deck is just the weather.
-	if local_pos.y >= 0.58 and local_pos.y < 2.78 \
-			and CABIN_XZ.has_point(Vector2(local_pos.x, local_pos.z)):
-		var d := Vector2(local_pos.x - STOVE.x, local_pos.z - STOVE.z).length()
-		return lerpf(0.48, 1.0, clampf(1.0 - d / 3.6, 0.0, 1.0))
-	if local_pos.y >= 2.85 and local_pos.y < 5.35 \
-			and absf(local_pos.x) < 1.72 and local_pos.z > -0.30 and local_pos.z < 4.10:
-		return 0.14
-	return 0.0
+	## care about the batteries. It is the air around the plate — not the
+	## cabin as a room, not the sills, not the hatch. Stand next to it and
+	## you feel it; walk the door or go up and you do not.
+	if local_pos.y < 0.58 or local_pos.y >= 2.78:
+		return 0.0
+	if not CABIN_XZ.has_point(Vector2(local_pos.x, local_pos.z)):
+		return 0.0
+	# Door sills. The fire does not meet you on the way in.
+	if absf(local_pos.x) < 0.74:
+		if absf(local_pos.z - DOOR_Z0) < 0.55 or absf(local_pos.z - DOOR_Z1) < 0.55:
+			return 0.0
+	# Companionway well. The hatch is a hole in the deck, not a flue.
+	if local_pos.x < -0.45 and local_pos.z > 0.90 and local_pos.z < 4.00:
+		return 0.0
+	var d := Vector2(local_pos.x - STOVE.x, local_pos.z - STOVE.z).length()
+	return 1.0 - smoothstep(0.22, 1.35, d)
 
 
 func _update_stove(delta: float) -> void:
@@ -2104,6 +2477,8 @@ func _update_stove(delta: float) -> void:
 				1.0 - exp(-6.0 * delta))
 	if _stove_ember != null:
 		_stove_ember.emission_energy_multiplier = 1.6 + 1.8 * fire
+	if _stove_snd != null and not _stove_snd.playing:
+		_stove_snd.play()
 
 
 func _build_stove_heat() -> void:
@@ -2152,6 +2527,152 @@ func _build_stove_heat() -> void:
 	_stove_heat.draw_pass_1 = q
 	_stove_heat.emitting = true
 	add_child(_stove_heat)
+	_build_stove_sound()
+
+
+func _build_stove_sound() -> void:
+	## The fire lives in the stove, so the crackle does too — 3D, from the
+	## door. Inverse, short: you hear it when you are next to it. The sills
+	## and the hatch do not.
+	var s: AudioStream = load("res://assets/audio/stove.mp3")
+	if s == null:
+		return
+	if s is AudioStreamMP3:
+		(s as AudioStreamMP3).loop = true
+	_stove_snd = AudioStreamPlayer3D.new()
+	_stove_snd.position = Vector3(1.28, 1.02, 4.08)
+	_stove_snd.stream = s
+	_stove_snd.bus = "Master"
+	_stove_snd.unit_size = 0.70
+	_stove_snd.max_distance = 2.15
+	_stove_snd.max_db = 6.0
+	_stove_snd.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	_stove_snd.panning_strength = 0.90
+	add_child(_stove_snd)
+	_stove_snd.play()
+
+
+func _build_cabin_lived(trim: Material, metal: Material) -> void:
+	## The fiddle is there to keep a mug aboard. An empty one is a lie. Same
+	## for the stove-top and the bulkhead at eye height: things a person put
+	## down and will pick up again.
+	var enamel := _mat(Color(0.78, 0.76, 0.70), 0.55)
+	var enamel_rim := _mat(Color(0.16, 0.28, 0.42), 0.6)
+	var brass := _mat(Color(0.42, 0.32, 0.14), 0.38, 0.78)
+	var kettle := _mat(Color(0.22, 0.23, 0.24), 0.42, 0.55)
+	var face := _mat(Color(0.82, 0.78, 0.68), 0.7)
+	face.emission_enabled = true
+	face.emission = Color(0.55, 0.50, 0.38)
+	face.emission_energy_multiplier = 0.12
+
+	# Enamel mug in the fiddle, a little off-centre the way a mug sits after
+	# the boat has moved it.
+	_cyl(0.038, 0.042, 0.085, Vector3(-1.14, 1.385, 0.22), Vector3.ZERO, enamel)
+	_cyl(0.040, 0.044, 0.012, Vector3(-1.14, 1.432, 0.22), Vector3.ZERO, enamel_rim)
+	_cyl(0.028, 0.028, 0.008, Vector3(-1.14, 1.348, 0.22), Vector3.ZERO, enamel)
+	_cyl(0.012, 0.012, 0.055, Vector3(-1.085, 1.385, 0.22), Vector3(0.0, 0.0, 90.0), enamel)
+
+	# Kettle on the stove, clear of the pipe.
+	_cyl(0.085, 0.078, 0.15, Vector3(1.14, 1.295, 4.16), Vector3.ZERO, kettle)
+	_cyl(0.070, 0.018, 0.045, Vector3(1.14, 1.392, 4.16), Vector3.ZERO, kettle)
+	_cyl(0.016, 0.012, 0.09, Vector3(1.22, 1.30, 4.08), Vector3(0.0, 0.0, 58.0), kettle)
+	_cyl(0.010, 0.010, 0.14, Vector3(1.14, 1.40, 4.16), Vector3(0.0, 0.0, 90.0), metal)
+
+	# Aneroid barometer, port forward bulkhead, above the table. Brass, a
+	# cream face, a needle — the weather you can read without opening a panel.
+	_cyl(0.095, 0.095, 0.04, Vector3(-1.48, 1.92, -0.40), Vector3(90.0, 0.0, 0.0), brass)
+	_cyl(0.078, 0.078, 0.012, Vector3(-1.48, 1.92, -0.378), Vector3(90.0, 0.0, 0.0), face)
+	_box(Vector3(0.008, 0.055, 0.006), Vector3(-1.48, 1.942, -0.370),
+			Vector3(0.0, 0.0, -28.0), brass)
+	_cyl(0.012, 0.012, 0.03, Vector3(-1.48, 1.70, -0.40), Vector3(90.0, 0.0, 0.0), brass)
+
+
+func _build_deck_gear(trim: Material, metal: Material) -> void:
+	## Nothing on the walk. Cleats and chocks sit on the cap, fenders hang
+	## outboard of the rubbing strake, the ring and the boathook live on the
+	## house. You do not trip over a place this boat could make fast.
+	var rubber := _mat(Color(0.07, 0.07, 0.07), 0.96)
+	var hemp := _mat(Color(0.42, 0.34, 0.20), 0.9)
+	var ring_or := _mat(Color(0.72, 0.18, 0.10), 0.7)
+	var ring_wh := _mat(Color(0.82, 0.80, 0.74), 0.75)
+	var wood := trim
+
+	# Horn cleats: bow, just forward of the house, and the quarters.
+	for sx in [-1.0, 1.0]:
+		_cleat(Vector3(sx * 1.88, 1.16, -3.62), metal)
+		_cleat(Vector3(sx * 1.92, 1.16, -0.72), metal)
+		_cleat(Vector3(sx * 1.72, 1.16, 5.28), metal)
+		# Closed fairleads on the stem and the transom corners.
+		_fairlead(Vector3(sx * 0.62, 1.16, -3.98), metal)
+		_fairlead(Vector3(sx * 1.55, 1.16, 5.52), metal)
+
+	# Fenders: three a side, hanging outboard from the rail. Bow, waist,
+	# quarter — the set you keep in the water when you might come alongside.
+	for sx in [-1.0, 1.0]:
+		for z in [-3.42, -0.88, 5.18]:
+			_fender(Vector3(sx * 2.14, 0.58, z), rubber, hemp)
+
+	# Lifebuoy on the starboard house, between the after window and the
+	# corner — not in the walk, not over a pane.
+	_lifebuoy(Vector3(1.88, 1.62, 3.28), ring_or, ring_wh, hemp)
+
+	# Boathook lashed along the port house, under the windows.
+	_cyl(0.016, 0.016, 2.15, Vector3(-1.88, 1.38, 1.55), Vector3(90.0, 0.0, 0.0), wood)
+	_cyl(0.014, 0.010, 0.16, Vector3(-1.88, 1.38, 0.40), Vector3(90.0, 0.0, 0.0), metal)
+	_cyl(0.010, 0.010, 0.12, Vector3(-1.88, 1.30, 0.34), Vector3(0.0, 0.0, 0.0), metal)
+	_cyl(0.008, 0.008, 0.10, Vector3(-1.88, 1.38, 2.05), Vector3(0.0, 0.0, 90.0), hemp)
+	_cyl(0.008, 0.008, 0.10, Vector3(-1.88, 1.38, 1.05), Vector3(0.0, 0.0, 90.0), hemp)
+
+
+func _cleat(pos: Vector3, metal: Material) -> void:
+	_box(Vector3(0.08, 0.035, 0.20), pos, Vector3.ZERO, metal)
+	_cyl(0.022, 0.018, 0.22, pos + Vector3(0.0, 0.04, 0.0), Vector3(90.0, 0.0, 0.0), metal)
+	_cyl(0.016, 0.016, 0.05, pos + Vector3(0.0, 0.04, 0.10), Vector3.ZERO, metal)
+	_cyl(0.016, 0.016, 0.05, pos + Vector3(0.0, 0.04, -0.10), Vector3.ZERO, metal)
+
+
+func _fairlead(pos: Vector3, metal: Material) -> void:
+	_box(Vector3(0.10, 0.03, 0.12), pos, Vector3.ZERO, metal)
+	_cyl(0.016, 0.016, 0.10, pos + Vector3(-0.04, 0.06, 0.0), Vector3.ZERO, metal)
+	_cyl(0.016, 0.016, 0.10, pos + Vector3(0.04, 0.06, 0.0), Vector3.ZERO, metal)
+	_cyl(0.012, 0.012, 0.09, pos + Vector3(0.0, 0.10, 0.0), Vector3(0.0, 0.0, 90.0), metal)
+
+
+func _fender(pos: Vector3, rubber: Material, hemp: Material) -> void:
+	var fender_top := pos.y + 0.26
+	var rail_y := 1.70
+	_cyl(0.008, 0.008, rail_y - fender_top,
+			Vector3(pos.x, (rail_y + fender_top) * 0.5, pos.z), Vector3.ZERO, hemp)
+	_cyl(0.095, 0.10, 0.52, pos, Vector3.ZERO, rubber)
+	_cyl(0.07, 0.07, 0.04, pos + Vector3(0.0, 0.26, 0.0), Vector3.ZERO, rubber)
+	_cyl(0.07, 0.07, 0.04, pos + Vector3(0.0, -0.26, 0.0), Vector3.ZERO, rubber)
+
+
+func _lifebuoy(pos: Vector3, orange: Material, white: Material, hemp: Material) -> void:
+	var mi := MeshInstance3D.new()
+	var t := TorusMesh.new()
+	t.inner_radius = 0.12
+	t.outer_radius = 0.22
+	t.rings = 14
+	t.ring_segments = 20
+	t.material = orange
+	mi.mesh = t
+	mi.position = pos
+	mi.rotation_degrees = Vector3(0.0, 0.0, 90.0)
+	add_child(mi)
+	var stripe := MeshInstance3D.new()
+	var t2 := TorusMesh.new()
+	t2.inner_radius = 0.155
+	t2.outer_radius = 0.185
+	t2.rings = 10
+	t2.ring_segments = 16
+	t2.material = white
+	stripe.mesh = t2
+	stripe.position = pos
+	stripe.rotation_degrees = Vector3(0.0, 0.0, 90.0)
+	add_child(stripe)
+	_cyl(0.008, 0.008, 0.28, pos + Vector3(-0.04, 0.22, 0.0), Vector3.ZERO, hemp)
+	_box(Vector3(0.04, 0.03, 0.04), pos + Vector3(-0.04, 0.36, 0.0), Vector3.ZERO, hemp)
 
 
 func _physics_process(delta: float) -> void:
