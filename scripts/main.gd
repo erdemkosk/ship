@@ -73,6 +73,12 @@ func _ready() -> void:
 			$Boat.linear_velocity = -$Boat.global_basis.z * 5.5
 		elif arg == "--fps":
 			$CameraRig.set_mode(1)
+		elif arg.begins_with("--pitch="):
+			rig.set("pitch", float(arg.get_slice("=", 1)))
+		elif arg == "--probe-hands":
+			_probe_hands(rig, boat)
+		elif arg == "--probe-helm":
+			_probe_helm(boat)
 		elif arg == "--debug-buoy":
 			_debug_buoyancy($Boat, $Ocean)
 		elif arg == "--lighthouse":
@@ -157,6 +163,53 @@ func _spawn_flotsam(ocean: Node3D) -> void:
 		debris.spawn_yaw = rng.randf() * TAU
 		add_child(debris)
 		debris.global_position = pos
+
+
+func _probe_hands(rig: Node3D, boat: RigidBody3D) -> void:
+	await get_tree().create_timer(2.5).timeout
+	var arms: Node = rig.get("_arms")
+	var hands: Node = arms.get("rig")
+	var to_local := boat.global_transform.affine_inverse()
+	print("ELLER (bot uzayi)")
+	print("  talep: L=%s  R=%s" % [arms.get("_claim")["L"], arms.get("_claim")["R"]])
+	for side in ["L", "R"]:
+		var wrist: Vector3 = to_local * hands.call("wrist_global", side).origin
+		var sh: Vector3 = to_local * hands.call("shoulder_global", side)
+		print("  %s omuz=(%.2f,%.2f,%.2f) bilek=(%.2f,%.2f,%.2f) uzanma=%.2f m" % [
+			side, sh.x, sh.y, sh.z, wrist.x, wrist.y, wrist.z, sh.distance_to(wrist)])
+	var g: Variant = arms.get("_grips")
+	for k: String in g:
+		var n: Node3D = g[k]
+		var p: Vector3 = to_local * n.global_position
+		print("  tutus %-16s (%.2f,%.2f,%.2f)" % [k, p.x, p.y, p.z])
+	print("  egilme=%.3f m" % Vector3(hands.call("lean")).length())
+	get_tree().quit()
+
+
+func _probe_helm(boat: RigidBody3D) -> void:
+	var stand: Vector3 = boat.HELM_STAND
+	var eye: Vector3 = stand + Vector3(0.0, 1.60, 0.0)
+	var ls: Vector3 = eye + Vector3(-0.11, -0.22, 0.10)
+	var rs: Vector3 = eye + Vector3(0.11, -0.22, 0.10)
+	var wheel: Node3D = boat.helm_wheel()
+	var thr: Node3D = boat.throttle_lever()
+	var to_local := boat.global_transform.affine_inverse()
+	var wc: Vector3 = to_local * wheel.global_position
+	var knob: Vector3 = to_local * (thr.global_transform * Vector3(0.0, 0.31, 0.0))
+	var rim_near: float = 1e9
+	for i in 12:
+		var a := float(i) / 12.0 * TAU
+		var p: Vector3 = to_local * (wheel.global_transform
+				* (Vector3(cos(a), sin(a), 0.0) * 0.29))
+		rim_near = minf(rim_near, ls.distance_to(p))
+	print("ERGONOMI (bot uzayi, kol erisimi 0.63 m, egilme +0.26 m => 0.89 m)")
+	print("  durus=%.2f,%.2f,%.2f  goz=%.2f,%.2f,%.2f" % [
+		stand.x, stand.y, stand.z, eye.x, eye.y, eye.z])
+	print("  dumen merkezi %.2f,%.2f,%.2f -> sol omuz %.2f m (jant en yakin %.2f m)" % [
+		wc.x, wc.y, wc.z, ls.distance_to(wc), rim_near])
+	print("  gaz topuzu    %.2f,%.2f,%.2f -> sag omuz %.2f m" % [
+		knob.x, knob.y, knob.z, rs.distance_to(knob)])
+	get_tree().quit()
 
 
 func _debug_buoyancy(boat: RigidBody3D, ocean: Node3D) -> void:

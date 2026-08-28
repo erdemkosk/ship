@@ -37,8 +37,6 @@ uniform float base_roughness : hint_range(0.0, 1.0) = 0.045;
 uniform float mss : hint_range(0.0, 0.3) = 0.05;
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.55;
 uniform float foam_amount : hint_range(0.0, 2.0) = 0.85;
-uniform float foam_threshold : hint_range(0.0, 1.2) = 0.62;
-uniform float foam_lag : hint_range(0.0, 4.0) = 1.35;
 uniform float sss_strength : hint_range(0.0, 3.0) = 1.0;
 // Irradiance of the whole sky hemisphere. A rough surface reflects the average
 // of the dome, not the one patch a mirror would pick.
@@ -47,7 +45,6 @@ uniform vec2 wind_dir = vec2(1.0, 0.0);
 uniform vec2 surface_drift = vec2(0.0);   // Stokes + tidal drift — foam rides this
 uniform vec2 current_vec = vec2(0.0);    // tidal stream at the boat, m/s
 uniform float rain_amount : hint_range(0.0, 1.0) = 0.0;
-uniform sampler2D detail_normal : filter_linear_mipmap, repeat_enable;
 uniform sampler2D foam_noise : filter_linear_mipmap, repeat_enable;
 uniform sampler2D height_map : filter_linear, repeat_enable;
 // filter_linear, NOT mipmap: asking for mipmaps here makes the renderer build a
@@ -104,6 +101,14 @@ uniform float lh_on = 0.0;
 
 varying vec3 v_world_pos;
 varying vec3 v_normal;
+// Rest (pre-displacement) xz. This is what indexes the wave field: the
+// displacement map is a function of where the water STARTED, not of where the
+// pinch moved it to. Interpolating it across the quad is what lets the fragment
+// stage re-fetch the gradient per pixel.
+varying vec2 v_rest;
+// Slope from everything that is not the FFT field -- wake, floaters, shore chop.
+// It has to reach the fragment stage because the base normal is rebuilt there.
+varying vec2 v_slope;
 varying float v_crest;
 varying float v_shore;
 varying float v_floor_h;
@@ -164,7 +169,9 @@ void vertex() {
 	float shore = 1.0 - smoothstep(0.05, 5.8, -floor_h);
 	shore *= 1.0 - smoothstep(0.12, 2.4, floor_h);
 
-	WaveSample w = sample_waves(p, wave_time, num_waves);
+	// Distance drives which cascades may move this vertex — see cascade_fade.
+	float cam_dist = distance(p, CAMERA_POSITION_WORLD.xz);
+	WaveSample w = sample_waves(p, cam_dist);
 	vec3 disp = w.disp;
 	vec2 extra_slope = vec2(0.0);
 
@@ -278,30 +285,24 @@ void vertex() {
 
 	VERTEX += disp;
 	// Earth curvature — drops the surface away with the square of the distance.
-	float cd = distance(p, CAMERA_POSITION_WORLD.xz);
-	VERTEX.y -= cd * cd * curvature_k;
+	VERTEX.y -= cam_dist * cam_dist * curvature_k;
 
 	vec3 n = normalize(w.normal + vec3(-extra_slope.x, 0.0, -extra_slope.y));
 	NORMAL = n;
 	v_normal = n;
+	v_rest = p;
+	v_slope = extra_slope;
 	v_world_pos = VERTEX;
 	v_crest = clamp(disp.y / max(max_amp, 0.001), -1.0, 1.0);
 	v_shore = shore;
 	v_floor_h = floor_h;
 
-	// Whitecaps live where the surface folds onto itself (Jacobian goes
-	// negative), not on top of every crest. The lagged sample leaves a trail
-	// behind a breaking wave instead of switching foam on and off instantly.
-	float j_now = w.jacobian;
-	// The lagged sample only decides where foam TRAILS, so the big components
-	// are enough — and this is a second 40-iteration loop on every vertex.
-	// (scripts/ocean.gd sorts the wave set by amplitude, so a prefix is the
-	// energetic half.)
-	float j_old = wave_jacobian(p, wave_time - foam_lag, min(num_waves, 18));
-	v_fold = max(foam_threshold - j_now, (foam_threshold - j_old) * 0.55);
-	// A wave breaks when its height passes ~0.78 of the water depth.
-	float breaking = clamp(2.0 * abs(disp.y) / depth_here - 0.55, 0.0, 1.0);
-	v_fold = max(v_fold, breaking * 0.6);
+	// Whitecaps come out of the FFT unpack pass, which accumulates foam where the
+	// surface folds and decays it exponentially everywhere else — a real
+	// persistent foam field, sampled per pixel below. What stays here is the
+	// shallow-water term the field cannot know about: a wave breaks when its
+	// height passes ~0.78 of the depth under it.
+	v_fold = clamp(2.0 * abs(disp.y) / depth_here - 0.55, 0.0, 1.0) * 0.6;
 }
 
 // Linear view-space depth of whatever opaque geometry sits behind this pixel.
@@ -333,41 +334,36 @@ void fragment() {
 	float dist = length(CAMERA_POSITION_WORLD - v_world_pos);
 
 	// --- surface normal ------------------------------------------------------
-	// Capillary chop. Past a few hundred metres a single wavelet is far smaller
-	// than a pixel, so we stop trying to draw it and hand its slope variance to
-	// ROUGHNESS instead. Fading it to zero (the old behaviour) turned the far
-	// sea into a mirror-flat plastic sheet.
+	// The wave normal comes entirely from the FFT cascades now. There used to be
+	// four tiled detail-normal fetches layered on top, at world scales that
+	// repeated every 43, 11, 4.8 and 1.3 metres. The FFT field reaches 8 cm on
+	// its own, so those layers were adding a visible repeat to detail it already
+	// had — and costing three to four texture reads per pixel of sea to do it.
+	//
+	// What survives here is rain: ring waves stippled onto the surface, and the
+	// way a downpour flattens the small chop into a matte sheet.
 	float detail_fade = clamp(1.0 - dist / 260.0, 0.0, 1.0);
 	detail_fade *= detail_fade;
 	float near_fade = clamp(1.0 - dist / 32.0, 0.0, 1.0);
 	vec2 pert = vec2(0.0);
-	// Past ~260 m detail_fade is zero and the horizon plate sets normal_strength
-	// to zero outright — but the texture fetches still happened, three of them,
-	// for every pixel of sea between here and the horizon.
-	float det_amt = normal_strength * detail_fade;
-	if (det_amt > 0.002) {
-		vec2 uv1 = v_world_pos.xz * 0.09 + wind_dir * wave_time * 0.055;
-		vec2 uv2 = v_world_pos.xz * 0.023 - wind_dir * wave_time * 0.022;
-		vec2 uv3 = v_world_pos.xz * 0.21 + wind_dir.yx * wave_time * 0.08;
-		vec3 n1 = texture(detail_normal, uv1).rgb * 2.0 - 1.0;
-		vec3 n2 = texture(detail_normal, uv2).rgb * 2.0 - 1.0;
-		vec3 n3 = texture(detail_normal, uv3).rgb * 2.0 - 1.0;
-		pert = (n1.xy * 1.0 + n2.xy * 0.55 + n3.xy * 0.42) * det_amt;
-	}
-	// The centimetre-scale layer only exists within a few metres of the eye, so
-	// only pay for the fetch there.
-	if (near_fade > 0.02 && det_amt > 0.002) {
-		vec3 n4 = texture(detail_normal, v_world_pos.xz * 0.78 - wind_dir * wave_time * 0.15).rgb
-				* 2.0 - 1.0;
-		pert += n4.xy * 0.5 * near_fade * det_amt;
-	}
-	// Heavy rain visibly flattens the small chop — the sea goes matte and dull
-	// under a downpour — and stipples the surface with ring waves.
-	pert *= 1.0 - rain_amount * 0.4;
 	if (rain_amount > 0.01 && near_fade > 0.02) {
 		pert += rain_ripple(v_world_pos.xz, wave_time) * rain_amount * 0.30 * near_fade;
 	}
-	vec3 wn = normalize(v_normal + vec3(pert.x, 0.0, pert.y));
+
+	// Base wave normal, rebuilt per pixel rather than interpolated from the
+	// vertex. One sample per quad is fine at 0.5 m quads and a faceted mess at
+	// 9 m ones — and this is also where the cascades too short for this ring's
+	// geometry come back in, as slope rather than as crawling vertices.
+	vec2 wgrad;
+	float wfoam;
+	wave_gradient(v_rest, dist, wgrad, wfoam);
+	// Heavy rain visibly flattens the small chop — the sea goes matte under a
+	// downpour. It used to damp the detail-normal layers; now it damps the real
+	// gradient, which is the same statement about the same waves.
+	wgrad *= (1.0 - rain_amount * 0.4) * normal_strength;
+	vec3 base_n = normalize(vec3(-wgrad.x - v_slope.x, 1.0, -wgrad.y - v_slope.y));
+	float fold = max(wfoam, v_fold);
+	vec3 wn = normalize(base_n + vec3(pert.x, 0.0, pert.y));
 
 	vec3 view_dir = normalize(CAMERA_POSITION_WORLD - v_world_pos);
 	vec3 view_n = (VIEW_MATRIX * vec4(wn, 0.0)).xyz;
@@ -379,7 +375,7 @@ void fragment() {
 	// patch of foam keeps moving after the wave that made it has gone.
 	// Three noise fetches, and on open water there is usually nothing for them
 	// to break up. One cheap test on the varyings decides whether to pay.
-	float foam_src = max(max(v_fold, v_shore), max(max(v_wake, v_disturb), v_rip));
+	float foam_src = max(max(fold, v_shore), max(max(v_wake, v_disturb), v_rip));
 	float foam = 0.0;
 	float shore_foam = 0.0;
 	float foam_hi = 0.0;
@@ -399,7 +395,7 @@ void fragment() {
 				* (0.20 + 1.15 * foam_hi);
 		// Foam sits on the shoulder and crest of a wave, never in the trough.
 		float crest_gate = smoothstep(-0.30, 0.30, v_crest);
-		foam = smoothstep(0.04, 0.62, v_fold) * foam_tex * foam_amount * crest_gate;
+		foam = smoothstep(0.04, 0.62, fold) * foam_tex * foam_amount * crest_gate;
 		foam = clamp(foam, 0.0, 1.0);
 		foam *= foam * (3.0 - 2.0 * foam);  // sharpen: churned edges, not airbrush
 		float shore_pulse = 0.55 + 0.45 * sin(wave_time * 2.4 + v_floor_h * 9.0 + foam_n * 5.0);

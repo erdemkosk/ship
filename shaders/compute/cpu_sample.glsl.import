@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://cholm3fnqbi6b"
+path="res://.godot/imported/cpu_sample.glsl-30a8a071af967aa8abdc3dfa7af0cc59.res"
+
+[deps]
+
+source_file="res://shaders/compute/cpu_sample.glsl"
+dest_files=["res://.godot/imported/cpu_sample.glsl-30a8a071af967aa8abdc3dfa7af0cc59.res"]
+
+[params]
+

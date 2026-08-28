@@ -1,20 +1,46 @@
 extends Node3D
-## Gerstner wave ocean driven by a Pierson-Moskowitz spectrum. The exact same
-## wave set runs in the vertex shader (GPU) and in _displace() (CPU) so the
-## boat's buoyancy matches what you see.
+## FFT wave ocean. A TMA/JONSWAP spectrum is inverse-transformed on the GPU
+## every frame into a stack of displacement/normal cascades (scripts/wave/), and
+## the same texels are read back coarsely so CPU buoyancy floats the boat on the
+## wave you can see.
 ##
-## The spectrum is what makes it read as a sea rather than as a few sine waves:
-## energy is spread over ~40 components from swell-length down to half a metre,
-## with directional spread widening at short wavelengths (short-crested chop on
-## top of long-crested swell). Whatever chop is too small to draw at distance is
-## handed to the shader as `mss` (mean square slope) and comes back as
-## roughness — that's the sun glitter path.
-
-const MAX_WAVES := 48
-const NUM_SWELL := 4
-const NUM_WIND := 36
-const NUM_WAVES := NUM_SWELL + NUM_WIND
+## This replaced a 40-component analytic Gerstner sum. Forty components sounds
+## like a lot and is not: the directional spread was one random angle per
+## component, so the sea had forty crest directions instead of a continuum, and
+## everything below half a metre was a tiled normal map that repeated every 1.3 m
+## under the bow. An FFT cascade carries map_size^2 components per band.
+##
+## Cascades exist because one tile cannot hold an ocean. A tile long enough for
+## 300 m swell has metre-wide texels; a tile fine enough for ripples repeats
+## every few metres. Each cascade owns one octave band (assigned in
+## WaveGenerator._assign_bands) and gets a tile sized for it. The lengths are
+## deliberately not powers of two of each other — commensurate tiles line their
+## repeats up and print a grid on the water.
+const CASCADE_TILES := [503.0, 127.0, 31.0, 7.3]
+## Displacement/normal weights per cascade. The band limit already prevents
+## double counting; these are art direction on top of it.
+const CASCADE_DISP := [1.0, 1.0, 0.9, 0.55]
+const CASCADE_NORM := [1.0, 1.0, 1.0, 0.85]
+## FFT resolution per cascade. 256 is the knee: 512 quadruples the FFT buffer for
+## detail that lands below a pixel at any sane camera height.
+const MAP_SIZE := 256
 const G := 9.81
+
+## Seas do not answer the wind the instant it changes. A wind sea takes tens of
+## minutes to build to a new wind, and the swell it leaves behind outlives it by
+## hours — which is why a real surface almost never has sea and swell running
+## from the same quarter. Compressed to something you can watch: the wind sea
+## follows the slider on a ~25 s clock, the swell rises over two minutes and
+## takes six to die.
+const SEA_TAU := 25.0
+const SWELL_TAU_UP := 120.0
+const SWELL_TAU_DOWN := 380.0
+## How much of a developed wind sea survives as swell once the wind drops.
+const SWELL_FRACTION := 0.45
+## The swell keeps running from the quarter the wind came from and turns only
+## grudgingly. A veering wind therefore builds a cross sea, on its own, instead
+## of the old fixed 58-degree offset.
+const SWELL_TURN_TAU := 300.0
 ## Fully developed seas are brutal (Hs ~7 m at 18 m/s). Limited fetch keeps the
 ## presets sailable; the wave-height slider multiplies on top of this.
 const SEA_DEVELOPMENT := 0.55
@@ -76,22 +102,34 @@ var _wide: MeshInstance3D
 var _far: MeshInstance3D
 
 var _far_y := -1.0
-var _dirs: Array[Vector2] = []
-var _amps := PackedFloat32Array()
-var _ks := PackedFloat32Array()
-var _omegas := PackedFloat32Array()
-# Flattened tables for the CPU evaluator. Buoyancy runs this loop thousands of
-# times per frame in GDScript, so every array lookup and multiply that can be
-# hoisted out of it, is.
-var _kx := PackedFloat32Array()    # k * dir.x
-var _kz := PackedFloat32Array()    # k * dir.y
-var _om := PackedFloat32Array()    # omega
-var _sax := PackedFloat32Array()   # steepness * dir.x * amp
-var _saz := PackedFloat32Array()   # steepness * dir.y * amp
-var _ka := PackedFloat32Array()    # k * amp
-var _kadx := PackedFloat32Array()  # k * amp * dir.x
-var _kadz := PackedFloat32Array()  # k * amp * dir.y
-var _cpu_n := 0                    # components the CPU bothers with
+
+## GPU wave field and its CPU mirror.
+var _wave_gen: WaveGenerator
+var _cascades: Array[WaveCascade] = []
+## Per-cascade 1/tile_length, hoisted: buoyancy hits this thousands of times a
+## frame and a property lookup per cascade per probe is not free in GDScript.
+var _tile_inv := PackedFloat32Array()
+var _disp_w := PackedFloat32Array()
+var _norm_w := PackedFloat32Array()
+## Previous readback, kept only so surface_velocity() can finite-difference the
+## field in time. Assignment is a reference swap, not a copy.
+var _cpu_prev := PackedFloat32Array()
+var _cpu_last := PackedFloat32Array()
+## Aged sea state. The public wind_speed / wave_height are the TARGET the UI
+## asks for; these are what the water has actually got round to being.
+var _u_sea := 0.0
+var _u_swell := 0.0
+var _hs_swell := 0.0
+var _hs_scale := 1.0
+var _swell_dir := 0.0
+var _sea_primed := false
+## Last readback frame this node has consumed. Tracked ACROSS frames: the
+## readback callback fires whenever the GPU is done, not inside update(), so
+## comparing before/after one update() call sees a change almost never.
+var _cpu_seen := -1
+var _last_state := Vector4.ZERO
+var _cpu_prev_t := 0.0
+var _cpu_dt := 0.0
 var _shoal_key := Vector2i(2147483647, 0)
 var _shoal_val := 1.0
 var _cur_noise: FastNoiseLite
@@ -121,10 +159,10 @@ func _ready() -> void:
 	_mat_close = ShaderMaterial.new()
 	_mat_close.shader = shader
 
-	var normal_tex := _bake_detail_normal(512, 4.2)
 	var foam_tex := _bake_foam_noise(512)
-	_mat_close.set_shader_parameter("detail_normal", normal_tex)
-	_mat_close.set_shader_parameter("normal_strength", 0.72)
+	# Global scale on the FFT gradient. 1.0 = the slope the spectrum actually
+	# implies; the horizon plate gets 0 and hands all of it to roughness.
+	_mat_close.set_shader_parameter("normal_strength", 1.0)
 	_mat_close.set_shader_parameter("foam_noise", foam_tex)
 
 	_mat_mid = _mat_close.duplicate()
@@ -194,78 +232,87 @@ func wind_vector() -> Vector3:
 
 
 func rebuild_waves() -> void:
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 20260813
+	## Called whenever the UI moves a slider. It sets the TARGET; the water gets
+	## there on its own clock in _age_sea(), except on the very first call, where
+	## snapping is right — nobody wants to watch the sea build for two minutes
+	## before the game starts.
+	if _cascades.is_empty():
+		for i in CASCADE_TILES.size():
+			var c := WaveCascade.new()
+			c.tile_length = CASCADE_TILES[i]
+			c.displacement_scale = CASCADE_DISP[i]
+			c.normal_scale = CASCADE_NORM[i]
+			_cascades.append(c)
+		_tile_inv.resize(_cascades.size())
+		_disp_w.resize(_cascades.size())
+		_norm_w.resize(_cascades.size())
+		for i in _cascades.size():
+			_tile_inv[i] = 1.0 / _cascades[i].tile_length
+			_disp_w[i] = _cascades[i].displacement_scale
+			_norm_w[i] = _cascades[i].normal_scale
+		_wave_gen = WaveGenerator.new()
+		add_child(_wave_gen)
+		_wave_gen.configure(MAP_SIZE, _cascades)
 
-	_dirs.clear()
-	_amps = PackedFloat32Array()
-	_ks = PackedFloat32Array()
-	_omegas = PackedFloat32Array()
+	if not _sea_primed:
+		_sea_primed = true
+		_u_sea = maxf(wind_speed, 0.8)
+		_u_swell = _u_sea
+		_hs_scale = wave_height
+		_swell_dir = wind_direction_deg
+		_hs_swell = SWELL_FRACTION * _wind_sea_height()
+	_apply_sea_state()
 
-	var u := maxf(wind_speed, 0.8)
-	var wind_rad := deg_to_rad(wind_direction_deg)
-	# Pierson-Moskowitz peak frequency for a fully developed sea at this wind.
-	var omega_p := 0.855 * G / u
-	var omega_min := omega_p * 0.62
-	var omega_max := sqrt(G * TAU / 0.55)  # ~0.55 m shortest wavelength we draw
-	var span := log(omega_max / omega_min)
 
-	# --- wind sea: PM spectrum, log-spaced, spread widening with frequency ---
-	for i in NUM_WIND:
-		var t := (float(i) + 0.5) / float(NUM_WIND)
-		var w := omega_min * exp(span * t)
-		var dw := w * span / float(NUM_WIND)
-		var s := 8.1e-3 * G * G / pow(w, 5.0) * exp(-1.25 * pow(omega_p / w, 4.0))
-		var a := sqrt(maxf(2.0 * s * dw, 0.0))
-		# Long components stay long-crested; capillary chop scatters wide.
-		var spread := lerpf(0.22, 1.25, t)
-		var ang := wind_rad + rng.randf_range(-spread, spread)
-		_dirs.append(Vector2(cos(ang), sin(ang)))
-		_amps.append(a)
-		_ks.append(w * w / G)
-		_omegas.append(w)
+func _wind_sea_height() -> float:
+	## Significant height of the wind sea at the wind it has aged to.
+	## Fully developed seas at 18 m/s are Hs ~7 m and unsailable; the 0.55 is a
+	## limited-fetch assumption that keeps the presets survivable.
+	return clampf(0.55 * 0.21 * _u_sea * _u_sea / G, 0.02, 20.0) * _hs_scale
 
-	# --- swell: older, longer, from a different quarter than today's wind ----
-	# A real sea almost never has swell and wind sea aligned; that mismatch is
-	# what makes the surface look like it has history.
-	var swell_rad := wind_rad + deg_to_rad(58.0)
-	var swell_hs := 0.45
-	for i in NUM_SWELL:
-		var t := float(i) / float(maxi(NUM_SWELL - 1, 1))
-		var w: float = omega_p * lerpf(0.36, 0.58, t)
-		var ang := swell_rad + rng.randf_range(-0.13, 0.13)
-		_dirs.append(Vector2(cos(ang), sin(ang)))
-		_amps.append(swell_hs * lerpf(1.0, 0.45, t))
-		_ks.append(w * w / G)
-		_omegas.append(w)
 
-	# Normalise to a real significant wave height, so the slider is a physical
-	# multiplier rather than an arbitrary gain.
-	var m0 := 0.0
-	for i in NUM_WAVES:
-		m0 += _amps[i] * _amps[i] * 0.5
-	var hs_now := 4.0 * sqrt(maxf(m0, 1e-9))
-	var hs_target := clampf(SEA_DEVELOPMENT * 0.21 * u * u / G, 0.02, 20.0) * wave_height
-	var amp_scale := hs_target / maxf(hs_now, 1e-6)
-	for i in NUM_WAVES:
-		_amps[i] *= amp_scale
-	sig_height = hs_target
+func _age_sea(delta: float) -> void:
+	if not _sea_primed or _wave_gen == null:
+		return
+	var k_sea := 1.0 - exp(-delta / SEA_TAU)
+	_u_sea += (maxf(wind_speed, 0.8) - _u_sea) * k_sea
+	_hs_scale += (wave_height - _hs_scale) * k_sea
 
-	# Keep total steepness below the self-intersection threshold at extreme
-	# slider combos, otherwise crests fold into loops.
-	var total := 0.0
-	for i in NUM_WAVES:
-		total += _ks[i] * _amps[i]
-	total *= maxf(steepness, 0.001)
-	if total > 1.45:
-		var s := 1.45 / total
-		for i in NUM_WAVES:
-			_amps[i] *= s
-		sig_height *= s
+	var hs_wind := _wind_sea_height()
+	var swell_want := SWELL_FRACTION * hs_wind
+	# Asymmetric: swell builds slowly and dies far more slowly still. That
+	# asymmetry IS the effect — drop the wind and the sea flattens under a swell
+	# that keeps rolling through for minutes.
+	var tau: float = SWELL_TAU_UP if swell_want > _hs_swell else SWELL_TAU_DOWN
+	_hs_swell += (swell_want - _hs_swell) * (1.0 - exp(-delta / tau))
+	_u_swell += (maxf(wind_speed, 0.8) - _u_swell) * (1.0 - exp(-delta / SWELL_TAU_UP))
 
-	# Crest reference for the shader. With 40 components the sum of amplitudes
-	# wildly overestimates a real crest; Rayleigh statistics put the tallest
-	# crest in a short record at roughly Hs * 0.9.
+	var turn := wrapf(wind_direction_deg - _swell_dir, -180.0, 180.0)
+	_swell_dir = wrapf(_swell_dir + turn * (1.0 - exp(-delta / SWELL_TURN_TAU)), -360.0, 360.0)
+
+	# Regenerating a spectrum is a compute dispatch per cascade; only pay for it
+	# when the state has actually moved.
+	var st := Vector4(hs_wind, _hs_swell, wind_direction_deg, _swell_dir)
+	if (st - _last_state).length() > 0.004 * maxf(st.length(), 1.0):
+		_apply_sea_state()
+
+
+func _apply_sea_state() -> void:
+	var hs_wind := _wind_sea_height()
+	# Wind sea and swell are independent, so their variances add, not their
+	# heights.
+	sig_height = sqrt(hs_wind * hs_wind + _hs_swell * _hs_swell)
+	_last_state = Vector4(hs_wind, _hs_swell, wind_direction_deg, _swell_dir)
+
+	# Short fetch on a steep slider: a steep sea is a young sea, and a young sea
+	# is a short-fetch one. Driving fetch from steepness keeps that honest
+	# instead of scaling amplitudes past the point where crests self-intersect.
+	var fetch := lerpf(24.0, 260.0, clampf(1.2 - steepness, 0.0, 1.0))
+	_wave_gen.set_sea_state(_u_sea, wind_direction_deg, hs_wind, fetch, steepness,
+			_u_swell, _swell_dir, _hs_swell)
+
+	# Rayleigh statistics put the tallest crest in a short record near 0.9*Hs;
+	# the shader normalises v_crest against this.
 	max_amplitude = maxf(sig_height * 0.62, 0.05)
 
 	# The flat horizon plate must stay below the deepest trough, or it pokes
@@ -274,77 +321,74 @@ func rebuild_waves() -> void:
 	if _far != null:
 		_far.position.y = _far_y
 
-	_build_cpu_tables()
 	_push_uniforms()
 
 
-func _build_cpu_tables() -> void:
-	## Sort by amplitude, then let the CPU skip the tail. A component with a
-	## one-centimetre amplitude cannot move a boat, but it costs exactly as much
-	## to evaluate as the swell — and buoyancy evaluates the whole set for every
-	## probe, every physics tick. The GPU still draws all of them.
-	var order: Array[int] = []
-	for i in NUM_WAVES:
-		order.append(i)
-	order.sort_custom(func(a: int, b: int) -> bool: return _amps[a] > _amps[b])
-
-	var d2: Array[Vector2] = []
-	var a2 := PackedFloat32Array()
-	var k2 := PackedFloat32Array()
-	var o2 := PackedFloat32Array()
-	for i in order:
-		d2.append(_dirs[i])
-		a2.append(_amps[i])
-		k2.append(_ks[i])
-		o2.append(_omegas[i])
-	_dirs = d2
-	_amps = a2
-	_ks = k2
-	_omegas = o2
-
-	_kx = PackedFloat32Array(); _kx.resize(NUM_WAVES)
-	_kz = PackedFloat32Array(); _kz.resize(NUM_WAVES)
-	_om = PackedFloat32Array(); _om.resize(NUM_WAVES)
-	_sax = PackedFloat32Array(); _sax.resize(NUM_WAVES)
-	_saz = PackedFloat32Array(); _saz.resize(NUM_WAVES)
-	_ka = PackedFloat32Array(); _ka.resize(NUM_WAVES)
-	_kadx = PackedFloat32Array(); _kadx.resize(NUM_WAVES)
-	_kadz = PackedFloat32Array(); _kadz.resize(NUM_WAVES)
-	var cutoff := maxf(sig_height * 0.004, 0.008)
-	_cpu_n = 0
-	for i in NUM_WAVES:
-		var d: Vector2 = _dirs[i]
-		var a: float = _amps[i]
-		var k: float = _ks[i]
-		_kx[i] = k * d.x
-		_kz[i] = k * d.y
-		_om[i] = _omegas[i]
-		_sax[i] = steepness * d.x * a
-		_saz[i] = steepness * d.y * a
-		_ka[i] = k * a
-		_kadx[i] = k * a * d.x
-		_kadz[i] = k * a * d.y
-		if a >= cutoff:
-			_cpu_n = i + 1
-	_cpu_n = clampi(_cpu_n, 8, NUM_WAVES)
+func _cascade_fade_distances() -> PackedFloat32Array:
+	## Distance at which each cascade stops moving vertices.
+	##
+	## Nyquist is two samples per wavelength and anything under about four
+	## crawls, so a ring of quad-metre quads can only carry waves longer than
+	## ~4*quad. Walk the rings outward and take the last one still fine enough
+	## for this cascade; its outer radius is where the cascade has to fade.
+	##
+	## The band is judged by its geometric CENTRE, not its shortest wave. The
+	## strict reading is wrong in practice: every band has a thin tail below the
+	## limit, so testing the tail threw away whole octaves — at wind 12 the peak
+	## sits at 66 m and the wide ring was refusing the cascade containing it,
+	## which is exactly why the distance went flat. Judging by where the energy
+	## actually sits keeps the octave and leaves only its tail under-sampled.
+	##
+	## Nothing dropped here is lost. The fragment stage fetches every cascade's
+	## gradient regardless of distance, so these waves keep lighting the surface
+	## and keep feeding foam — they just stop displacing geometry that cannot
+	## hold them.
+	var rings := [
+		[CLOSE_QUAD, CLOSE_SIZE * 0.5],
+		[MID_QUAD, MID_SIZE * 0.5],
+		[WIDE_QUAD, WIDE_SIZE * 0.5],
+	]
+	var out := PackedFloat32Array()
+	out.resize(4)
+	out.fill(1.0e9)
+	for i in mini(_cascades.size(), 4):
+		var c: WaveCascade = _cascades[i]
+		if c.k_max <= 0.0 or c.k_min <= 0.0:
+			continue
+		var lam: float = sqrt((TAU / c.k_min) * (TAU / c.k_max))
+		var d := 0.0
+		for r in rings:
+			if 4.0 * float(r[0]) <= lam:
+				d = float(r[1])
+		# Never fade a cascade closer than the finest ring reaches. That ring
+		# exists precisely to carry the finest band, and once a cascade runs down
+		# to centimetres its geometric centre drops below any quad size — which
+		# would fade it out at arm's length and throw away the metre-scale chop
+		# sitting in the same band.
+		out[i] = maxf(d, CLOSE_SIZE * 0.5)
+	return out
 
 
 func _push_uniforms() -> void:
-	var wparams := PackedVector4Array()
-	wparams.resize(MAX_WAVES)
-	var womegas := PackedFloat32Array()
-	womegas.resize(MAX_WAVES)
-	for i in NUM_WAVES:
-		wparams[i] = Vector4(_dirs[i].x, _dirs[i].y, _amps[i], _ks[i])
-		womegas[i] = _omegas[i]
+	if _wave_gen == null or not _wave_gen.is_ready():
+		return
+	# xy = 1/tile_length (world metres -> tile UV), z = displacement weight,
+	# w = normal weight. One vec4 per cascade, same array for every ring.
+	var scales := PackedVector4Array()
+	scales.resize(_cascades.size())
+	for i in _cascades.size():
+		var inv: float = _tile_inv[i]
+		scales[i] = Vector4(inv, inv, _disp_w[i], _norm_w[i])
 
 	var wind_dir := Vector2(cos(deg_to_rad(wind_direction_deg)), sin(deg_to_rad(wind_direction_deg)))
 	# Cox-Munk: the slope variance of a wind-roughened sea. Drives the width of
 	# the sun glitter path and the roughness of the far water.
 	var slope_var := clampf(0.003 + 0.0052 * wind_speed, 0.004, 0.14)
 	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("waves", wparams)
-		mat.set_shader_parameter("omegas", womegas)
+		mat.set_shader_parameter("wave_displacements", _wave_gen.displacement_maps)
+		mat.set_shader_parameter("wave_normals", _wave_gen.normal_maps)
+		mat.set_shader_parameter("num_cascades", _cascades.size())
+		mat.set_shader_parameter("map_scales", scales)
 		mat.set_shader_parameter("choppiness", steepness)
 		mat.set_shader_parameter("max_amp", max_amplitude)
 		mat.set_shader_parameter("wind_dir", wind_dir)
@@ -354,20 +398,19 @@ func _push_uniforms() -> void:
 		mat.set_shader_parameter("mss", slope_var)
 		mat.set_shader_parameter("curvature_k", 1.0 / (2.0 * EARTH_RADIUS))
 		mat.set_shader_parameter("foam_amount", clampf(0.18 + wind_speed * 0.022, 0.0, 1.0))
-		# Steeper seas fold sooner; let whitecaps arrive with the wind.
-		mat.set_shader_parameter("foam_threshold", clampf(0.04 + wind_speed * 0.012, 0.04, 0.42))
-	_mat_close.set_shader_parameter("num_waves", NUM_WAVES)
+	# Where each cascade stops displacing. Pushed to every ring identically —
+	# that is the whole point, see _cascade_fade_distances().
+	var fades := _cascade_fade_distances()
+	for mat: ShaderMaterial in _mats():
+		mat.set_shader_parameter("cascade_fade", fades)
 	_mat_close.set_shader_parameter("hull_mask", 1)
 	_mat_close.set_shader_parameter("far_clip", 0)
-	_mat_mid.set_shader_parameter("num_waves", NUM_WAVES)
 	_mat_mid.set_shader_parameter("hull_mask", 0)
 	_mat_mid.set_shader_parameter("far_clip", 1)
 	_mat_mid.set_shader_parameter("near_radius", _clip_radius(CLOSE_SIZE))
-	_mat_wide.set_shader_parameter("num_waves", NUM_WAVES)
 	_mat_wide.set_shader_parameter("hull_mask", 0)
 	_mat_wide.set_shader_parameter("far_clip", 1)
 	_mat_wide.set_shader_parameter("near_radius", _clip_radius(MID_SIZE))
-	_mat_far.set_shader_parameter("num_waves", 0)
 	_mat_far.set_shader_parameter("hull_mask", 0)
 	_mat_far.set_shader_parameter("far_clip", 1)
 	_mat_far.set_shader_parameter("near_radius", _clip_radius(WIDE_SIZE))
@@ -403,9 +446,34 @@ func _push_seabed_uniforms() -> void:
 		mat.set_shader_parameter("camera_under", 1 if camera_under else 0)
 
 
+func _exit_tree() -> void:
+	## Let go of the wave textures before the generator frees them. The materials
+	## outlive this node during teardown, and a ShaderMaterial still holding a
+	## Texture2DArrayRD whose RID has gone is what "resources still in use at
+	## exit" means.
+	for mat: ShaderMaterial in _mats():
+		if mat != null:
+			mat.set_shader_parameter("wave_displacements", null)
+			mat.set_shader_parameter("wave_normals", null)
+	if _wave_gen != null:
+		_wave_gen.release()
+
+
 func _process(delta: float) -> void:
 	wave_time += delta
 	_tide = sin(TAU * wave_time / TIDE_PERIOD)
+	_age_sea(delta)
+	if _wave_gen != null and _wave_gen.is_ready():
+		_wave_gen.update(delta)
+		if _wave_gen.cpu_frame != _cpu_seen:
+			_cpu_seen = _wave_gen.cpu_frame
+			# A readback landed. Keep the one it replaced so surface_velocity()
+			# has something to difference against — this is a reference swap,
+			# the array itself is never copied.
+			_cpu_dt = wave_time - _cpu_prev_t
+			_cpu_prev_t = wave_time
+			_cpu_prev = _cpu_last
+			_cpu_last = _wave_gen.cpu_data
 	for mat: ShaderMaterial in _mats():
 		mat.set_shader_parameter("wave_time", wave_time)
 
@@ -769,23 +837,6 @@ func _bake_height(seed: int, freq: float, octaves: int, sz: int) -> PackedFloat3
 	return h
 
 
-func _bake_detail_normal(sz: int, bump: float) -> ImageTexture:
-	var h := _bake_height(1, 0.011, 5, sz)
-	var img := Image.create(sz, sz, false, Image.FORMAT_RGBA8)
-	for y in sz:
-		for x in sz:
-			var l := h[y * sz + ((x - 1 + sz) % sz)]
-			var r := h[y * sz + ((x + 1) % sz)]
-			var u := h[((y - 1 + sz) % sz) * sz + x]
-			var d := h[((y + 1) % sz) * sz + x]
-			var nrm := Vector3((l - r) * bump, 2.0, (u - d) * bump).normalized()
-			img.set_pixel(x, y, Color(nrm.x * 0.5 + 0.5, nrm.y * 0.5 + 0.5, nrm.z * 0.5 + 0.5, 1.0))
-	# Mipmaps matter here: the shader reads this at grazing angles out to a few
-	# hundred metres, and an unfiltered normal map aliases into crawling noise.
-	img.generate_mipmaps()
-	return ImageTexture.create_from_image(img)
-
-
 func _bake_foam_noise(sz: int) -> ImageTexture:
 	var h := _bake_height(7, 0.026, 4, sz)
 	var img := Image.create(sz, sz, false, Image.FORMAT_L8)
@@ -1024,24 +1075,26 @@ func _update_spray(delta: float) -> void:
 	_spindrift.global_position = Vector3(centre.x, 0.35, centre.z)
 	_spindrift.emitting = wind_speed > 11.5 and not camera_under
 
-	# Breaking crests: sample the same Jacobian the shader uses and fire a
-	# burst where the surface is actually folding over.
+	# Breaking crests: read the same accumulated foam channel the shader paints
+	# from and fire a burst where the surface is actually breaking. The old code
+	# re-derived a Jacobian on the CPU; the FFT unpack pass has already decided
+	# this and written it down.
 	_breaker_cd -= delta
 	if _breaker_cd > 0.0 or camera_under or wind_speed < 9.0:
 		return
 	_breaker_cd = lerpf(0.55, 0.13, clampf((wind_speed - 9.0) / 22.0, 0.0, 1.0))
-	var best := 1.0
+	var best := 0.0
 	var best_p := Vector2.ZERO
 	var origin := Vector2(centre.x, centre.z)
 	for i in 14:
 		var ang := _scan_rng.randf() * TAU
 		var r := 5.0 + _scan_rng.randf() * 38.0
 		var q := origin + Vector2(cos(ang), sin(ang)) * r
-		var j := jacobian(q)
-		if j < best:
-			best = j
+		var f := foam_at(q)
+		if f > best:
+			best = f
 			best_p = q
-	if best > 0.16:
+	if best < 0.40:
 		return
 	var b := _breakers[_breaker_next]
 	_breaker_next = (_breaker_next + 1) % _breakers.size()
@@ -1051,20 +1104,115 @@ func _update_spray(delta: float) -> void:
 	var pm: ParticleProcessMaterial = b.process_material
 	var a := deg_to_rad(wind_direction_deg)
 	pm.gravity = Vector3(cos(a), 0.0, sin(a)) * wind_speed * 0.35 + Vector3(0, -11.0, 0)
-	b.amount_ratio = clampf(0.35 + (0.16 - best) * 1.6, 0.3, 1.0)
+	b.amount_ratio = clampf(0.3 + best * 0.8, 0.3, 1.0)
 	b.global_position = wpos + Vector3(0.0, 0.1, 0.0)
 	b.restart()
 	b.emitting = true
 
 
+func _cpu_live() -> bool:
+	return _wave_gen != null and _wave_gen.cpu_ready
+
+
+func _sample_disp(data: PackedFloat32Array, p: Vector2) -> Vector3:
+	## Bilinear fetch of the cascade displacement stack, summed.
+	##
+	## This is the CPU half of the contract the shader's wave_displacement()
+	## keeps on the GPU: same texels, same weights, same choppiness. It is
+	## coarser — CPU_GRID against map_size — and that is deliberate, not a
+	## shortcut. The field is periodic over tile_length, so the coarse grid is
+	## the whole field; what it drops is the sub-metre band, and a four-and-a-half
+	## tonne hull cannot feel a two-centimetre ripple.
+	var rx := 0.0
+	var ry := 0.0
+	var rz := 0.0
+	var g := WaveGenerator.CPU_GRID
+	var stride := WaveGenerator.FLOATS_PER_CELL
+	var plane := g * g * stride
+	for c in _cascades.size():
+		var u: float = p.x * _tile_inv[c] * float(g)
+		var v: float = p.y * _tile_inv[c] * float(g)
+		var x0 := floori(u)
+		var z0 := floori(v)
+		var fx := u - float(x0)
+		var fz := v - float(z0)
+		var xa := posmod(x0, g)
+		var xb := posmod(x0 + 1, g)
+		var za := posmod(z0, g)
+		var zb := posmod(z0 + 1, g)
+		var base := c * plane
+		var i00 := base + (za * g + xa) * stride
+		var i10 := base + (za * g + xb) * stride
+		var i01 := base + (zb * g + xa) * stride
+		var i11 := base + (zb * g + xb) * stride
+		var w00 := (1.0 - fx) * (1.0 - fz)
+		var w10 := fx * (1.0 - fz)
+		var w01 := (1.0 - fx) * fz
+		var w11 := fx * fz
+		var dw: float = _disp_w[c]
+		rx += (data[i00] * w00 + data[i10] * w10 + data[i01] * w01 + data[i11] * w11) * dw
+		ry += (data[i00 + 1] * w00 + data[i10 + 1] * w10 + data[i01 + 1] * w01
+				+ data[i11 + 1] * w11) * dw
+		rz += (data[i00 + 2] * w00 + data[i10 + 2] * w10 + data[i01 + 2] * w01
+				+ data[i11 + 2] * w11) * dw
+	return Vector3(rx * steepness, ry, rz * steepness)
+
+
+func _sample_grad(p: Vector2) -> Vector3:
+	## Height gradient (x, z) and accumulated foam (y), bilinear, all cascades.
+	var gx := 0.0
+	var gz := 0.0
+	var fm := 0.0
+	if not _cpu_live():
+		return Vector3.ZERO
+	var data := _wave_gen.cpu_data
+	var g := WaveGenerator.CPU_GRID
+	var stride := WaveGenerator.FLOATS_PER_CELL
+	var plane := g * g * stride
+	for c in _cascades.size():
+		var u: float = p.x * _tile_inv[c] * float(g)
+		var v: float = p.y * _tile_inv[c] * float(g)
+		var x0 := floori(u)
+		var z0 := floori(v)
+		var fx := u - float(x0)
+		var fz := v - float(z0)
+		var xa := posmod(x0, g)
+		var xb := posmod(x0 + 1, g)
+		var za := posmod(z0, g)
+		var zb := posmod(z0 + 1, g)
+		var base := c * plane
+		var i00 := base + (za * g + xa) * stride
+		var i10 := base + (za * g + xb) * stride
+		var i01 := base + (zb * g + xa) * stride
+		var i11 := base + (zb * g + xb) * stride
+		var w00 := (1.0 - fx) * (1.0 - fz)
+		var w10 := fx * (1.0 - fz)
+		var w01 := (1.0 - fx) * fz
+		var w11 := fx * fz
+		var nw: float = _norm_w[c]
+		gx += (data[i00 + 4] * w00 + data[i10 + 4] * w10 + data[i01 + 4] * w01
+				+ data[i11 + 4] * w11) * nw
+		gz += (data[i00 + 5] * w00 + data[i10 + 5] * w10 + data[i01 + 5] * w01
+				+ data[i11 + 5] * w11) * nw
+		fm += data[i00 + 7] * w00 + data[i10 + 7] * w10 + data[i01 + 7] * w01 \
+				+ data[i11 + 7] * w11
+	return Vector3(gx, clampf(fm, 0.0, 1.0), gz)
+
+
 func get_height(world_pos: Vector3) -> float:
-	# Invert the horizontal Gerstner displacement iteratively, then sample height.
+	# Invert the horizontal displacement iteratively, then sample height. The
+	# FFT field pinches horizontally exactly as the Gerstner set did, so the
+	# same fixed-point iteration applies: find the rest point whose displaced
+	# position lands under the query.
 	var xz := Vector2(world_pos.x, world_pos.z)
 	var pt := xz
+	if not _cpu_live():
+		return 0.0
+	var data := _wave_gen.cpu_data
 	for i in 2:
-		var d := _displace(pt)
+		var d := _sample_disp(data, pt)
 		pt = xz - Vector2(d.x, d.z)
-	return _displace(pt).y * shoal_factor(world_pos)
+	return _sample_disp(data, pt).y * shoal_factor(world_pos)
 
 
 func get_normal(world_pos: Vector3, _eps := 0.85) -> Vector3:
@@ -1072,92 +1220,51 @@ func get_normal(world_pos: Vector3, _eps := 0.85) -> Vector3:
 
 
 func rest_xz(world_xz: Vector2) -> Vector2:
-	## Invert Gerstner horizontal displacement so foam can follow a water particle.
+	## Invert the horizontal displacement so foam can follow a water particle.
+	if not _cpu_live():
+		return world_xz
+	var data := _wave_gen.cpu_data
 	var pt := world_xz
 	for i in 2:
-		var d := _displace(pt)
+		var d := _sample_disp(data, pt)
 		pt = world_xz - Vector2(d.x, d.z)
 	return pt
 
 
 func surface_point(xz: Vector2) -> Vector3:
-	## Follows the Gerstner water particle at rest-xz, so foam rides the chop
-	## instead of sliding backward over it.
-	var disp := _displace(xz)
+	## Follows the water particle at rest-xz, so foam rides the chop instead of
+	## sliding backward over it.
+	if not _cpu_live():
+		return Vector3(xz.x, 0.0, xz.y)
+	var disp := _sample_disp(_wave_gen.cpu_data, xz)
 	return Vector3(xz.x + disp.x, disp.y, xz.y + disp.z)
 
 
 func surface_velocity(world_pos: Vector3) -> Vector3:
-	## Orbital velocity of the Gerstner surface at this xz (m/s).
-	var vx := 0.0
-	var vy := 0.0
-	var vz := 0.0
-	var t := wave_time
-	var px := world_pos.x
-	var pz := world_pos.z
-	for i in _cpu_n:
-		var w: float = _om[i]
-		var f: float = _kx[i] * px + _kz[i] * pz - w * t
-		var s := sin(f)
-		vx += _sax[i] * w * s
-		vy -= _amps[i] * w * cos(f)
-		vz += _saz[i] * w * s
-	return Vector3(vx, vy, vz)
+	## Orbital velocity of the surface at this point, m/s.
+	##
+	## The Gerstner version could differentiate its own closed form. An FFT field
+	## has no closed form, so this differences two consecutive readbacks of the
+	## same texels. Same answer, one readback interval late.
+	if not _cpu_live() or _cpu_prev.is_empty() or _cpu_dt <= 1e-4:
+		return Vector3.ZERO
+	var rest := rest_xz(Vector2(world_pos.x, world_pos.z))
+	var now := _sample_disp(_wave_gen.cpu_data, rest)
+	var was := _sample_disp(_cpu_prev, rest)
+	return (now - was) / _cpu_dt
 
 
-func jacobian(rest_p: Vector2) -> float:
-	## Determinant of the horizontal displacement map. Mirrors wave_jacobian()
-	## in wave_common.gdshaderinc: below ~0 the surface folds and breaks.
-	var jxx := 0.0
-	var jzz := 0.0
-	var jxz := 0.0
-	var t := wave_time
-	var px := rest_p.x
-	var pz := rest_p.y
-	var st := steepness
-	for i in _cpu_n:
-		var d: Vector2 = _dirs[i]
-		var q: float = st * _ka[i] * sin(_kx[i] * px + _kz[i] * pz - _om[i] * t)
-		jxx -= q * d.x * d.x
-		jzz -= q * d.y * d.y
-		jxz -= q * d.x * d.y
-	return (1.0 + jxx) * (1.0 + jzz) - jxz * jxz
-
-
-func _displace(p: Vector2) -> Vector3:
-	var rx := 0.0
-	var ry := 0.0
-	var rz := 0.0
-	var t := wave_time
-	var px := p.x
-	var pz := p.y
-	for i in _cpu_n:
-		var f: float = _kx[i] * px + _kz[i] * pz - _om[i] * t
-		var c := cos(f)
-		rx += _sax[i] * c
-		ry += _amps[i] * sin(f)
-		rz += _saz[i] * c
-	return Vector3(rx, ry, rz)
+func foam_at(rest_p: Vector2) -> float:
+	## Accumulated whitecap coverage, 0..1 — the same channel the shader paints
+	## foam from. Replaces the old CPU jacobian(): the FFT unpack pass already
+	## decided where the surface folds, so re-deriving it here would be guessing
+	## at an answer that is sitting in the buffer.
+	return _sample_grad(rest_p).y
 
 
 func normal_at_rest(p: Vector2) -> Vector3:
-	## Surface normal straight from the wave sum — the same expression the vertex
-	## shader uses. The old path finite-differenced three get_height() calls,
-	## which is twelve wave loops for one normal; this is one.
-	var sx := 0.0
-	var sz := 0.0
-	var ny := 0.0
-	var t := wave_time
-	var px := p.x
-	var pz := p.y
-	var st := steepness
-	for i in _cpu_n:
-		var f: float = _kx[i] * px + _kz[i] * pz - _om[i] * t
-		var c := cos(f)
-		sx += _kadx[i] * c
-		sz += _kadz[i] * c
-		ny += st * _ka[i] * sin(f)
-	var n := Vector3(-sx, maxf(1.0 - ny, 0.08), -sz)
+	var g := _sample_grad(p)
+	var n := Vector3(-g.x, 1.0, -g.z)
 	if not n.is_finite() or n.length_squared() < 0.0001:
 		return Vector3.UP
 	return n.normalized()

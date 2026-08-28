@@ -20,42 +20,16 @@ var _s_rain: HSlider
 var _c_storm: CheckButton
 var _presets: OptionButton
 
+# Distinct sea states. Kâbus is a hard gale on a 9 m boat (Hs ~8 m), not a
+# 40 m cartoon. Açık Gün is noon with a bare sky — the one you can see.
 # wind, dir, height, steep, time, fog%, cloud%, rain%, storm
 const PRESETS: Array[Dictionary] = [
-	{"name": "Sakin Gece", "wind": 4.0, "dir": 300.0, "height": 0.6, "steep": 0.6, "time": 22.5, "fog": 25.0, "cloud": 15.0, "rain": 0.0, "storm": false},
-	{"name": "Puslu Akşam", "wind": 9.0, "dir": 120.0, "height": 0.9, "steep": 0.8, "time": 19.6, "fog": 60.0, "cloud": 55.0, "rain": 15.0, "storm": false},
+	{"name": "Sakin Gece", "wind": 4.0, "dir": 300.0, "height": 0.6, "steep": 0.6, "time": 22.5, "fog": 12.0, "cloud": 8.0, "rain": 0.0, "storm": false},
+	{"name": "Açık Gün", "wind": 5.0, "dir": 200.0, "height": 0.45, "steep": 0.5, "time": 12.0, "fog": 0.0, "cloud": 0.0, "rain": 0.0, "storm": false},
+	{"name": "Açık Ufuk", "wind": 10.0, "dir": 220.0, "height": 0.9, "steep": 0.8, "time": 14.0, "fog": 8.0, "cloud": 28.0, "rain": 0.0, "storm": false},
+	{"name": "Puslu Akşam", "wind": 6.0, "dir": 85.0, "height": 0.5, "steep": 0.5, "time": 19.2, "fog": 88.0, "cloud": 78.0, "rain": 8.0, "storm": false},
 	{"name": "Fırtına", "wind": 18.0, "dir": 40.0, "height": 1.2, "steep": 1.0, "time": 20.2, "fog": 45.0, "cloud": 90.0, "rain": 60.0, "storm": true},
-	{"name": "Kâbus", "wind": 34.0, "dir": 75.0, "height": 3.2, "steep": 1.25, "time": 23.0, "fog": 75.0, "cloud": 100.0, "rain": 90.0, "storm": true},
-	{"name": "Karanlık Deniz", "wind": 14.0, "dir": 50.0, "height": 1.15, "steep": 0.95, "time": 20.8, "fog": 42.0, "cloud": 82.0, "rain": 12.0, "storm": false},
-	{"name": "Suskun Akşam", "wind": 2.5, "dir": 210.0, "height": 0.35, "steep": 0.5, "time": 18.9, "fog": 38.0, "cloud": 28.0, "rain": 0.0, "storm": false},
-	{"name": "Alacakaranlık", "wind": 7.0, "dir": 280.0, "height": 0.75, "steep": 0.7, "time": 18.2, "fog": 48.0, "cloud": 58.0, "rain": 8.0, "storm": false},
-	{"name": "Kanlı Gün Batımı", "wind": 8.0, "dir": 250.0, "height": 0.85, "steep": 0.75, "time": 18.5, "fog": 22.0, "cloud": 42.0, "rain": 0.0, "storm": false},
-	{"name": "Şafak Pusu", "wind": 6.0, "dir": 15.0, "height": 0.55, "steep": 0.55, "time": 6.2, "fog": 82.0, "cloud": 68.0, "rain": 5.0, "storm": false},
-	{"name": "Buzlu Tan", "wind": 11.0, "dir": 350.0, "height": 0.7, "steep": 0.65, "time": 5.6, "fog": 72.0, "cloud": 50.0, "rain": 8.0, "storm": false},
-	{"name": "Çiseleyen Sabah", "wind": 7.5, "dir": 95.0, "height": 0.65, "steep": 0.6, "time": 7.8, "fog": 52.0, "cloud": 70.0, "rain": 38.0, "storm": false},
-	{"name": "Öğlen Kapalı", "wind": 12.0, "dir": 180.0, "height": 1.0, "steep": 0.85, "time": 12.4, "fog": 32.0, "cloud": 88.0, "rain": 18.0, "storm": false},
-	{"name": "İkindi Yağmuru", "wind": 9.0, "dir": 140.0, "height": 0.85, "steep": 0.8, "time": 15.6, "fog": 36.0, "cloud": 80.0, "rain": 55.0, "storm": false},
-	{"name": "Sağanak", "wind": 15.0, "dir": 110.0, "height": 1.05, "steep": 0.95, "time": 11.2, "fog": 50.0, "cloud": 100.0, "rain": 92.0, "storm": false},
-	{"name": "Muson", "wind": 11.0, "dir": 200.0, "height": 0.95, "steep": 0.9, "time": 10.0, "fog": 62.0, "cloud": 100.0, "rain": 85.0, "storm": false},
-	{"name": "Karadeniz", "wind": 16.0, "dir": 20.0, "height": 1.15, "steep": 1.0, "time": 14.2, "fog": 40.0, "cloud": 78.0, "rain": 28.0, "storm": false},
-	{"name": "Açık Deniz", "wind": 15.0, "dir": 265.0, "height": 1.65, "steep": 1.05, "time": 15.0, "fog": 18.0, "cloud": 48.0, "rain": 0.0, "storm": false},
-	{"name": "Körfez", "wind": 3.5, "dir": 330.0, "height": 0.4, "steep": 0.45, "time": 19.8, "fog": 58.0, "cloud": 38.0, "rain": 0.0, "storm": false},
-	{"name": "Sis Duvarı", "wind": 5.0, "dir": 85.0, "height": 0.5, "steep": 0.5, "time": 19.0, "fog": 96.0, "cloud": 92.0, "rain": 10.0, "storm": false},
-	{"name": "Durgun Cam", "wind": 0.8, "dir": 0.0, "height": 0.15, "steep": 0.35, "time": 21.2, "fog": 12.0, "cloud": 6.0, "rain": 0.0, "storm": false},
-	{"name": "Ölüm Sükûneti", "wind": 1.2, "dir": 160.0, "height": 0.22, "steep": 0.4, "time": 0.4, "fog": 8.0, "cloud": 0.0, "rain": 0.0, "storm": false},
-	{"name": "Yıldızlı Gece", "wind": 5.5, "dir": 310.0, "height": 0.7, "steep": 0.65, "time": 23.4, "fog": 10.0, "cloud": 8.0, "rain": 0.0, "storm": false},
-	{"name": "Ay Işığı", "wind": 6.5, "dir": 240.0, "height": 0.8, "steep": 0.7, "time": 23.8, "fog": 18.0, "cloud": 22.0, "rain": 0.0, "storm": false},
-	{"name": "Gece Yarısı", "wind": 11.0, "dir": 55.0, "height": 1.25, "steep": 0.95, "time": 0.0, "fog": 38.0, "cloud": 70.0, "rain": 18.0, "storm": false},
-	{"name": "Kara Su", "wind": 13.0, "dir": 48.0, "height": 1.1, "steep": 0.92, "time": 21.0, "fog": 40.0, "cloud": 86.0, "rain": 8.0, "storm": false},
-	{"name": "Hortum Öncesi", "wind": 22.0, "dir": 65.0, "height": 1.55, "steep": 1.08, "time": 17.4, "fog": 34.0, "cloud": 96.0, "rain": 42.0, "storm": false},
-	{"name": "Gök Gürültüsü", "wind": 19.0, "dir": 35.0, "height": 1.15, "steep": 1.0, "time": 20.5, "fog": 42.0, "cloud": 95.0, "rain": 52.0, "storm": true},
-	{"name": "Kıyı Fırtınası", "wind": 21.0, "dir": 90.0, "height": 1.85, "steep": 1.12, "time": 19.2, "fog": 55.0, "cloud": 88.0, "rain": 72.0, "storm": true},
-	{"name": "Kuzey Rüzgârı", "wind": 28.0, "dir": 0.0, "height": 0.95, "steep": 0.88, "time": 16.0, "fog": 24.0, "cloud": 58.0, "rain": 12.0, "storm": false},
-	{"name": "Uçurum Dalgası", "wind": 24.0, "dir": 130.0, "height": 4.2, "steep": 1.35, "time": 16.5, "fog": 28.0, "cloud": 68.0, "rain": 22.0, "storm": false},
-	{"name": "Beyaz Fırtına", "wind": 38.0, "dir": 70.0, "height": 2.8, "steep": 1.2, "time": 13.2, "fog": 55.0, "cloud": 100.0, "rain": 100.0, "storm": true},
-	{"name": "Kırık Direk", "wind": 30.0, "dir": 80.0, "height": 2.45, "steep": 1.18, "time": 21.6, "fog": 62.0, "cloud": 96.0, "rain": 78.0, "storm": true},
-	{"name": "Açık Ufuk", "wind": 10.0, "dir": 220.0, "height": 0.9, "steep": 0.8, "time": 16.8, "fog": 12.0, "cloud": 32.0, "rain": 0.0, "storm": false},
-	{"name": "Cam Göbeği", "wind": 8.0, "dir": 175.0, "height": 0.55, "steep": 0.55, "time": 8.6, "fog": 22.0, "cloud": 38.0, "rain": 0.0, "storm": false},
+	{"name": "Kâbus", "wind": 23.0, "dir": 75.0, "height": 1.4, "steep": 1.06, "time": 20.8, "fog": 32.0, "cloud": 94.0, "rain": 72.0, "storm": true},
 ]
 
 

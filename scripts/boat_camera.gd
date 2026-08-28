@@ -52,6 +52,7 @@ var _panel: Node = null
 var _chart_t := 0.0
 var _last_aim := ""
 var _bubbles: GPUParticles3D
+var _arms: Node
 
 
 func _ready() -> void:
@@ -64,6 +65,12 @@ func _ready() -> void:
 	_cam.current = true
 	_cam.top_level = true  # free of rig transform; we place it explicitly
 	_cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	# New hand system: measured IK rig + per-hand grip claims (scripts/hands/).
+	# The old fps_arms.gd is left on disk untouched — swap this one line back to
+	# fall straight over to it.
+	_arms = (load("res://scripts/hands/hands.gd") as GDScript).new()
+	add_child(_arms)
+	_arms.setup(_cam)
 	_build_underwater()
 	# Interaction prompt: one line at the bottom of the view, only in FPS mode.
 	var pl := CanvasLayer.new()
@@ -104,6 +111,8 @@ func set_mode(m: int) -> void:
 			_eye_ready = false
 			_bob = 0.0
 			_roll = 0.0
+			if _arms != null:
+				_arms.set_active(true)
 			# start looking where the boat points, standing at the wheel
 			if target != null:
 				var fwd := -target.global_basis.z
@@ -114,6 +123,8 @@ func set_mode(m: int) -> void:
 			pitch = 0.0
 		Mode.FREE:
 			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+			if _arms != null:
+				_arms.set_active(false)
 			if target != null:
 				target.set("helm_engaged", true)
 				target.set("telegraph_engaged", false)
@@ -124,6 +135,8 @@ func set_mode(m: int) -> void:
 			pitch = asin(clampf(fwd.y, -1.0, 1.0))
 		_:
 			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+			if _arms != null:
+				_arms.set_active(false)
 			if target != null:
 				target.set("helm_engaged", true)
 				target.set("telegraph_engaged", false)
@@ -292,9 +305,15 @@ func _process_fps(delta: float) -> void:
 		_last_aim = str(cand["id"]) if not cand.is_empty() else ""
 
 	if Input.is_action_just_pressed("use"):
-		if not cand.is_empty() and str(cand["id"]) == "ignition" \
+		if _arms != null and _arms.inspecting_id() != "":
+			_arms.boat = target
+			_arms.notify_use(_arms.inspecting_id())
+		elif not cand.is_empty() and str(cand["id"]) == "ignition" \
 				and target.has_method("toggle_switch"):
 			target.toggle_switch("ignition")
+			if _arms != null:
+				_arms.boat = target
+				_arms.notify_use("ignition")
 		elif engaged == "helm":
 			target.set("helm_engaged", false)
 			_walker.spawn_at(target.HELM_STAND)
@@ -305,15 +324,21 @@ func _process_fps(delta: float) -> void:
 			target.set("chart_engaged", false)
 			_walker.spawn_at(target.CHART_STAND)
 		elif not cand.is_empty():
-			match cand["id"]:
+			var iid := str(cand["id"])
+			if _arms != null:
+				_arms.boat = target
+				if iid == "radio" and not bool(target.get("radio_held")):
+					target.set("radio_held", true)
+				_arms.notify_use(iid)
+			match iid:
 				"helm":
 					target.set("helm_engaged", true)
 				"telegraph":
 					target.set("telegraph_engaged", true)
 				"chart":
 					target.set("chart_engaged", true)
-				"radio":
-					target.set("radio_held", not bool(target.get("radio_held")))
+				"radio", "radar", "sounder":
+					pass
 				"windlass":
 					var tk: Node = target.get("tackle")
 					if tk != null:
@@ -351,12 +376,18 @@ func _process_fps(delta: float) -> void:
 		elif engaged == "chart":
 			_prompt.text = "E — haritadan kalk"
 			_prompt.visible = true
+		elif _arms != null and _arms.inspecting_id() in ["radar", "sounder"]:
+			_prompt.text = "E — ekranı yerine koy"
+			_prompt.visible = true
 		elif bool(target.get("radio_held")) and cand.is_empty():
 			_prompt.text = "Telsiz elinde — kordonu var, fazla uzaklaşma"
 			_prompt.visible = true
 		elif not cand.is_empty():
 			if cand["id"] == "radio" and bool(target.get("radio_held")):
 				_prompt.text = "E — telsizi yerine as"
+			elif str(cand["id"]) in ["radar", "sounder"] and _arms != null \
+					and _arms.inspecting_id() == str(cand["id"]):
+				_prompt.text = "E — ekranı yerine koy"
 			elif str(cand["id"]) == "ignition":
 				var st := int(target.get("engine"))
 				_prompt.text = "E — Kontak  (%s)" % (
@@ -449,6 +480,8 @@ func _process_fps(delta: float) -> void:
 	_roll = lerpf(_roll, clampf(heel * 0.34, -0.13, 0.13), 1.0 - exp(-6.0 * delta))
 	_cam.global_basis = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) \
 			* Basis(Vector3.BACK, _roll)
+	if _arms != null:
+		_arms.update(delta, target, engaged, walking, bool(_walker.get("swimming")))
 	_update_warmth(delta)
 
 

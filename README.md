@@ -32,7 +32,7 @@ Godot ile `project.godot` dosyasını açıp F5'e bas, ya da terminalden:
   gökyüzü shader'ında rüzgarla sürüklenir, gece açık havada yıldızlar çıkar,
   şimşek bulutları içeriden aydınlatır
 
-Hazır ön ayarlar: Sakin Gece, Puslu Akşam, Fırtına, Kâbus.
+Hazır ön ayarlar: Sakin Gece, Açık Gün, Açık Ufuk, Puslu Akşam, Fırtına, Kâbus.
 
 ## Gemi
 
@@ -618,19 +618,51 @@ boyundan büyük; yoksa tavan çözümü zemin çözümüyle kavga ediyor ve gö
 
 ## Teknik
 
-### Dalgalar
+### Dalgalar — FFT
 
-- **Pierson-Moskowitz spektrumu**: 40 Gerstner bileşeni, tepe dalga boyundan
-  ~0.55 m'ye kadar logaritmik aralıklı. Kısa bileşenler geniş yönsel dağılımlı
-  (kısa tepeli chop), uzunlar dar (uzun tepeli ölü dalga). Ayrıca rüzgârdan 58°
-  farklı yönde bağımsız bir **swell** seti — gerçek denizin "geçmişi olan"
-  görüntüsü buradan gelir.
-- Genlikler gerçek **belirgin dalga yüksekliğine (Hs)** normalize edilir, yani
-  yükseklik kaydırıcısı fiziksel bir çarpandır. `SEA_DEVELOPMENT` sınırlı fetch
-  varsayar; tam gelişmiş deniz 18 m/s'de Hs ~7 m olurdu.
-- Aynı dalga seti GPU'da (vertex shader) ve CPU'da (`_displace`) çalışır, yani
-  sandal gördüğün dalganın üstünde yüzer. Ortak matematik
-  `shaders/wave_common.gdshaderinc` içinde.
+Dalga alanı her karede GPU'da **ters Fourier dönüşümüyle** üretiliyor
+(`scripts/wave/`, `shaders/compute/`). FFT hattı
+[GodotOceanWaves](https://github.com/2Retr0/GodotOceanWaves)'den uyarlandı
+(Ethan Truong, MIT — lisans `shaders/compute/` içinde); bu projeye özgü
+eklemeler cascade başına spektral bant sınırlama ve CPU geri okuma yolu.
+
+- **TMA/JONSWAP spektrumu + Hasselmann yönsel dağılımı**, Stockham FFT compute
+  shader'ında, cascade başına 256². Eski hâli 40 analitik Gerstner bileşeniydi:
+  yönsel dağılım bileşen başına tek rastgele açıydı, yani denizin kırk tepe
+  yönü vardı — sürekli bir dağılım değil. Yarım metrenin altındaki her şey de
+  pruvanın altında **1.3 m'de tekrarlayan** bir normal map'ti.
+- **Dört cascade**, tile boyları 503 / 127 / 31 / 7.3 m. Tek bir tile bir
+  okyanusu taşıyamaz: 300 m'lik ölü dalgaya yetecek kadar uzun bir tile'ın
+  texel'i metrelerce olur, kılcal dalgaya yetecek kadar ince olanı birkaç
+  metrede tekrarlar. Her cascade bir oktav bandı sahiplenir
+  (`WaveGenerator._assign_bands`). Tile boyları kasten birbirinin ikinin kuvveti
+  katı değil — ölçülebilir tile'lar tekrarlarını hizalayıp suya ızgara basar.
+- **Bant sınırlama şart**: bant sınırı olmadan her cascade bütün spektrumu
+  taşır, aynı ölü dalga dört kez toplanır ve deniz dört kat dik çıkar.
+- Genlikler gerçek **belirgin dalga yüksekliğine (Hs)** normalize edilir:
+  `WaveGenerator._normalise()` her cascade'in bandı üzerinden TMA varyansını
+  sayısal olarak integre eder ve JONSWAP `alpha`'sını ölçekler. Yükseklik
+  kaydırıcısı böylece fiziksel bir çarpan, keyfi bir kazanç değil.
+  Doğrulama: hedef Hs 2.31 m → ölçülen alan 2.23 m.
+- **LOD bant kesimi mesafeye bağlı**, halkaya değil (`cascade_fade`). Quad'ı
+  9 m olan bir ağ 4 m'lik dalgayı taşıyamaz; vertex akışına sokmak sadece
+  kaynayan geometri üretir — eski "her halka kırk bileşeni de çizer" hâlinin
+  yaptığı tam olarak buydu. Kesim halka başına yapılırsa iki halkanın
+  buluştuğu sınırda yüzey basamaklanır; mesafe sürekli olduğu için sınırda iki
+  halka aynı değeri okur ve dikiş kapanır. Düşen cascade **kaybolmaz**:
+  fragment aşaması bütün cascade'lerin eğimini yine örnekler, yani o dalgalar
+  aydınlatmaya ve köpüğe katkı vermeye devam eder — sadece sığmadıkları
+  geometriyi kımıldatmayı bırakırlar.
+
+**CPU/GPU senkronu.** Bu projenin varlık sebebi olan "sandal gördüğü dalganın
+üstünde yüzer" sözleşmesi FFT'yle ölmedi, yer değiştirdi: `cpu_sample.glsl`
+vertex shader'ın yer değiştirdiği **aynı texel'leri** 64²'lik bir tampona
+indirir, `ocean.gd` onu `buffer_get_data_async` ile okur. Alan tile boyunca
+periyodik olduğundan bu kaba ızgara alanın *tamamıdır*, sadece düşük çözünürlüklü;
+düşen şey santimetre bandı ve dört buçuk tonluk bir tekne iki santimlik dalgayı
+hissedemez. Ayrı tohumlanmış bir CPU dalga seti kullanmak — tek alternatif —
+bunu yapamazdı: FFT rastgele Gauss realizasyonudur, birkaç Gerstner bileşeniyle
+fazı tutturulamaz, ve tekne tepedeyken pruva çukurda kalırdı.
 
 ### Suyun optiği
 
@@ -655,9 +687,13 @@ Işığın gerçekten izlediği sırayla:
    fırtınayla artar.
 4. **Saçılma** — su gövdesinin kendi albedosu, motor tarafından aydınlatılır.
 5. **Tepe altı geçirgenlik** — güneş dalganın arkasındayken tepenin ışıması.
-6. **Köpük** — yer değiştirmenin **Jacobian determinantı** negatife düştüğü,
-   yani yüzeyin katlandığı yerde. Gecikmeli ikinci bir örnek köpüğün kırılan
-   dalganın arkasında iz bırakmasını sağlar. Köpüğün bütün gürültü örneklemesi
+6. **Köpük** — artık **gerçek bir birikim tamponu**. FFT unpack pass'i her
+   karede yüzeyin katlandığı yerde (Jacobian eşiğin altına düştüğünde) köpük
+   ekler ve her yerde üstel olarak söndürür; sonuç normal map'in alfa kanalında
+   yaşar. Eski hâli gecikmeli ikinci bir Jacobian örneğiydi — vertex başına
+   fazladan 18 iterasyon, ve `foam_lag`'ten uzun iz bırakamıyordu.
+   Eşik (`whitecap`) rüzgârla ölçüldü: 10/14/19 m/s'de sırasıyla
+   **%2 / %8 / %20** kaplama. Köpüğün bütün gürültü örneklemesi
    rüzgârla sürüklenen bir çerçevede yapılır (Stokes sürüklenmesi, rüzgârın
    ~%3'ü), böylece köpük suyun üstünde *yüzer*, üstüne boyanmış durmaz.
 7. **Yağmur** — damla halkaları yüzey normaline eklenir (hücre tabanlı, iki
@@ -809,9 +845,14 @@ yüzünden gerçekten yavaş; FPS sayacına ısındıktan sonra bakmak lazım.
 
 ### Bilinen sınırlar
 
-- Spektrum FFT değil, 40 bileşenli analitik Gerstner. FFT daha zengin olurdu
-  ama CPU/GPU dalga senkronunu (yüzdürmenin görüntüyle birebir uyması) kırardı.
-- Köpük kalıcılığı gerçek bir birikim buffer'ı değil, gecikmeli ikinci örnek.
+- CPU aynası 64²/cascade ve bir geri okuma gecikmesi geride. Hs ölçümü bu
+  yüzden GPU alanının ~%5 altında okuyor (kutu filtresi en kısa cascade'in bir
+  kısmını yiyor); yüzdürme için önemsiz, kalibrasyon okurken akılda tutulmalı.
+- Cascade sayısı dörtle sınırlı (`MAX_CASCADES`) ve tile boyları elle seçildi.
+- En ince cascade 1 m'de kesiliyor (`SHORTEST_WAVE`); altındaki her şey hâlâ
+  döşenen detay normal map'lerinden geliyor.
+- Deniz durumu hâlâ anlık: kaydırıcı oynayınca Hs zıplar. Gerçek deniz yeni
+  rüzgâra onlarca dakikada kurulur ve swell rüzgârı geçirir.
 - Planar yansıma tek düzlemli: yüzey o düzlemden uzaklaştıkça yansıma sönümlenip
   yerini analitik gökyüzüne bırakır. Tepe ve çukurda birkaç piksel kayar.
 - Dalga refraksiyonu yok: tepeler kıyıya paralel dönmez, sadece sığlaşıp kırılır.

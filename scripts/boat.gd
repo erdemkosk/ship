@@ -143,6 +143,11 @@ var _radio_set: Node3D
 var _radio_hand: Node3D
 var _cord: Array[MeshInstance3D] = []
 var radio_held := false
+## True while the viewmodel is driving the handset. The cord still follows;
+## the lerp-to-face / lerp-to-cradle does not fight the hand.
+var radio_pose_locked := false
+var _radar_screen: MeshInstance3D
+var _sounder_screen: MeshInstance3D
 const RADIO_ANCHOR := Vector3(1.548, 3.915, 0.50)
 const RADIO_CRADLE := Vector3(1.49, 3.94, 0.55)
 const RADIO_CORD := 2.40
@@ -383,7 +388,10 @@ const BLOCKERS: Array[AABB] = [
 const LADDER := AABB(Vector3(0.0, -999.0, 0.0), Vector3(0.0, 0.0, 0.0))
 const LADDER_BAND := Vector2(0.0, 0.0)
 ## Where you stand to take the wheel, and where the wheel itself is.
-const HELM_STAND := Vector3(0.0, 2.91, 0.78)
+## Right at the wheel, half a step to starboard. Measured, not chosen: from the
+## old spot the throttle knob sat 1.14 m from the right shoulder against a
+## 0.63 m arm, so it simply could not be held while the left hand steered.
+const HELM_STAND := Vector3(0.12, 2.91, 0.55)
 # The chart table: where you stand, where your eye goes when you lean over it,
 # and the point on the paper the camera settles on. Three points rather than a
 # UI screen, because the chart is a thing in the room and reading it should be
@@ -421,7 +429,53 @@ const INTERACT: Array = [
 	{"id": "sw_anchor", "pos": Vector3(1.50, 3.78, 1.74), "r": 0.10, "name": "Irgat (çapa)"},
 	{"id": "chart", "pos": Vector3(1.30, 3.72, 2.88), "r": 0.36, "name": "Harita masası"},
 	{"id": "radio", "pos": Vector3(1.49, 3.94, 0.55), "r": 0.20, "name": "Telsiz"},
+	{"id": "radar", "pos": Vector3(1.18, 4.28, 0.10), "r": 0.28, "name": "Radar"},
+	{"id": "sounder", "pos": Vector3(1.15, 4.02, 0.08), "r": 0.22, "name": "İskandil"},
 ]
+
+
+func radio_handset() -> Node3D:
+	return _radio_hand
+
+
+func helm_wheel() -> Node3D:
+	return _wheel
+
+
+func throttle_lever() -> Node3D:
+	return _thr_lever
+
+
+func ignition_key() -> Node3D:
+	return _ign_key
+
+
+func windlass_node() -> Node3D:
+	return _windlass
+
+
+func switch_lever(id: String) -> Node3D:
+	return _switch_levers.get(id) as Node3D
+
+
+func door_node(id: String) -> Node3D:
+	match id:
+		"door_fwd":
+			return _door_fwd
+		"door_aft":
+			return _door_aft
+		"door_wh":
+			return _door_wh
+	return null
+
+
+func screen_mesh(id: String) -> MeshInstance3D:
+	match id:
+		"radar":
+			return _radar_screen
+		"sounder":
+			return _sounder_screen
+	return null
 
 
 func _mat(albedo: Color, rough: float, metal := 0.0) -> StandardMaterial3D:
@@ -975,7 +1029,11 @@ func _build_console(trim: Material, metal: Material) -> void:
 	# room. The lever grows out of the console where your right hand falls.
 	_box(Vector3(0.18, 0.10, 0.20), Vector3(0.70, 3.51, 0.02), Vector3.ZERO, metal)
 	_thr_lever = Node3D.new()
-	_thr_lever.position = Vector3(0.70, 3.55, 0.02)
+	# Inboard and aft of where it was. A telegraph you cannot reach without
+	# letting go of the wheel is a telegraph nobody uses; 8 cm in and 20 cm aft
+	# brings the knob inside a leaning right arm while keeping it on the
+	# starboard console where it belongs.
+	_thr_lever.position = Vector3(0.62, 3.62, 0.22)
 	add_child(_thr_lever)
 	var lever := MeshInstance3D.new()
 	var lm := CylinderMesh.new()
@@ -1511,6 +1569,7 @@ func _build_electronics(trim: Material, metal: Material) -> void:
 	scr.rotation_degrees = Vector3(-22.0, 0.0, 0.0)
 	scr.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(scr)
+	_sounder_screen = scr
 	# --- radar, in the bracket above it -------------------------------------
 	var rp := Vector3(1.18, 4.38, -0.05)
 	_box(Vector3(0.05, 0.14, 0.04), rp + Vector3(-0.18, -0.16, 0.02), Vector3.ZERO, metal)
@@ -1529,6 +1588,7 @@ func _build_electronics(trim: Material, metal: Material) -> void:
 	rscr.rotation_degrees = Vector3(-20.0, 0.0, 0.0)
 	rscr.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(rscr)
+	_radar_screen = rscr
 	# Waveguide up toward the scanner on the mast.
 	_cyl(0.010, 0.010, 0.42, rp + Vector3(0.10, 0.34, -0.02), Vector3(0.0, 0.0, -8.0), casing)
 
@@ -1656,7 +1716,7 @@ func _update_radio(delta: float) -> void:
 	# yet — so the cord read as five hundred metres long and snatched it straight
 	# back out of your hand.
 	var in_fps: bool = camera_rig != null and int(camera_rig.get("mode")) == 1
-	if radio_held and in_fps:
+	if radio_held and in_fps and not radio_pose_locked:
 		# Held up by your face. Worked out in the boat's frame so it rides with
 		# her: a handset in your hand does not swing about when she rolls.
 		var cam: Camera3D = camera_rig.get("_cam")
@@ -1679,12 +1739,25 @@ func _update_radio(delta: float) -> void:
 			_radio_hand.rotation.y = atan2(fw.x, fw.z)
 			_radio_hand.rotation.x = 0.35
 			_radio_hand.rotation.z = 0.0
+	if radio_held and in_fps and radio_pose_locked:
+		# The viewmodel owns the pose; still yank the set out of the hand if
+		# the cord comes taut.
+		var cam2: Camera3D = camera_rig.get("_cam")
+		if cam2 != null:
+			var here: Vector3 = global_transform.affine_inverse() * _radio_hand.global_position
+			if (here - RADIO_ANCHOR).length() > RADIO_CORD + 0.04:
+				_radio_pull += delta
+				if _radio_pull > 0.45:
+					radio_held = false
+			else:
+				_radio_pull = 0.0
 	if not radio_held:
 		_radio_pull = 0.0
-		_radio_hand.position = _radio_hand.position.lerp(RADIO_CRADLE, 1.0 - exp(-9.0 * delta))
-		_radio_hand.rotation.x = lerpf(_radio_hand.rotation.x, 0.0, 1.0 - exp(-9.0 * delta))
-		_radio_hand.rotation.y = lerpf(_radio_hand.rotation.y, 0.0, 1.0 - exp(-9.0 * delta))
-		_radio_hand.rotation.z = lerpf(_radio_hand.rotation.z, 0.209, 1.0 - exp(-9.0 * delta))
+		if not radio_pose_locked:
+			_radio_hand.position = _radio_hand.position.lerp(RADIO_CRADLE, 1.0 - exp(-9.0 * delta))
+			_radio_hand.rotation.x = lerpf(_radio_hand.rotation.x, 0.0, 1.0 - exp(-9.0 * delta))
+			_radio_hand.rotation.y = lerpf(_radio_hand.rotation.y, 0.0, 1.0 - exp(-9.0 * delta))
+			_radio_hand.rotation.z = lerpf(_radio_hand.rotation.z, 0.209, 1.0 - exp(-9.0 * delta))
 
 	var a := RADIO_ANCHOR
 	# Onto the handset's own tail, in the handset's frame — a fixed world offset
@@ -2752,6 +2825,18 @@ func _physics_process(delta: float) -> void:
 		if ocean.has_method("current_at"):
 			var c: Vector2 = ocean.current_at(global_position)
 			water_v = Vector3(c.x, 0.0, c.y)
+		# The water a hull sits in is not still, and the tide is the smaller half
+		# of why. As a wave passes, the water under the boat runs forward at the
+		# crest and back in the trough — measured on this sea, 0.5 m/s average
+		# and 1.7 m/s peak against a tidal stream of 0.06. Leaving it out meant
+		# drag, leeway and rudder flow were all computed against water that was
+		# standing still while the sea heaved. The vertical component is left
+		# alone: the buoyancy probes already damp against the surface's own rise
+		# and fall, and adding it here would count it twice.
+		if ocean.has_method("surface_velocity"):
+			var orb: Vector3 = ocean.surface_velocity(global_position)
+			if orb.is_finite():
+				water_v += Vector3(orb.x, 0.0, orb.z)
 		var v := linear_velocity
 		var v_h := Vector3(v.x, 0.0, v.z)
 		apply_central_force(-(v_h - water_v) * HULL_DRAG * hydro)

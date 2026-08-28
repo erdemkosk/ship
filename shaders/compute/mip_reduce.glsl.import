@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://dao0mx6oqic18"
+path="res://.godot/imported/mip_reduce.glsl-7921e8cc5085c857aba54d0ffb245e61.res"
+
+[deps]
+
+source_file="res://shaders/compute/mip_reduce.glsl"
+dest_files=["res://.godot/imported/mip_reduce.glsl-7921e8cc5085c857aba54d0ffb245e61.res"]
+
+[params]
+
