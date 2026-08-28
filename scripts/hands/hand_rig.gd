@@ -55,6 +55,12 @@ const SHOULDER_OFFSET := Vector3(0.0, -0.22, 0.10)
 ## arms come from further over.
 const MAX_LEAN := 0.26
 const LEAN_TAU := 0.12
+## How much of the camera's pitch the shoulders take. Shoulders belong to a
+## torso, not to a head: look down thirty-five degrees and a rig parented
+## straight to the lens swings its shoulder anchor down and forward with it, so
+## the arms start coming out of the chest and nothing they hold looks held. A
+## real neck passes on a little of it and no more.
+const SHOULDER_PITCH_FOLLOW := 0.25
 
 var camera: Camera3D
 var skeleton: Skeleton3D
@@ -187,6 +193,10 @@ func update(delta: float) -> void:
 	_lean = _lean.lerp(_lean_want.limit_length(MAX_LEAN), k)
 	_lean_want = Vector3.ZERO
 	_lag.position = _lean
+	# Undo most of the camera's pitch so the shoulders stay level with the deck.
+	var fwd: Vector3 = -camera.global_basis.z
+	var cam_pitch: float = asin(clampf(fwd.y, -1.0, 1.0))
+	_lag.rotation.x = -cam_pitch * (1.0 - SHOULDER_PITCH_FOLLOW)
 	if _ik != null:
 		_ik.influence = maxf(_weight["R"], _weight["L"])
 	if _wrist != null:

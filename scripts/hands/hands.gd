@@ -33,6 +33,11 @@ var _grips := {}          # "id:side" -> Node3D, child of the device
 var _rim_ref := {}        # side -> wheel rotation when this hold was taken
 var _regrip := {"L": 0.0, "R": 0.0}
 var _inspect := ""
+var _dbg := 0
+
+
+func debug_frames(n: int) -> void:
+	_dbg = n
 
 
 func setup(cam: Camera3D) -> void:
@@ -83,6 +88,9 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		rig.update(delta)
 		return
 	rig.set_visible_hands(true)
+	if _dbg > 0:
+		_dbg -= 1
+		print("[hands] engaged=%s active=%s claim=%s" % [engaged, _active, _claim])
 
 	# Standing at the wheel is a two-handed job by default: the left steers, the
 	# right stays on the telegraph. Neither is a mode — they are two claims.

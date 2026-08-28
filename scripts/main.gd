@@ -168,6 +168,8 @@ func _spawn_flotsam(ocean: Node3D) -> void:
 func _probe_hands(rig: Node3D, boat: RigidBody3D) -> void:
 	await get_tree().create_timer(2.5).timeout
 	var arms: Node = rig.get("_arms")
+	arms.call("debug_frames", 3)
+	await get_tree().create_timer(0.3).timeout
 	var hands: Node = arms.get("rig")
 	var to_local := boat.global_transform.affine_inverse()
 	print("ELLER (bot uzayi)")
