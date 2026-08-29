@@ -140,6 +140,13 @@ var _mesh_batch: Dictionary = {}
 var _batching := false
 var _soak := 0.0
 var _glass_wet := 0.0
+## Off-screen rain field. Beads run here at 1024×512, a few times a second,
+## so the windscreen itself is a sample — not a 3×3 drop walk on every pixel
+## of the view the moment you stand at the glass.
+var _rain_vp: SubViewport
+var _rain_field_mat: ShaderMaterial
+var _rain_field_age := 99.0
+var _rain_field_wet := -1.0
 var _sounder_mat: ShaderMaterial
 var _radar_mat: ShaderMaterial
 var _radar_tex_set := false
@@ -320,6 +327,7 @@ func _ready() -> void:
 	add_child(vhf)
 	_build_radar_scanner()
 	_flush_mesh_batch()
+	_build_rain_field()
 	_build_engine_sound()
 	_build_door_sound()
 	_build_hull_creak()
@@ -455,6 +463,51 @@ func _glass(size: Vector3, pos: Vector3, mat: ShaderMaterial = null) -> void:
 	mi.position = pos
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
+
+
+func _build_rain_field() -> void:
+	## Bake the bead field off-screen. Shader baker only compiles ahead; this
+	## is the bit that stops the cabin windows eating the frame when filled.
+	_rain_field_mat = ShaderMaterial.new()
+	_rain_field_mat.shader = load("res://shaders/glass_rain_field.gdshader")
+	_rain_vp = SubViewport.new()
+	_rain_vp.name = "RainField"
+	_rain_vp.size = Vector2i(1024, 512)
+	_rain_vp.disable_3d = true
+	_rain_vp.transparent_bg = true
+	_rain_vp.gui_disable_input = true
+	_rain_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	_rain_vp.msaa_2d = Viewport.MSAA_DISABLED
+	var plate := ColorRect.new()
+	plate.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	plate.color = Color.WHITE
+	plate.material = _rain_field_mat
+	_rain_vp.add_child(plate)
+	add_child(_rain_vp)
+	var field: ViewportTexture = _rain_vp.get_texture()
+	if _glass_mat != null:
+		ShaderSet.param(_glass_mat, &"rain_field", field)
+	if _front_glass_mat != null:
+		ShaderSet.param(_front_glass_mat, &"rain_field", field)
+
+
+func _refresh_rain_field(delta: float) -> void:
+	if _rain_vp == null or _rain_field_mat == null:
+		return
+	if _glass_wet <= 0.004:
+		if _rain_field_wet > 0.004:
+			ShaderSet.param(_rain_field_mat, &"rain", 0.0)
+			_rain_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+			_rain_field_wet = 0.0
+		return
+	_rain_field_age += delta
+	if absf(_glass_wet - _rain_field_wet) < 0.012 and _rain_field_age < 0.14:
+		return
+	ShaderSet.param(_rain_field_mat, &"rain", _glass_wet)
+	_rain_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	_rain_field_wet = _glass_wet
+	_rain_field_age = 0.0
 
 
 ## Walkable geometry, in the boat's own local frame.
@@ -4119,6 +4172,7 @@ func _update_lantern(delta: float) -> void:
 		ShaderSet.param(_front_glass_mat, &"rain", _glass_wet)
 	if _glass_mat != null:
 		ShaderSet.param(_glass_mat, &"rain", _glass_wet)
+	_refresh_rain_field(delta)
 
 	# Filament lamps do not switch instantly, and a boat's wiring sags.
 	# Filament lamps ride the same sagging supply the electronics do, so in a
