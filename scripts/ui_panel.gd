@@ -25,10 +25,10 @@ var _presets: OptionButton
 # wind, dir, height, steep, time, fog%, cloud%, rain%, storm
 const PRESETS: Array[Dictionary] = [
 	{"name": "Sakin Gece", "wind": 4.0, "dir": 300.0, "height": 0.6, "steep": 0.6, "time": 22.5, "fog": 12.0, "cloud": 8.0, "rain": 0.0, "storm": false},
-	{"name": "Açık Gün", "wind": 5.0, "dir": 200.0, "height": 0.45, "steep": 0.5, "time": 12.0, "fog": 0.0, "cloud": 0.0, "rain": 0.0, "storm": false},
-	{"name": "Açık Ufuk", "wind": 10.0, "dir": 220.0, "height": 0.9, "steep": 0.8, "time": 14.0, "fog": 8.0, "cloud": 28.0, "rain": 0.0, "storm": false},
-	{"name": "Puslu Akşam", "wind": 6.0, "dir": 85.0, "height": 0.5, "steep": 0.5, "time": 19.2, "fog": 88.0, "cloud": 78.0, "rain": 8.0, "storm": false},
-	{"name": "Fırtına", "wind": 18.0, "dir": 40.0, "height": 1.2, "steep": 1.0, "time": 20.2, "fog": 45.0, "cloud": 90.0, "rain": 60.0, "storm": true},
+	{"name": "Clear Day", "wind": 5.0, "dir": 200.0, "height": 0.45, "steep": 0.5, "time": 12.0, "fog": 0.0, "cloud": 0.0, "rain": 0.0, "storm": false},
+	{"name": "Clear Horizon", "wind": 10.0, "dir": 220.0, "height": 0.9, "steep": 0.8, "time": 14.0, "fog": 8.0, "cloud": 28.0, "rain": 0.0, "storm": false},
+	{"name": "Hazy Evening", "wind": 6.0, "dir": 85.0, "height": 0.5, "steep": 0.5, "time": 19.2, "fog": 88.0, "cloud": 78.0, "rain": 8.0, "storm": false},
+	{"name": "Storm", "wind": 18.0, "dir": 40.0, "height": 1.2, "steep": 1.0, "time": 20.2, "fog": 45.0, "cloud": 90.0, "rain": 60.0, "storm": true},
 	{"name": "Kâbus", "wind": 23.0, "dir": 75.0, "height": 1.4, "steep": 1.06, "time": 20.8, "fog": 32.0, "cloud": 94.0, "rain": 72.0, "storm": true},
 ]
 
@@ -38,7 +38,7 @@ func setup(o: Node3D, w: Node3D) -> void:
 	ocean = o
 	weather = w
 	_build()
-	_apply_preset(_preset_index("Fırtına"))
+	_apply_preset(_preset_index("Storm"))
 
 
 func _build() -> void:
@@ -55,14 +55,6 @@ func _build() -> void:
 	_fps_label.position = Vector2(12, 10)
 	_fps_label.add_theme_color_override("font_color", Color(0.8, 0.85, 0.8))
 	add_child(_fps_label)
-
-	var help := Label.new()
-	help.text = "W/S: ileri-geri   A/D: dümen   F: kamera   Serbest: Q dal / E çık   Tab: panel"
-	help.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	help.position = Vector2(12, -34)
-	help.add_theme_color_override("font_color", Color(0.65, 0.68, 0.65))
-	help.add_theme_font_size_override("font_size", 13)
-	add_child(help)
 
 	_panel = PanelContainer.new()
 	var style := StyleBoxFlat.new()
@@ -84,7 +76,7 @@ func _build() -> void:
 	_panel.add_child(vbox)
 
 	var title := Label.new()
-	title.text = "KARANLIK DENİZ"
+	title.text = "DARK SEA"
 	title.add_theme_font_size_override("font_size", 18)
 	title.add_theme_color_override("font_color", Color(0.75, 0.8, 0.75))
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -94,21 +86,21 @@ func _build() -> void:
 	_presets.fit_to_longest_item = true
 	for p: Dictionary in PRESETS:
 		_presets.add_item(str(p["name"]))
-	_presets.select(_preset_index("Fırtına"))
+	_presets.select(_preset_index("Storm"))
 	_presets.item_selected.connect(_apply_preset)
 	vbox.add_child(_presets)
 
-	_s_wind = _slider(vbox, "Rüzgar Hızı", "%.1f m/s", 0.0, 40.0, 0.5, 14.0, _on_sea_changed)
-	_s_dir = _slider(vbox, "Rüzgar Yönü", "%.0f°", 0.0, 360.0, 1.0, 40.0, _on_sea_changed)
-	_s_height = _slider(vbox, "Dalga Yüksekliği", "%.2fx", 0.0, 5.0, 0.05, 1.0, _on_sea_changed)
-	_s_steep = _slider(vbox, "Dalga Dikliği", "%.2f", 0.0, 1.6, 0.05, 0.9, _on_sea_changed)
-	_s_time = _slider(vbox, "Saat", "%.1f", 0.0, 24.0, 0.1, 20.2, func(v: float) -> void: weather.time_of_day = v)
-	_s_fog = _slider(vbox, "Sis", "%.0f%%", 0.0, 100.0, 1.0, 45.0, func(v: float) -> void: weather.fog_amount = v / 100.0)
-	_s_cloud = _slider(vbox, "Bulut", "%.0f%%", 0.0, 100.0, 1.0, 90.0, func(v: float) -> void: weather.cloud_cover = v / 100.0)
-	_s_rain = _slider(vbox, "Yağmur", "%.0f%%", 0.0, 100.0, 1.0, 60.0, func(v: float) -> void: weather.rain_amount = v / 100.0)
+	_s_wind = _slider(vbox, "Wind Speed", "%.1f m/s", 0.0, 55.0, 0.5, 14.0, _on_sea_changed)
+	_s_dir = _slider(vbox, "Wind Direction", "%.0f°", 0.0, 360.0, 1.0, 40.0, _on_sea_changed)
+	_s_height = _slider(vbox, "Wave Height", "%.2fx", 0.0, 7.0, 0.05, 1.0, _on_sea_changed)
+	_s_steep = _slider(vbox, "Wave Steepness", "%.2f", 0.0, 2.0, 0.05, 0.9, _on_sea_changed)
+	_s_time = _slider(vbox, "Hour", "%.1f", 0.0, 24.0, 0.1, 20.2, func(v: float) -> void: weather.time_of_day = v)
+	_s_fog = _slider(vbox, "Fog", "%.0f%%", 0.0, 100.0, 1.0, 45.0, func(v: float) -> void: weather.fog_amount = v / 100.0)
+	_s_cloud = _slider(vbox, "Cloud", "%.0f%%", 0.0, 100.0, 1.0, 90.0, func(v: float) -> void: weather.cloud_cover = v / 100.0)
+	_s_rain = _slider(vbox, "Rain", "%.0f%%", 0.0, 100.0, 1.0, 60.0, func(v: float) -> void: weather.rain_amount = v / 100.0)
 
 	_c_storm = CheckButton.new()
-	_c_storm.text = "Fırtına (şimşek)"
+	_c_storm.text = "Storm (lightning)"
 	_c_storm.button_pressed = true
 	_c_storm.toggled.connect(func(on: bool) -> void: weather.storm = on)
 	vbox.add_child(_c_storm)
@@ -178,10 +170,14 @@ func is_open() -> bool:
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("toggle_panel") and _panel != null:
 		_panel.visible = not _panel.visible
+	if event.is_action_pressed("toggle_fps") and _fps_label != null:
+		_fps_label.visible = not _fps_label.visible
 
 
 func _process(delta: float) -> void:
+	if _fps_label == null or not _fps_label.visible:
+		return
 	_fps_accum -= delta
-	if _fps_accum <= 0.0 and _fps_label != null:
+	if _fps_accum <= 0.0:
 		_fps_accum = 0.25
 		_fps_label.text = "FPS: %d" % Engine.get_frames_per_second()

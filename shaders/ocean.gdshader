@@ -530,13 +530,27 @@ void fragment() {
 	if (camera_under == 1) {
 		vec3 d = -view_dir;
 		vec3 into_air = refract(d, -wn, 1.333);
-		if (dot(into_air, into_air) < 0.0001) {
-			col = scatter_color * 1.6 + foam_color * foam * 0.25;
-		} else {
-			col = sky_color(normalize(into_air), clamp(rough * 2.0, 0.0, 1.0), 0.35) * 0.55;
-			col = mix(col, scatter_color * 2.0, 0.25);
-			col = mix(col, foam_color * 0.5, foam * 0.35);
+		// Snell's window shuts at 48.6 degrees off the vertical — cos 0.661.
+		// Inside it you see the sky, squeezed; outside it the surface is a
+		// mirror onto the murk and it is DARK. The old version had the whole
+		// underside at sky brightness with only a soft edge, which is why it
+		// read as a sheet of white overhead instead of a ceiling of water.
+		float ct = clamp(dot(-d, -wn), 0.0, 1.0);
+		float win = smoothstep(0.585, 0.735, ct);
+		vec3 murky = scatter_color * 0.58;
+		vec3 through = murky;
+		if (dot(into_air, into_air) > 0.0001) {
+			through = sky_color(normalize(into_air), clamp(rough * 2.0, 0.0, 1.0), 0.35)
+					* 0.44;
+			through = mix(through, murky, 0.22);
 		}
+		col = mix(murky, through, win);
+		col = mix(col, foam_color * 0.22, foam * 0.30);
+		// And nothing down here is lit by the sun directly. Whatever light got
+		// through the surface is already in `col`; leaving the albedo up meant
+		// the lighting pass put a second, full-brightness copy of the sky on
+		// top of it.
+		diffuse_albedo = vec3(0.0);
 	}
 
 	ALBEDO = diffuse_albedo;

@@ -4,7 +4,10 @@ extends Node3D
 
 const TERRAIN_SIZE := 2048.0
 const TEX_RES := 768
-const BASE_DEPTH := -28.0
+## Deep water. She was a 28 m basin — shallow enough that the bottom read as a
+## floor just out of sight, which flattens the whole sea. At 74 m the light is
+## gone long before the sand is, and a dive has somewhere to go.
+const BASE_DEPTH := -74.0
 # Shrinking this is tempting — most of it is invisible under opaque water — but
 # it also carries the islands, and a short mesh cuts them off mid-shore. So keep
 # the reach and buy the saving back in density instead.
@@ -81,9 +84,9 @@ func _sample_img(x: float, z: float) -> float:
 func _basin(x: float, z: float) -> float:
 	var m := _noise.get_noise_2d(x, z)
 	var d := _detail.get_noise_2d(x, z)
-	# Open ocean stays deep: trenches ~-46 m, typical ~-28 m, rare shelves ~-14 m.
+	# Open ocean stays deep: trenches ~-74 m, typical ~-45 m, rare shelves ~-22 m.
 	# Shallows exist only as island skirts stamped later — not a swimming-pool spawn.
-	return BASE_DEPTH + m * 18.0 + d * 1.8
+	return BASE_DEPTH + m * 48.0 + d * 4.2
 
 
 func _place_islands() -> void:
@@ -397,6 +400,11 @@ func _xform_from_packed(data: PackedFloat32Array, i: int) -> Transform3D:
 		Vector3(data[o + 2], data[o + 6], data[o + 10]))
 	var origin := Vector3(data[o + 3], data[o + 7], data[o + 11])
 	return Transform3D(b, origin)
+
+
+func set_sun(dir: Vector3) -> void:
+	if _mat != null:
+		_mat.set_shader_parameter("sun_dir", dir)
 
 
 func set_caustics(scale: float, energy: float) -> void:

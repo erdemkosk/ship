@@ -22,6 +22,12 @@ var wanted := {}
 var weights := {}
 ## bone index -> the pose the bone actually ended up with, skeleton space.
 var solved := {}
+## wrist bone -> {"parent": forearm idx, "driven": [[twist_bone, fraction], ..]}
+## Forearm twist bones. A wrist rolled 90 degrees against a static forearm
+## candy-wraps the skin at the joint; rigs carry twist bones precisely so the
+## roll can be spread down the forearm. The IK never touches them, so unless we
+## drive them here they sit at rest and the mesh pinches.
+var twists := {}
 
 
 func clear_all() -> void:
@@ -53,3 +59,32 @@ func _process_modification() -> void:
 			sk.set_bone_pose_rotation(b, local_rot)
 			cur = sk.get_bone_global_pose(b)
 		solved[b] = cur
+		if twists.has(b):
+			_distribute_twist(sk, b, cur)
+
+
+func _distribute_twist(sk: Skeleton3D, wrist: int, wrist_g: Transform3D) -> void:
+	var spec: Dictionary = twists[wrist]
+	var fore: int = spec["parent"]
+	var fore_g: Transform3D = sk.get_bone_global_pose(fore)
+	# Roll of the wrist about the forearm's own long axis (forearm -> wrist).
+	var axis_f: Vector3 = (fore_g.affine_inverse() * wrist_g.origin).normalized()
+	var rel: Quaternion = (fore_g.basis.get_rotation_quaternion().inverse()
+			* wrist_g.basis.get_rotation_quaternion()).normalized()
+	# Swing-twist decomposition: keep only the component about axis_f.
+	var proj: float = rel.x * axis_f.x + rel.y * axis_f.y + rel.z * axis_f.z
+	var tw := Quaternion(axis_f.x * proj, axis_f.y * proj, axis_f.z * proj, rel.w)
+	if tw.length_squared() < 1e-8:
+		return
+	tw = tw.normalized()
+	var ang: float = 2.0 * acos(clampf(absf(tw.w), -1.0, 1.0))
+	if tw.w < 0.0:
+		proj = -proj
+	var sign_a: float = 1.0 if proj >= 0.0 else -1.0
+	for d in spec["driven"]:
+		var b: int = d[0]
+		var frac: float = d[1]
+		var rest := sk.get_bone_rest(b)
+		var a_local: Vector3 = (rest.basis.inverse() * axis_f).normalized()
+		sk.set_bone_pose_rotation(b, rest.basis.get_rotation_quaternion()
+				* Quaternion(a_local, ang * frac * sign_a))

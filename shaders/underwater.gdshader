@@ -20,7 +20,10 @@ void fragment() {
 			* sin((uv.x * 7.0 - uv.y * 16.0) - t * 0.9);
 	cau = pow(abs(cau), 3.0) * 0.08 * amount;
 	float murk = clamp(depth_m / 18.0, 0.0, 1.0);
-	vec3 col = mix(scene, scene * tint.rgb * 2.4, mix(0.35, 0.72, murk) * amount);
+	// Even a metre down the water has taken most of the red out of everything.
+	// The old floor of 0.35 left the first few metres nearly untinted, which is
+	// exactly where you spend most of your time — and it looked like air.
+	vec3 col = mix(scene, scene * tint.rgb * 2.4, mix(0.47, 0.80, murk) * amount);
 	col += vec3(0.05, 0.12, 0.10) * cau;
 	// Light shafts: sunlight broken by the surface into blades that all point
 	// back at the sun. Cheap radial streaks, faded out with depth because the

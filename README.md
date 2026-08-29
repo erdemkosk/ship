@@ -10,6 +10,9 @@ Godot ile `project.godot` dosyasını açıp F5'e bas, ya da terminalden:
 /Applications/Godot.app/Contents/MacOS/Godot --path .
 ```
 
+Açılışta siyah kart: ortada DEEP TRAUMA, hafif glitch, sonra kaybolur ve deniz
+başlar. Komut satırı probe/ekran görüntüsü bayraklarında kart atlanır.
+
 ## Kontroller
 
 | Tuş | İşlev |
@@ -22,6 +25,7 @@ Godot ile `project.godot` dosyasını açıp F5'e bas, ya da terminalden:
 | Fare | FPS modunda bakış doğrudan fareyi izler (ESC: çık) |
 | Q / E | Serbest kamerada alçal / yüksel (Shift: hızlı) |
 | Tab | Ayar panelini gizle/göster |
+| `"` | FPS sayacını gizle/göster |
 
 ## Sağ panel ayarları
 
@@ -110,7 +114,8 @@ Aynı 1440p ölçümü: 66 → 120 FPS (vsync tavanı).
 
 ### Güvertede yürümek
 
-FPS modunda (`F`) gemide serbestçe yürünüyor. Bu, oyuncunun **teknenin kendi
+FPS modunda (`F`) gemide serbestçe yürünüyor. Göz ara ara kırpıyor — kapaklar
+ekranı kapatıp açıyor, bazen çift. Bu, oyuncunun **teknenin kendi
 koordinat sisteminde** simüle edilmesiyle çalışır (`scripts/deck_walker.gd`):
 
 - Beş metre savrulan, yirmi derece yatan bir rigid body'nin üstünde
@@ -457,8 +462,7 @@ ortak gövde, ortak tabla, iç yüzünde çekmeceler. Şalter tablosu o tablanı
 gömülü bir arduvaz levha, harita da onun kıç ucunda bir mazgalın içinde.
 
 Altı pirinç anahtar: kamara, dümen evi, ikaz, projektör, **silecek** ve **çapa**.
-Her biri klavyedeki kısayolun açtığı devrenin ta kendisi — tuşlar bu anahtarların
-kısayolu, ayrı bir sistem değil. Yüz **düz**: eğik olunca anahtarlar tavana
+Hepsi `E` ile atılıyor; klavye kısayolu yok. Yüz **düz**: eğik olunca anahtarlar tavana
 bakıyor ve yazılar durabildiğin hiçbir yerden okunmuyordu.
 
 Her anahtarın yanında **kırmızı/yeşil bir lamba**. Yananı dümenden bir bakışta
@@ -591,10 +595,9 @@ bakış ve yürüyüş donuyor, sürgüleri rahatça çekiyorsun. Kapatınca far
 yeniden kameraya geçiyor. Bunu panelin kendisi değil kamera yönetiyor —
 imlecin sahibi kim olursa olsun modu geri verecek olan o.
 
-Sol üstte tek bir pano: **gemi durumu**. Çapa ne yapıyor, hangi devre yanıyor,
-ve her satırın kendi tuşu yanında. Serbest kamerada gizleniyor. Alttaki tuş
-şeridi kaldırıldı — tuşlar zaten bu panelde yazıyor, ikinci kez yazmanın
-anlamı yoktu. Menü yok; bir teknenin menüsü olmaz, göz atılacak bir pano olur.
+Sol üst gemi-durumu panosu ve alttaki tuş şeridi yok: hangi tuşun ne yaptığını
+ekranda yazan bir menü yok. Devreler dümen evindeki pirinç anahtarlarla
+atılıyor.
 
 ### Dümendeki aletler
 

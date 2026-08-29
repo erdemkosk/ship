@@ -137,12 +137,12 @@ func toggle() -> void:
 func status() -> String:
 	match state:
 		State.VEERING:
-			return "ÇAPA FUNDA  %.0f m zincir" % chain_out
+			return "ANCHOR DOWN  %.0f m chain" % chain_out
 		State.SET:
-			return ("ÇAPA TUTTU  %.0f m zincir" % chain_out) if planted \
-					else ("ÇAPA TARIYOR  %.0f m" % chain_out)
+			return ("ANCHOR HOLDING  %.0f m chain" % chain_out) if planted \
+					else ("ANCHOR DRAGGING  %.0f m" % chain_out)
 		State.WEIGHING:
-			return "ÇAPA VİRA  %.0f m" % chain_out
+			return "ANCHOR HEAVING  %.0f m" % chain_out
 		_:
 			return ""
 

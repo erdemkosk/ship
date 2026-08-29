@@ -12,6 +12,13 @@ extends Node3D
 
 enum Mode { FOLLOW, FPS, FREE }
 
+## Keyboard shorthand -> the switch it throws. Same ids the fuse box uses, so
+## there is one circuit behind both and they cannot disagree.
+const SHORTCUTS := {
+	"anchor": "sw_anchor", "light_cabin": "sw_cabin", "light_helm": "sw_helm",
+	"light_beacon": "sw_beacon", "light_flood": "sw_flood", "wiper": "sw_wiper",
+}
+
 var target: Node3D
 var ocean: Node3D
 var weather: Node3D
@@ -34,8 +41,6 @@ var _warm_mat: ShaderMaterial
 var _warmth := 0.22
 var _motes: GPUParticles3D
 var _prompt: Label
-var _status: Label
-var _hud_t := 0.0
 var _walker: RefCounted = (load("res://scripts/deck_walker.gd") as GDScript).new()
 # Eye smoothing. The walker's feet move in hard 0.28 m increments up a
 # companionway, so an eye pinned straight to them climbs like a staircase of
@@ -52,7 +57,40 @@ var _panel: Node = null
 var _chart_t := 0.0
 var _last_aim := ""
 var _bubbles: GPUParticles3D
+## Your own breath. Separate from the ambient field: those bubbles say the sea
+## is aerated, these say YOU are down here and holding it — they come off your
+## face, they burst as the water closes over you, and they trickle after.
+var _breath: GPUParticles3D
+var _breath_burst := 0.0
+var _was_sub := false
+var _was_ladder := false
+## The mask. `_fog` is condensation on the inside of the glass, `_wipe` is the
+## finger crossing it — 1 at the start of the sweep, 0 when it is clear.
+var _mask_rect: ColorRect
+var _mask_mat: ShaderMaterial
+var _fog := 0.0
+var _wipe := 0.0
+var _inhale: AudioStreamPlayer
+var _exhale: AudioStreamPlayer
+## The breath cycle, and the level of fog at which the next automatic clear
+## happens. Both are deliberately irregular: a diver does not breathe to a
+## metronome and does not clear their mask on a schedule either.
+var _br_t := 0.0
+var _br_in := true
+var _wipe_at := 0.7
+## Seconds of wearing it before the glass is milky. Faster in the water than
+## in air, because it is the difference between your face and the sea that
+## does it, not time.
+const FOG_WET := 150.0
+const FOG_DRY := 320.0
 var _arms: Node
+var _reticle: Control
+var _blink_rect: ColorRect
+var _blink_mat: ShaderMaterial
+var _blink := 0.0
+var _blink_wait := 4.0
+var _blink_tween: Tween
+var _blink_again := false
 
 
 func _ready() -> void:
@@ -89,17 +127,27 @@ func _ready() -> void:
 	_prompt.visible = false
 	pl.add_child(_prompt)
 
-	# Ship's state, top left: what every circuit is doing and which key works
-	# it. A boat has no menus — this is the panel you glance at.
-	_status = Label.new()
-	_status.position = Vector2(14, 44)
-	_status.add_theme_font_size_override("font_size", 14)
-	_status.add_theme_color_override("font_color", Color(0.92, 0.72, 0.44))
-	_status.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
-	_status.add_theme_constant_override("outline_size", 4)
-	_status.add_theme_constant_override("line_spacing", 3)
-	pl.add_child(_status)
+	# Reticle. A boat has no HUD, so this is as close to nothing as it can be
+	# and still answer the only question it exists to answer: WHICH of the four
+	# fittings under your nose is the one E will take. A hairline dot when there
+	# is nothing, four ticks closing on it when there is.
+	_reticle = Control.new()
+	_reticle.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_reticle.set_script(load("res://scripts/reticle.gd"))
+	pl.add_child(_reticle)
 
+	# Occasional blink. On this layer so it covers the view, the reticle and
+	# the prompt — eyelids sit in front of everything you were looking at.
+	_blink_rect = ColorRect.new()
+	_blink_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_blink_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_blink_rect.color = Color(1, 1, 1, 1)
+	_blink_mat = ShaderMaterial.new()
+	_blink_mat.shader = load("res://shaders/blink.gdshader")
+	_blink_rect.material = _blink_mat
+	_blink_rect.visible = false
+	pl.add_child(_blink_rect)
 
 
 func set_mode(m: int) -> void:
@@ -121,6 +169,7 @@ func set_mode(m: int) -> void:
 				target.set("helm_engaged", true)
 				target.set("telegraph_engaged", false)
 			pitch = 0.0
+			_blink_wait = randf_range(1.8, 4.5)
 		Mode.FREE:
 			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 			if _arms != null:
@@ -130,6 +179,7 @@ func set_mode(m: int) -> void:
 				target.set("telegraph_engaged", false)
 			if _prompt != null:
 				_prompt.visible = false
+			_stop_blink()
 			var fwd := -_cam.global_basis.z
 			yaw = atan2(-fwd.x, -fwd.z)
 			pitch = asin(clampf(fwd.y, -1.0, 1.0))
@@ -142,6 +192,7 @@ func set_mode(m: int) -> void:
 				target.set("telegraph_engaged", false)
 			if _prompt != null:
 				_prompt.visible = false
+			_stop_blink()
 			pitch = clampf(pitch, -1.15, 0.45)
 
 
@@ -177,6 +228,17 @@ func _unhandled_input(event: InputEvent) -> void:
 				pitch = clampf(pitch - event.relative.y * 0.005, -1.15, 0.45)
 		return
 
+	# The circuits, by key. A physical switch under the fuse box lid is the
+	# honest way to work one, and it is still there — but the status panel
+	# prints a key beside every row, and a panel that prints keys that do
+	# nothing is worse than no panel. `by_hand = false` is what says "this is
+	# the shortcut, not a finger", so the shut lid does not swallow it.
+	if mode == Mode.FPS and target != null and target.has_method("toggle_switch"):
+		for act: String in SHORTCUTS:
+			if event.is_action_pressed(act):
+				target.toggle_switch(SHORTCUTS[act], false)
+				return
+
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_RIGHT and mode != Mode.FPS:
 			_orbiting = event.pressed
@@ -202,9 +264,18 @@ func _process(delta: float) -> void:
 		_:
 			_process_follow(delta)
 	_update_underwater()
-	_update_status(delta)
-	if mode != Mode.FPS and _warm_rect != null:
-		_warm_rect.visible = false
+	_update_blink(delta)
+	if mode != Mode.FPS:
+		# Everything that belongs to being ABOARD goes with the mode. These are
+		# only ever written inside _process_fps, so on the frame you leave first
+		# person they simply stopped being updated and stayed on screen — a
+		# crosshair and a prompt floating over an orbit camera.
+		if _warm_rect != null:
+			_warm_rect.visible = false
+		if _reticle != null:
+			_reticle.visible = false
+		if _prompt != null:
+			_prompt.visible = false
 
 
 func _process_follow(delta: float) -> void:
@@ -285,27 +356,69 @@ func _process_fps(delta: float) -> void:
 				continue
 			if engaged == "telegraph" and iid == "telegraph":
 				continue
-			var to: Vector3 = it["pos"] - eye
+			# The suit hangs INSIDE the locker. Through a shut steel door it is
+			# not a thing you can reach, so it is not a thing you are offered.
+			if iid == "divegear" and not (bool(target.get("locker_open"))
+					or bool(target.get("gear_worn"))):
+				continue
+			# Same for the switchboard: the toggles are under a steel hood. With
+			# the hood down they are not merely inoperable — they are not there
+			# to point at, and offering them was the confusing part, because the
+			# prompt appeared and then E did nothing.
+			if iid.begins_with("sw_") and not bool(target.get("fusebox_open")):
+				continue
+			var ipos: Vector3 = it["pos"]
+			if target.has_method("interact_pos"):
+				ipos = target.interact_pos(iid, ipos)
+			var to: Vector3 = ipos - eye
 			var along := look_l.dot(to)
 			if along <= 0.02 or along > 2.2:
 				continue
 			var rr: float = float(it["r"]) * (1.0 + sway)
 			if iid == _last_aim:
 				rr *= 1.75
-			if (to - look_l * along).length() > rr:
+			var perp: float = (to - look_l * along).length()
+			if perp > rr:
 				continue
-			# The key sits next to the wheel. Nearest-along always picks the
-			# helm first; a look toward the barrel should take the ignition.
-			var take := along < nearest
-			if iid == "ignition" and str(cand.get("id", "")) == "helm":
-				take = true
-			if take:
-				nearest = along
+			# And it has to be in SIGHT. With the fuse lid standing open the
+			# radio sits right behind it, and reaching through a steel plate to
+			# take a handset off its hook is not a thing.
+			if _occluded(target, eye, ipos):
+				continue
+			# Score by ANGLE OFF THE CROSSHAIR, not by distance along the ray.
+			# Nearest-along handed you whichever fitting happened to be closest
+			# to your face — around the radar bracket that is four things at
+			# once, and never the one you were looking at. Perp/along is the
+			# tangent of the aim error, so the winner is simply whatever sits
+			# closest to the centre of the screen. The sticky bonus survives as
+			# a discount, so a target you have already found does not lose to a
+			# neighbour on a roll.
+			var score: float = perp / maxf(along, 0.05)
+			if iid == _last_aim:
+				score *= 0.62
+			if score < nearest:
+				nearest = score
 				cand = it
 		_last_aim = str(cand["id"]) if not cand.is_empty() else ""
+	if _reticle != null:
+		_reticle.set("aim_target", 0.0 if cand.is_empty() else 1.0)
+		_reticle.visible = mode == Mode.FPS
 
 	if Input.is_action_just_pressed("use"):
-		if _arms != null and _arms.inspecting_id() != "":
+		if cand.is_empty() and engaged == "" and bool(target.get("radio_held")):
+			# Holding the handset with nothing else under the crosshair: E puts
+			# it back on its hook. You should not have to hunt for the cradle
+			# with your nose to hang up a radio.
+			target.set("radio_held", false)
+			if _arms != null:
+				_arms.boat = target
+				_arms.notify_use("radio")
+		elif cand.is_empty() and engaged == "" and _fog >= 0.10 and _wipe <= 0.0 \
+				and bool(target.get("gear_worn")):
+			# Nothing under the crosshair and the glass is milky: that is the
+			# only thing E can sensibly mean.
+			_wipe_mask()
+		elif _arms != null and _arms.inspecting_id() != "":
 			_arms.boat = target
 			_arms.notify_use(_arms.inspecting_id())
 		elif not cand.is_empty() and str(cand["id"]) == "ignition" \
@@ -327,8 +440,9 @@ func _process_fps(delta: float) -> void:
 			var iid := str(cand["id"])
 			if _arms != null:
 				_arms.boat = target
-				if iid == "radio" and not bool(target.get("radio_held")):
-					target.set("radio_held", true)
+				if iid == "radio":
+					# One key, both ways: off the hook and back onto it.
+					target.set("radio_held", not bool(target.get("radio_held")))
 				_arms.notify_use(iid)
 			match iid:
 				"helm":
@@ -339,6 +453,14 @@ func _process_fps(delta: float) -> void:
 					target.set("chart_engaged", true)
 				"radio", "radar", "sounder":
 					pass
+				"sea_ladder":
+					_walker.grab_sea_ladder(target)
+				"locker":
+					target.toggle_switch("locker")
+				"divegear":
+					target.toggle_switch("divegear")
+					if _arms != null and _arms.has_method("face_gesture"):
+						_arms.face_gesture("wear")
 				"windlass":
 					var tk: Node = target.get("tackle")
 					if tk != null:
@@ -347,10 +469,10 @@ func _process_fps(delta: float) -> void:
 					if target.has_method("toggle_lights"):
 						target.toggle_lights()
 				_:
-					# Every switch on the console routes to the same circuit its
-					# keyboard shortcut throws — one system, two ways in.
+					# Brass toggles and doors: E throws the circuit.
 					var cid := str(cand["id"])
-					if (cid.begins_with("sw_") or cid.begins_with("door_")) \
+					if (cid.begins_with("sw_") or cid.begins_with("door_")
+							or cid == "fusebox" or cid == "stove") \
 							and target.has_method("toggle_switch"):
 						target.toggle_switch(str(cand["id"]))
 		engaged = "helm" if target.get("helm_engaged") \
@@ -358,44 +480,61 @@ func _process_fps(delta: float) -> void:
 				else ("chart" if target.get("chart_engaged") else ""))
 
 	if _prompt != null:
-		if _walker.get("swimming"):
-			_prompt.text = "SPACE — küpeşteden tırman" if _walker.get("can_board") \
-					else "Denizdesin — tekneye yüz"
+		if _walker.get("on_sea_ladder"):
+			_prompt.text = "W/S — climb   ·   SPACE — let go"
+			_prompt.visible = true
+		elif _walker.get("swimming"):
+			if _walker.get("can_board"):
+				_prompt.text = "SPACE — take the ladder"
+			elif bool(_walker.get("submerged")):
+				_prompt.text = "SPACE — swim up"
+			else:
+				_prompt.text = "You are in the sea — swim to the stern ladder   ·   CTRL: dive"
 			_prompt.visible = true
 		elif engaged == "helm":
 			if not cand.is_empty() and str(cand["id"]) == "ignition":
 				var st := int(target.get("engine"))
-				_prompt.text = "E — Kontak  (%s)" % (
-						"durdur" if st == 2 else ("bekleniyor" if st == 1 else "çalıştır"))
+				_prompt.text = "E — Ignition  (%s)" % (
+						"stop" if st == 2 else ("cranking" if st == 1 else "start"))
 			else:
-				_prompt.text = "E — dümeni bırak"
+				_prompt.text = "E — let go of the wheel"
 			_prompt.visible = true
 		elif engaged == "telegraph":
-			_prompt.text = "E — gaz kolunu bırak"
+			_prompt.text = "E — let go of the throttle"
 			_prompt.visible = true
 		elif engaged == "chart":
-			_prompt.text = "E — haritadan kalk"
+			_prompt.text = "E — leave the chart"
 			_prompt.visible = true
 		elif _arms != null and _arms.inspecting_id() in ["radar", "sounder"]:
-			_prompt.text = "E — ekranı yerine koy"
+			_prompt.text = "E — stow the screen"
+			_prompt.visible = true
+		elif cand.is_empty() and _fog >= 0.10 and _wipe <= 0.0 \
+				and bool(target.get("gear_worn")):
+			_prompt.text = "E — wipe the mask"
 			_prompt.visible = true
 		elif bool(target.get("radio_held")) and cand.is_empty():
-			_prompt.text = "Telsiz elinde — kordonu var, fazla uzaklaşma"
+			_prompt.text = "E — hang up the handset"
 			_prompt.visible = true
 		elif not cand.is_empty():
 			if cand["id"] == "radio" and bool(target.get("radio_held")):
-				_prompt.text = "E — telsizi yerine as"
+				_prompt.text = "E — hang up the handset"
 			elif str(cand["id"]) in ["radar", "sounder"] and _arms != null \
 					and _arms.inspecting_id() == str(cand["id"]):
-				_prompt.text = "E — ekranı yerine koy"
+				_prompt.text = "E — stow the screen"
+			elif str(cand["id"]) == "locker":
+				_prompt.text = "E — %s the locker" % (
+						"close" if bool(target.get("locker_open")) else "open")
+			elif str(cand["id"]) == "divegear":
+				_prompt.text = "E — %s the dive gear" % (
+						"take off" if bool(target.get("gear_worn")) else "put on")
 			elif str(cand["id"]) == "ignition":
 				var st := int(target.get("engine"))
-				_prompt.text = "E — Kontak  (%s)" % (
-						"durdur" if st == 2 else ("bekleniyor" if st == 1 else "çalıştır"))
+				_prompt.text = "E — Ignition  (%s)" % (
+						"stop" if st == 2 else ("cranking" if st == 1 else "start"))
 			elif (str(cand["id"]).begins_with("sw_") or str(cand["id"]).begins_with("door_")) \
 					and target.has_method("switch_state"):
 				_prompt.text = "E — %s  (%s)" % [cand["name"],
-						"kapat" if target.switch_state(str(cand["id"])) else "aç"]
+						"off" if target.switch_state(str(cand["id"])) else "on"]
 			else:
 				_prompt.text = "E — %s" % cand["name"]
 			_prompt.visible = true
@@ -428,8 +567,17 @@ func _process_fps(delta: float) -> void:
 					+ r2 * Input.get_axis("boat_left", "boat_right")
 			if wish.length() > 1.0:
 				wish = wish.normalized()
+		# Raw stick as well as the deck-projected heading: in the water and on
+		# the rungs "forward" is not a direction on the deck plane.
+		var axes := Vector2.ZERO
+		if not _panel_open():
+			axes = Vector2(Input.get_axis("boat_left", "boat_right"),
+					Input.get_axis("boat_backward", "boat_forward"))
 		_walker.update(delta, target, wish,
-				Input.is_action_just_pressed("jump") and not _panel_open())
+				Input.is_action_just_pressed("jump") and not _panel_open(),
+				look_fwd, axes,
+				Input.is_action_pressed("jump") and not _panel_open(),
+				Input.is_action_pressed("dive") and not _panel_open())
 
 	# --- the eye -------------------------------------------------------------
 	var eye_l: Vector3 = _walker.eye_local()
@@ -460,7 +608,12 @@ func _process_fps(delta: float) -> void:
 	eye_l.x += sin(_bob) * amp * 0.9
 
 	var cam_pos: Vector3 = xf * eye_l
-	if ocean != null:
+	# The eye is normally held clear of the water — you are aboard, and a wave
+	# washing the lens every time she rolls is nobody's idea of a boat. In the
+	# sea, or on the transom ladder with the sea coming over you, that clamp is
+	# exactly wrong: it is the one moment the view SHOULD go under.
+	if ocean != null and not bool(_walker.get("swimming")) \
+			and not bool(_walker.get("on_sea_ladder")):
 		cam_pos.y = maxf(cam_pos.y, ocean.get_height(cam_pos) + 0.35)
 	_cam.global_position = cam_pos
 
@@ -476,13 +629,88 @@ func _process_fps(delta: float) -> void:
 		yaw = lerp_angle(yaw, atan2(-dirw.x, -dirw.z), k)
 		pitch = lerpf(pitch, asin(clampf(dirw.y, -1.0, 1.0)), k)
 
+	# --- how far you can turn your head while you have hold of something -----
+	# Planted at a control your BODY does not turn. A helmsman with both hands
+	# on the wheel can look over either shoulder and no further; on the boarding
+	# ladder you are facing the iron with your arms round it. Without this you
+	# can stand at the wheel gripping it and look dead astern, which is the one
+	# thing that most gives the hands away as decoration.
+	var st_lim := 0.0
+	var st_base := 0.0
+	if engaged == "helm" or engaged == "telegraph":
+		st_base = _yaw_of(-xf.basis.z)
+		st_lim = deg_to_rad(48.0)
+	elif engaged == "chart":
+		st_base = _yaw_of(xf.basis * (target.CHART_LOOK - target.CHART_EYE))
+		st_lim = deg_to_rad(58.0)
+	elif bool(_walker.get("on_sea_ladder")):
+		# Facing the iron. You are hanging OFF the transom, so the ladder is
+		# toward the bow from you — her forward, not her stern.
+		st_base = _yaw_of(-xf.basis.z)
+		st_lim = deg_to_rad(62.0)
+	if st_lim > 0.0:
+		yaw = st_base + clampf(wrapf(yaw - st_base, -PI, PI), -st_lim, st_lim)
+	# Taking hold of the boarding ladder turns you round. You were leaning over
+	# the cap looking down at it; now you are on it, facing it, with the ship in
+	# front of your nose — and no amount of head-turning does that, the whole
+	# body comes about.
+	var on_lad: bool = bool(_walker.get("on_sea_ladder"))
+	if on_lad and not _was_ladder:
+		yaw = _yaw_of(-xf.basis.z)
+		pitch = clampf(pitch, -0.5, 0.5)
+	_was_ladder = on_lad
+
 	var heel := asin(clampf(xf.basis.x.y, -1.0, 1.0))
 	_roll = lerpf(_roll, clampf(heel * 0.34, -0.13, 0.13), 1.0 - exp(-6.0 * delta))
 	_cam.global_basis = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) \
 			* Basis(Vector3.BACK, _roll)
 	if _arms != null:
+		if _arms.has_method("set_sea_ladder"):
+			_arms.set_sea_ladder(bool(_walker.get("on_sea_ladder")), _walker.pos.y)
 		_arms.update(delta, target, engaged, walking, bool(_walker.get("swimming")))
 	_update_warmth(delta)
+
+
+func _occluded(bt: Node3D, from_l: Vector3, to_l: Vector3) -> bool:
+	## Segment against the boat's aim blockers, slab method, boat-local. Cheap
+	## enough to run per candidate per frame — there is never more than one.
+	var blockers: Array = bt.get("aim_blockers")
+	if blockers == null or blockers.is_empty():
+		return false
+	var d: Vector3 = to_l - from_l
+	for b: AABB in blockers:
+		var t0 := 0.0
+		var t1 := 1.0
+		var hit := true
+		for ax in 3:
+			var o: float = from_l[ax]
+			var dd: float = d[ax]
+			var lo: float = b.position[ax]
+			var hi: float = b.position[ax] + b.size[ax]
+			if absf(dd) < 1e-6:
+				if o < lo or o > hi:
+					hit = false
+					break
+				continue
+			var ta: float = (lo - o) / dd
+			var tb: float = (hi - o) / dd
+			if ta > tb:
+				var sw := ta
+				ta = tb
+				tb = sw
+			t0 = maxf(t0, ta)
+			t1 = minf(t1, tb)
+			if t0 > t1:
+				hit = false
+				break
+		if hit:
+			return true
+	return false
+
+
+func _yaw_of(d: Vector3) -> float:
+	## The camera's yaw that looks along `d`. Same convention as set_mode().
+	return atan2(-d.x, -d.z)
 
 
 func _process_free(delta: float) -> void:
@@ -515,38 +743,58 @@ func _clamp_and_place(cam_pos: Vector3) -> void:
 	_cam.global_position = cam_pos
 
 
-func _update_status(delta: float) -> void:
-	if _status == null:
+func _update_blink(delta: float) -> void:
+	if mode != Mode.FPS or _blink_rect == null or _blink_mat == null:
 		return
-	var show := mode != Mode.FREE and target != null
-	_status.visible = show
-	if not show:
+	if _blink_tween != null and _blink_tween.is_running():
+		_blink_mat.set_shader_parameter("close", _blink)
+		_blink_rect.visible = _blink > 0.004
 		return
-	_hud_t -= delta
-	if _hud_t > 0.0:
-		return
-	_hud_t = 0.25
-
-	var tackle: Node = target.get("tackle")
-	var anchor := "içeride"
-	if tackle != null and tackle.has_method("status"):
-		var st: String = tackle.status()
-		if st != "":
-			anchor = st
-	var rows := [
-		"ÇAPA  [G]   %s" % anchor,
-		"",
-		"KAMARA      [1]  %s" % _on(target.get("light_cabin")),
-		"DÜMEN EVİ   [2]  %s" % _on(target.get("light_helm")),
-		"İKAZ FENERİ [3]  %s" % _on(target.get("light_beacon")),
-		"PROJEKTÖR   [6]  %s" % _on(target.get("light_flood")),
-		"SİLECEK     [5]  %s" % _on(target.get("wiper_on")),
-	]
-	_status.text = "\n".join(rows)
+	_blink_wait -= delta
+	if _blink_wait <= 0.0:
+		_start_blink()
 
 
-func _on(v: Variant) -> String:
-	return "● açık" if bool(v) else "○ kapalı"
+func _start_blink() -> void:
+	if _blink_tween != null:
+		_blink_tween.kill()
+	_blink = 0.0
+	_blink_rect.visible = true
+	_blink_tween = create_tween()
+	_blink_tween.set_pause_mode(Tween.TWEEN_PAUSE_PROCESS)
+	_blink_tween.tween_property(self, "_blink", 1.0, 0.055).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	_blink_tween.tween_interval(0.035)
+	_blink_tween.tween_property(self, "_blink", 0.0, 0.12).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_blink_tween.finished.connect(_on_blink_finished, CONNECT_ONE_SHOT)
+
+
+func _on_blink_finished() -> void:
+	_blink = 0.0
+	if _blink_mat != null:
+		_blink_mat.set_shader_parameter("close", 0.0)
+	if mode != Mode.FPS:
+		_stop_blink()
+		return
+	if not _blink_again and randf() < 0.18:
+		_blink_again = true
+		_blink_wait = 0.10
+		return
+	_blink_again = false
+	_blink_wait = randf_range(3.2, 8.5)
+	if _blink_rect != null:
+		_blink_rect.visible = false
+
+
+func _stop_blink() -> void:
+	if _blink_tween != null:
+		_blink_tween.kill()
+		_blink_tween = null
+	_blink = 0.0
+	_blink_again = false
+	if _blink_mat != null:
+		_blink_mat.set_shader_parameter("close", 0.0)
+	if _blink_rect != null:
+		_blink_rect.visible = false
 
 
 func _build_underwater() -> void:
@@ -574,6 +822,34 @@ func _build_underwater() -> void:
 	_warm_rect.material = _warm_mat
 	_warm_rect.visible = false
 	layer.add_child(_warm_rect)
+
+	# The mask goes on TOP of both — it is between your eye and everything
+	# else, including the water. Added last, so it draws last.
+	_mask_rect = ColorRect.new()
+	_mask_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_mask_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_mask_rect.color = Color(1, 1, 1, 1)
+	_mask_mat = ShaderMaterial.new()
+	_mask_mat.shader = load("res://shaders/dive_mask.gdshader")
+	_mask_rect.material = _mask_mat
+	_mask_rect.visible = false
+	layer.add_child(_mask_rect)
+
+	# Your own breath, so it is not positional — it happens inside your head.
+	var inh: AudioStream = load("res://assets/audio/inhale.mp3")
+	if inh != null:
+		# Two voices off one clip: the draw through the regulator, and the same
+		# breath let out — slower, deeper, quieter. That pair is the whole sound
+		# of being under, and it is the reason a mask feels like a mask.
+		_inhale = AudioStreamPlayer.new()
+		_inhale.stream = inh
+		_inhale.volume_db = -6.0
+		add_child(_inhale)
+		_exhale = AudioStreamPlayer.new()
+		_exhale.stream = inh
+		_exhale.volume_db = -13.0
+		_exhale.pitch_scale = 0.74
+		add_child(_exhale)
 
 
 	_motes = GPUParticles3D.new()
@@ -648,6 +924,32 @@ func _build_underwater() -> void:
 	add_child(_bubbles)
 	_bubbles.top_level = true
 
+	# The diver's own. Small, fast, and off the mouth.
+	_breath = GPUParticles3D.new()
+	_breath.amount = 40
+	_breath.lifetime = 2.6
+	_breath.emitting = false
+	_breath.transform_align = GPUParticles3D.TRANSFORM_ALIGN_DISABLED
+	_breath.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_breath.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_breath.visibility_aabb = AABB(Vector3(-3, -2, -3), Vector3(6, 14, 6))
+	var rpm := ParticleProcessMaterial.new()
+	rpm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	rpm.emission_sphere_radius = 0.05
+	rpm.direction = Vector3(0, 1, 0)
+	rpm.spread = 22.0
+	rpm.initial_velocity_min = 0.35
+	rpm.initial_velocity_max = 0.95
+	rpm.gravity = Vector3(0, 1.6, 0)
+	rpm.damping_min = 0.05
+	rpm.damping_max = 0.25
+	rpm.scale_min = 0.35
+	rpm.scale_max = 1.25
+	_breath.process_material = rpm
+	_breath.draw_pass_1 = bq
+	add_child(_breath)
+	_breath.top_level = true
+
 
 func _update_underwater() -> void:
 	if ocean == null or _cam == null:
@@ -674,6 +976,8 @@ func _update_underwater() -> void:
 		_bubbles.emitting = under
 		if under:
 			_bubbles.global_position = _cam.global_position + Vector3(0.0, -2.0, 0.0)
+	_update_breath(under)
+	_update_mask(get_process_delta_time(), under)
 	if under and _under_mat != null and weather != null and weather.has_method("sun_direction"):
 		# Light shafts have to point at the real sun, so project it to screen.
 		var sd: Vector3 = weather.sun_direction()
@@ -686,6 +990,115 @@ func _update_underwater() -> void:
 			ss = ss.clamp(Vector2(-1.0, -1.0), Vector2(2.0, 2.0))
 		_under_mat.set_shader_parameter("sun_screen", ss)
 		_under_mat.set_shader_parameter("shaft_energy", 0.7 if sd.y > 0.05 else 0.15)
+
+
+func _update_mask(delta: float, under: bool) -> void:
+	## The mask, from the moment it leaves the hook to the finger that clears
+	## it. Nothing here decides whether you are WEARING it — boat.gd owns that,
+	## because the thing is either on the hook or on your face and one of those
+	## is a fitting on the ship.
+	if _mask_rect == null or target == null:
+		return
+	var wear: float = float(target.call("gear_wear_t")) if target.has_method("gear_wear_t") \
+			else 0.0
+	var worn: bool = wear > 0.001 and mode == Mode.FPS
+	_mask_rect.visible = worn
+	if not worn:
+		_fog = 0.0
+		_wipe = 0.0
+		_br_t = 0.0
+		_br_in = true
+		return
+	_breathe(delta, under)
+	# Condensation. It only really builds once the glass is cold, which is to
+	# say in the water; in air it creeps.
+	if _wipe > 0.0:
+		_wipe = maxf(_wipe - delta / 0.9, 0.0)
+		if _wipe <= 0.0:
+			# A wipe never quite clears it. What is left in the corners is
+			# where it starts again, which is why the second one comes sooner.
+			_fog = 0.06
+	elif wear > 0.98:
+		_fog = minf(_fog + delta / (FOG_WET if under else FOG_DRY), 1.0)
+		# You clear your own mask. Not at some fixed level and not only when
+		# you are blind — you do it when it starts to bother you, which is a
+		# different moment every time.
+		if _fog >= _wipe_at:
+			_wipe_mask()
+	var vp: Vector2 = get_viewport().get_visible_rect().size
+	_mask_mat.set_shader_parameter("wear", wear)
+	_mask_mat.set_shader_parameter("fog", _fog)
+	_mask_mat.set_shader_parameter("wipe", _wipe)
+	# The clear front is the FINGER, not a timer. Ask the hand where it is.
+	if _wipe > 0.0 and _arms != null and _arms.has_method("wipe_front"):
+		var wf: Vector2 = _arms.wipe_front()
+		_mask_mat.set_shader_parameter("wipe_x", wf.x)
+		_mask_mat.set_shader_parameter("wipe_dir", wf.y)
+	_mask_mat.set_shader_parameter("underwater", 1.0 if under else 0.0)
+	_mask_mat.set_shader_parameter("aspect", maxf(vp.x, 1.0) / maxf(vp.y, 1.0))
+	if ocean != null:
+		_mask_mat.set_shader_parameter("wave_time", ocean.wave_time)
+
+
+func _breathe(delta: float, under: bool) -> void:
+	## In, pause, out, longer pause. Only under the water — with your head out
+	## you are breathing air and nobody hears it.
+	if _inhale == null or not under:
+		_br_t = 0.0
+		_br_in = true
+		return
+	_br_t -= delta
+	if _br_t > 0.0:
+		return
+	if _br_in:
+		_inhale.pitch_scale = randf_range(0.94, 1.07)
+		_inhale.volume_db = randf_range(-8.0, -5.0)
+		_inhale.play()
+		_br_t = randf_range(1.30, 1.75)
+	else:
+		_exhale.pitch_scale = randf_range(0.70, 0.80)
+		_exhale.volume_db = randf_range(-15.0, -11.5)
+		_exhale.play()
+		_br_t = randf_range(2.10, 2.95)
+	_br_in = not _br_in
+
+
+func _wipe_mask() -> void:
+	## A finger across the inside of the glass. Only worth doing if there is
+	## something on it.
+	if _fog < 0.09 or _wipe > 0.0:
+		return
+	_wipe = 1.0
+	# Where the NEXT one happens. Somewhere between a lens that is just going
+	# hazy and one you cannot see out of at all.
+	_wipe_at = randf_range(0.42, 0.94)
+	if _arms != null and _arms.has_method("face_gesture"):
+		_arms.face_gesture("wipe")
+
+
+func _update_breath(under: bool) -> void:
+	## Bubbles off your own face, but only when it is YOU in the water — the
+	## free camera goes under too and it does not breathe.
+	if _breath == null or _cam == null:
+		return
+	var diver: bool = mode == Mode.FPS and _walker != null \
+			and (bool(_walker.get("swimming")) or bool(_walker.get("on_sea_ladder")))
+	var sub: bool = diver and under
+	if sub and not _was_sub:
+		_breath_burst = 0.75
+		_breath.restart()
+		# The breath itself is on its own cycle in _breathe(); this is only the
+		# lungful of bubbles that goes with the water closing over you.
+		_br_t = 0.0
+	_was_sub = sub
+	_breath_burst = maxf(_breath_burst - get_process_delta_time(), 0.0)
+	_breath.emitting = sub
+	# One lungful as the water closes over you, then the slow leak of a held
+	# breath. amount_ratio IS the emission rate, so this is literally that.
+	_breath.amount_ratio = 1.0 if _breath_burst > 0.0 else 0.18
+	if sub:
+		_breath.global_position = _cam.global_position \
+				+ (-_cam.global_basis.z) * 0.17 - _cam.global_basis.y * 0.09
 
 
 func _update_warmth(delta: float) -> void:

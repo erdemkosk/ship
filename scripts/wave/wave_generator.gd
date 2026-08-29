@@ -157,7 +157,7 @@ func set_sea_state(wind_speed: float, wind_dir_deg: float, hs_wind: float,
 		# roughly what a real gale shows.
 		c.whitecap = clampf(0.92 - (wind_speed - 14.0) * 0.004 + (steep - 0.9) * 0.03,
 				0.88, 0.95)
-		c.foam_amount = clampf(1.5 + wind_speed * 0.16, 1.5, 5.5)
+		c.foam_amount = clampf(1.5 + wind_speed * 0.16, 1.5, 8.5)
 		c.mark_dirty()
 	_normalise(hs_wind, hs_swell)
 

@@ -28,13 +28,39 @@ const JUMP_SPEED := 3.5
 const CLIMB_SPEED := 2.1
 const SNAP_DOWN := 0.55        # how far below the feet a floor still catches you
 
+## --- the boarding ladder over the transom ----------------------------------
+## Slower than the companionway inside, deliberately. You are hauling a soaked
+## body up wet iron with the stern coming at you; the whole point of the thing
+## is that it is work, and that you can feel each rung.
+const SEA_CLIMB := 0.62
+const SEA_STEP_OFF := 5.22     # where you end up standing once you are over
+const SEA_LEAN := 0.1045       # tan(6 deg): the stiles are raked, so is the climb
+const SEA_STANDOFF := 0.36     # chest to rung — how far your body hangs off it
+
+## --- in the water ----------------------------------------------------------
+## A person in oilskins, not a fish. Everything here is slow.
+const SWIM_SPEED := 1.30       # paddling, m/s
+const SWIM_RISE := 1.05        # kicking for the surface
+const SWIM_DIVE := 1.15        # driving yourself under against your own float
+const SWIM_DRAG := 2.6         # the water takes your momentum back in ~0.4 s
+const FLOAT_RISE := 0.60       # buoyancy at the surface, once you stop working
+const NEUTRAL_DEPTH := 6.5     # where your chest stops floating you (see _swim)
+const HEAD_OUT := 0.16         # where the eye settles above the wave, at rest
+const SWIM_VMAX := 6.0
+
 var pos := Vector3.ZERO        # local, at the feet
 var vel := Vector3.ZERO
 var on_floor := false
 var on_ladder := false
+var on_sea_ladder := false
 var swimming := false
+## The eye is under the surface, and how deep. Read by the camera (it stops
+## clamping the view above the waves) and by the hands.
+var submerged := false
+var swim_depth := 0.0
 var _grab := false   # Space-held grip on the rungs
 var _swim_pos := Vector3.ZERO   # WORLD position while overboard
+var _swim_vel := Vector3.ZERO   # WORLD velocity while overboard
 var can_board := false
 
 
@@ -43,18 +69,29 @@ func spawn_at(p: Vector3) -> void:
 	vel = Vector3.ZERO
 	on_floor = true
 	swimming = false
+	on_sea_ladder = false
+	submerged = false
+	swim_depth = 0.0
 	can_board = false
 	_grab = false
 	_swim_pos = Vector3.ZERO
+	_swim_vel = Vector3.ZERO
 
 
 func eye_local() -> Vector3:
 	return pos + Vector3(0.0, EYE, 0.0)
 
 
-func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool) -> void:
+func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
+		look_w: Vector3 = Vector3.ZERO, axes: Vector2 = Vector2.ZERO,
+		want_up: bool = false, want_down: bool = false) -> void:
 	## `wish` is the desired heading in the boat's local xz, already rotated by
 	## where the player is looking. Length <= 1.
+	##
+	## `look_w` and `axes` are for the water and the rungs, where the deck's flat
+	## xz is not enough: in the sea forward means WHERE YOU ARE LOOKING in three
+	## dimensions — look down, swim, and you go down — and on a ladder forward
+	## means up. `axes` is the raw stick (x = strafe, y = ahead), unprojected.
 	if boat == null:
 		return
 	var floors: Array = boat.FLOORS
@@ -77,9 +114,24 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool) -> void:
 	# you were. The old test also fired on `pos.y < 0.15`, so a stumble that
 	# dropped you a metre inside the hull put you in the water with the deck
 	# still over your head.
-	var outside := absf(pos.x) > 1.34 or pos.z < -4.02 or pos.z > 4.24
+	# Outside her BULWARKS — the line the blockers stop you at, not a box drawn
+	# somewhere inside the deck. The old figures (1.34 and 4.24) were both well
+	# inboard of the rail, so standing at the stern in any sea at all put you
+	# over the side the first time a wave came aboard: the aft deck runs to
+	# 5.52 and the side decks to 1.62, and you are allowed to stand on both.
+	var outside := absf(pos.x) > 1.75 or pos.z < -4.15 or pos.z > 5.62
 	var ocean: Node = boat.get("ocean")
-	if not swimming and outside and ocean != null:
+	if on_sea_ladder:
+		# Hanging off the transom you are outside every rail there is, so this
+		# has to come before the overboard test or the ladder drops you in the
+		# water on the frame you take hold of it.
+		_climb_sea_ladder(delta, boat, xf, ocean, axes, want_jump)
+		return
+	# And ON NOTHING. Being pooped by a wave is not going overboard; you are
+	# standing on her deck with the sea round your knees, which is a thing that
+	# happens to fishermen every day of their lives. The only way into the water
+	# is to be outside her AND have nothing under your feet.
+	if not swimming and outside and not on_floor and ocean != null:
 		var wp: Vector3 = xf * pos
 		if wp.y < float(ocean.get_height(wp)) + 0.15:
 			swimming = true
@@ -87,10 +139,17 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool) -> void:
 			# boat's frame is why you kept pace with her after going over the
 			# side: the hull sailed away and dragged your coordinates with it.
 			_swim_pos = wp
+			# And keep the fall. Entering the water is a DIVE — the body carries
+			# what it had on the way down, goes under, and comes back up. Zeroing
+			# it here is what used to make going over the side read as stepping
+			# into a bath.
+			_swim_vel = xf.basis * vel
 	if swimming:
-		_swim(delta, boat, xf, ocean, wish, want_jump)
+		_swim(delta, boat, xf, ocean, axes, look_w, want_jump, want_up, want_down)
 		return
 	can_board = false
+	submerged = false
+	swim_depth = 0.0
 
 	# --- ladder --------------------------------------------------------------
 	# The rungs hold you only while you are actually hanging on them. Standing
@@ -220,34 +279,170 @@ func _resolve_walls(blockers: Array) -> void:
 
 
 func _swim(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
-		wish: Vector2, want_jump: bool) -> void:
-	## In the water. Simulated at the wave surface in WORLD space (the sea does
-	## not ride along with the boat), then written back into the boat's frame so
-	## the camera pipeline stays one code path.
+		axes: Vector2, look_w: Vector3, want_jump: bool,
+		want_up: bool, want_down: bool) -> void:
+	## In the water. Simulated in WORLD space at the waves — the sea does not
+	## ride along with the boat — and only written back into her frame at the
+	## end so the camera stays one code path.
+	##
+	## Three things decide everything and there is nothing else in here:
+	##
+	##   * how much of you is UNDER. Half a body in the air still falls, cannot
+	##     be paddled, and feels no buoyancy; that fraction is what turns a jump
+	##     off the rail into a plunge instead of a landing.
+	##   * where you are LOOKING, in three dimensions. Look down and swim and
+	##     you go down. That is the whole of diving; there is no dive button.
+	##   * buoyancy, which is not a force here but a place — the eye wants to sit
+	##     a hand's breadth above the wave, and everything else is you working
+	##     against that.
 	var wpos: Vector3 = _swim_pos
+	var wh: float = float(ocean.get_height(wpos)) if ocean != null else 0.0
+	# How much of the body the sea has hold of: feet at wpos, head a body up.
+	var frac: float = clampf((wh - wpos.y) / HEIGHT, 0.0, 1.0)
+	# Depth of the EYE below the wave. Negative means your head is out.
+	var sub: float = wh - (wpos.y + EYE)
+
+	# --- what you are trying to do ------------------------------------------
+	var fwd: Vector3 = look_w
+	if fwd.length_squared() < 1e-6:
+		fwd = -xf.basis.z
+	fwd = fwd.normalized()
+	var right: Vector3 = fwd.cross(Vector3.UP)
+	right = right.normalized() if right.length_squared() > 1e-6 else xf.basis.x
+	var drive: Vector3 = fwd * axes.y + right * axes.x
+	if drive.length() > 1.0:
+		drive = drive.normalized()
+	if sub < 0.0:
+		# Head out of the water: your arms are half in the air and you cannot
+		# crawl UP out of the sea, however hard you look at the sky.
+		drive.y = maxf(drive.y, 0.0)
+	var wish_v: Vector3 = drive * SWIM_SPEED
+	if want_up:
+		wish_v.y += SWIM_RISE
+	if want_down:
+		wish_v.y -= SWIM_DIVE
+	# Buoyancy as a target, not a push: above the settle line it pulls you down,
+	# below it lifts you, and it dies at the line so you neither sink nor pop.
+	#
+	# And it is not the same at every depth. Your chest is the float and the
+	# water squeezes it: a body is buoyant at the surface, neutral somewhere
+	# around six metres and negative below that. That is a real thing — it is
+	# why free divers can get down at all — and it is exactly the right feel:
+	# the first two metres are the work, and after that the sea takes you.
+	var squeeze: float = clampf(1.0 - maxf(sub, 0.0) / NEUTRAL_DEPTH, -0.35, 1.0)
+	wish_v.y += FLOAT_RISE * squeeze * clampf((sub - HEAD_OUT) / 0.9, -1.0, 1.0)
+
+	# --- what the water does about it ---------------------------------------
+	# Authority scales with how much of you it holds. Out of it you are a
+	# falling body and nothing you do matters.
+	var k: float = 1.0 - exp(-SWIM_DRAG * maxf(frac, 0.05) * delta)
+	_swim_vel = _swim_vel.lerp(wish_v * frac, k)
+	_swim_vel.y -= 9.81 * delta * (1.0 - frac)
+	if _swim_vel.length() > SWIM_VMAX:
+		_swim_vel = _swim_vel.normalized() * SWIM_VMAX
+	wpos += _swim_vel * delta
+
 	if ocean != null:
-		var wh: float = ocean.get_height(wpos)
-		# Chest-deep, bobbing with the swell.
-		wpos.y = lerpf(wpos.y, wh - 0.35, 1.0 - exp(-6.0 * delta))
+		# Carried: the drift the whole sea has, plus a share of the orbital
+		# motion of the wave you are actually in. That surge is why floating is
+		# not the same as standing still.
 		if ocean.has_method("current_at"):
 			var c: Vector2 = ocean.current_at(wpos)
 			wpos += Vector3(c.x, 0.0, c.y) * delta
-	# Paddle where you look — slowly. You are a person in oilskins, not a fish.
-	var dir_w: Vector3 = xf.basis * Vector3(wish.x, 0.0, wish.y)
-	dir_w.y = 0.0
-	if dir_w.length_squared() > 1e-4:
-		wpos += dir_w.normalized() * 1.3 * delta * minf(wish.length(), 1.0)
-	# The sea does not ride along with the boat, so the swimmer is integrated in
-	# world space and only converted into her frame for the camera.
+		if ocean.has_method("surface_velocity"):
+			var orb: Vector3 = ocean.surface_velocity(wpos)
+			wpos += Vector3(orb.x, 0.0, orb.z) * delta * 0.45 * frac
+		if ocean.has_method("get_seafloor_height"):
+			wpos.y = maxf(wpos.y, float(ocean.get_seafloor_height(wpos)) + 0.05)
+
 	_swim_pos = wpos
 	pos = xf.affine_inverse() * wpos
 	vel = Vector3.ZERO
 	on_floor = false
 	on_ladder = false
-	# Against the hull you can get a hand on the rail and haul yourself over.
-	can_board = absf(pos.x) < 1.85 and absf(pos.z) < 4.45
+	swim_depth = maxf(wh - (wpos.y + EYE), 0.0)
+	submerged = swim_depth > 0.0
+
+	# The way back aboard is the ladder and only the ladder — swim to the stern
+	# and take hold of it. Hauling yourself straight over a 1.5 m bulwark from
+	# the sea was a teleport wearing a prompt.
+	var lad: Vector3 = _sea_stand(boat, clampf(pos.y, float(boat.SEA_LADDER_BOT), 0.0))
+	can_board = Vector2(pos.x - lad.x, pos.z - lad.z).length() < 1.5 \
+			and pos.y > float(boat.SEA_LADDER_BOT) - 0.6
 	if can_board and want_jump:
-		swimming = false
-		pos = Vector3(clampf(pos.x, -1.1, 1.1), 0.63, clampf(pos.z, -3.7, 3.85))
+		grab_sea_ladder(boat)
+
+
+# --- the boarding ladder ------------------------------------------------------
+
+func sea_ladder_reach(boat: Node3D) -> bool:
+	## Close enough to take hold of it, from the deck or from the water. From
+	## aboard she is a step over the cap; from the sea you have to be at her.
+	if boat == null or on_sea_ladder:
+		return false
+	var lad: Vector3 = _sea_stand(boat, clampf(pos.y, float(boat.SEA_LADDER_BOT),
+			float(boat.SEA_LADDER_TOP)))
+	var d: float = Vector2(pos.x - lad.x, pos.z - lad.z).length()
+	return d < (1.5 if swimming else 1.9)
+
+
+func grab_sea_ladder(boat: Node3D) -> bool:
+	## Take hold. Everything about the state is decided in this one place so the
+	## per-tick climb stays four lines.
+	if boat == null:
+		return false
+	var top: float = float(boat.SEA_LADDER_TOP)
+	var bot: float = float(boat.SEA_LADDER_BOT)
+	# Out of the water you meet it at the rung under your feet; coming up out of
+	# the sea you meet it at the lowest one you can reach, because a swimmer is
+	# low in it and the top of the ladder is a metre over their head.
+	var y: float = clampf(pos.y, bot, -0.05 if swimming else top)
+	on_sea_ladder = true
+	swimming = false
+	can_board = false
+	_grab = false
+	vel = Vector3.ZERO
+	_swim_vel = Vector3.ZERO
+	pos = _sea_stand(boat, y)
+	return true
+
+
+func _sea_stand(boat: Node3D, y: float) -> Vector3:
+	## Where the BODY is for a given rung. The stiles are raked six degrees, so
+	## the climbing line leans aft with them — hold it vertical and your chest
+	## goes through the transom at the top while your feet swing off the bottom.
+	var z: float = float(boat.SEA_LADDER_Z) + 0.02 + (y + 0.32) * SEA_LEAN
+	return Vector3(float(boat.SEA_LADDER_X), y, z + SEA_STANDOFF)
+
+
+func _climb_sea_ladder(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
+		axes: Vector2, want_jump: bool) -> void:
+	var top: float = float(boat.SEA_LADDER_TOP)
+	var bot: float = float(boat.SEA_LADDER_BOT)
+	var y: float = pos.y + axes.y * SEA_CLIMB * delta
+	if y > top:
+		# Over the cap and aboard.
+		on_sea_ladder = false
+		pos = Vector3(float(boat.SEA_LADDER_X), 0.63, SEA_STEP_OFF)
 		vel = Vector3.ZERO
 		on_floor = true
+		submerged = false
+		swim_depth = 0.0
+		return
+	if y < bot or want_jump:
+		# Off the bottom rung, or you simply let go.
+		on_sea_ladder = false
+		swimming = true
+		_swim_pos = xf * pos
+		_swim_vel = Vector3(0.0, -1.2 if want_jump else -0.4, 0.0)
+		return
+	pos = _sea_stand(boat, y)
+	vel = Vector3(0.0, axes.y * SEA_CLIMB, 0.0)
+	on_floor = false
+	on_ladder = false
+	# The bottom rungs are under water and she is moving under you, so the eye
+	# can go below the surface while you are still holding on. It has to know.
+	if ocean != null:
+		var eye_w: Vector3 = xf * (pos + Vector3(0.0, EYE, 0.0))
+		swim_depth = maxf(float(ocean.get_height(eye_w)) - eye_w.y, 0.0)
+		submerged = swim_depth > 0.0

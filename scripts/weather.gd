@@ -173,6 +173,11 @@ func sun_direction() -> Vector3:
 	return _sun.basis.z.normalized() if _sun != null else Vector3.UP
 
 
+func _push_sun_to_seabed() -> void:
+	if ocean != null and ocean.has_method("set_seabed_sun"):
+		ocean.set_seabed_sun(sun_direction())
+
+
 func set_underwater(on: bool) -> void:
 	if _underwater == on:
 		return
@@ -235,6 +240,7 @@ func _apply_atmosphere() -> void:
 	_set_sky("horizon_color", hor)
 	_set_sky("ground_color", Color(0.008, 0.010, 0.014))
 	_set_sky("sun_dir", _sun.basis.z.normalized())
+	_push_sun_to_seabed()
 	_set_sky("sun_color", _sun.light_color)
 	_set_sky("sun_energy", 0.5 if is_night else clampf(dl * 1.8, 0.2, 1.5))
 	_set_sky("sun_size", 0.0008 if is_night else 0.0015)

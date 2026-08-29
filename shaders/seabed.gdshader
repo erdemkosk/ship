@@ -6,6 +6,9 @@ uniform sampler2D detail_noise : filter_linear_mipmap, repeat_enable;
 uniform float terrain_size = 2048.0;
 uniform float wave_time = 0.0;
 uniform int camera_under = 0;
+// Sun elevation, pushed from weather.gd. The seabed needs it for the same
+// reason the sea does: how much light gets down there is the whole question.
+uniform vec3 sun_dir = vec3(0.0, 1.0, 0.0);
 uniform vec3 caustic_color : source_color = vec3(0.30, 0.52, 0.42);
 // Wind drives how fast and how fine the caustic net moves.
 uniform float caustic_scale : hint_range(0.2, 3.0) = 1.0;
@@ -92,13 +95,30 @@ void fragment() {
 	}
 	EMISSION = cau_col * (0.35 + 0.65 * clamp(v_normal.y, 0.0, 1.0));
 
-	// underwater murk: distance + depth kill visibility in trenches
-	if (camera_under == 1) {
-		float dist = length(CAMERA_POSITION_WORLD - v_world_pos);
-		float optical = dist * 0.055 + max(-v_height, 0.0) * 0.048;
-		float vis = exp(-optical);
-		ALBEDO = mix(murk_color, ALBEDO, vis);
-		EMISSION *= vis;
-		ROUGHNESS = mix(1.0, ROUGHNESS, vis);
-	}
+	// --- how much of the bottom you can actually see -----------------------
+	//
+	// Two separate things darken it, and both have to be here or the seabed
+	// reads as a lit floor that happens to be underwater:
+	//
+	//   DOWNWELLING — light has to reach the sand before it can come back.
+	//     Over a 74 m basin almost none does, and at dusk none at all: the
+	//     term is the sun's own elevation carried down through the water.
+	//   PATH LOSS   — whatever is reflected then has to cross the water to
+	//     the eye, losing again over that distance.
+	//
+	// Together they are why a deep bottom is not dim, it is ABSENT. From the
+	// surface at midday you lose it around thirty metres; at dusk, ten.
+	float dist = length(CAMERA_POSITION_WORLD - v_world_pos);
+	float depth_m = max(-v_height, 0.0);
+	// Sun near the horizon takes a far longer slant through the water, and
+	// what is left after that is little enough to matter. Never quite zero:
+	// there is always some skylight.
+	float sun_up = clamp(sun_dir.y, 0.0, 1.0);
+	float down_k = mix(0.155, 0.052, sun_up);
+	float lit = exp(-depth_m * down_k) * (0.10 + 0.90 * sun_up);
+	float vis = exp(-dist * (camera_under == 1 ? 0.055 : 0.030));
+	float seen = clamp(lit * vis, 0.0, 1.0);
+	ALBEDO = mix(murk_color, ALBEDO, seen);
+	EMISSION *= seen;
+	ROUGHNESS = mix(1.0, ROUGHNESS, seen);
 }

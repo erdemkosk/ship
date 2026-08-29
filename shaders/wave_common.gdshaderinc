@@ -46,7 +46,7 @@ uniform float cascade_fade[MAX_CASCADES];
 // so this no longer drives the waves — but foam drift, rain rings, shore chop
 // and the detail normal layers all still ride it.
 uniform float wave_time = 0.0;
-uniform float choppiness : hint_range(0.0, 1.5) = 1.0;
+uniform float choppiness : hint_range(0.0, 2.0) = 1.0;
 
 struct WaveSample {
 	vec3 disp;     // xz horizontal pinch + y height

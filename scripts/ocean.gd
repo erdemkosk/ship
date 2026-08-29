@@ -212,7 +212,7 @@ func set_lighthouse_beams(pos: Vector3, dir_a: Vector3, dir_b: Vector3, on: floa
 
 func _bind_fallback_height() -> void:
 	var img := Image.create(1, 1, false, Image.FORMAT_RF)
-	img.set_pixel(0, 0, Color(-28.0, 0.0, 0.0))
+	img.set_pixel(0, 0, Color(-74.0, 0.0, 0.0))
 	var tex := ImageTexture.create_from_image(img)
 	for mat: ShaderMaterial in _mats():
 		mat.set_shader_parameter("height_map", tex)
@@ -268,7 +268,7 @@ func _wind_sea_height() -> float:
 	## Significant height of the wind sea at the wind it has aged to.
 	## Fully developed seas at 18 m/s are Hs ~7 m and unsailable; the 0.55 is a
 	## limited-fetch assumption that keeps the presets survivable.
-	return clampf(0.55 * 0.21 * _u_sea * _u_sea / G, 0.02, 20.0) * _hs_scale
+	return clampf(0.55 * 0.21 * _u_sea * _u_sea / G, 0.02, 36.0) * _hs_scale
 
 
 func _age_sea(delta: float) -> void:
@@ -383,7 +383,7 @@ func _push_uniforms() -> void:
 	var wind_dir := Vector2(cos(deg_to_rad(wind_direction_deg)), sin(deg_to_rad(wind_direction_deg)))
 	# Cox-Munk: the slope variance of a wind-roughened sea. Drives the width of
 	# the sun glitter path and the roughness of the far water.
-	var slope_var := clampf(0.003 + 0.0052 * wind_speed, 0.004, 0.14)
+	var slope_var := clampf(0.003 + 0.0052 * wind_speed, 0.004, 0.22)
 	for mat: ShaderMaterial in _mats():
 		mat.set_shader_parameter("wave_displacements", _wave_gen.displacement_maps)
 		mat.set_shader_parameter("wave_normals", _wave_gen.normal_maps)
@@ -397,7 +397,7 @@ func _push_uniforms() -> void:
 		mat.set_shader_parameter("surface_drift", wind_dir * wind_speed * 0.03)
 		mat.set_shader_parameter("mss", slope_var)
 		mat.set_shader_parameter("curvature_k", 1.0 / (2.0 * EARTH_RADIUS))
-		mat.set_shader_parameter("foam_amount", clampf(0.18 + wind_speed * 0.022, 0.0, 1.0))
+		mat.set_shader_parameter("foam_amount", clampf(0.18 + wind_speed * 0.022, 0.0, 1.8))
 	# Where each cascade stops displacing. Pushed to every ring identically —
 	# that is the whole point, see _cascade_fade_distances().
 	var fades := _cascade_fade_distances()
@@ -432,6 +432,14 @@ func _apply_sky_params() -> void:
 	for k: String in _sky_params:
 		for mat: ShaderMaterial in _mats():
 			mat.set_shader_parameter(k, _sky_params[k])
+
+
+func set_seabed_sun(dir: Vector3) -> void:
+	## The seabed needs the sun for the same reason the sea does: how much light
+	## reaches 70 m of water is the entire question of whether there is a bottom
+	## to see. weather.gd already computes it; this just forwards it.
+	if seabed != null and seabed.has_method("set_sun"):
+		seabed.set_sun(dir)
 
 
 func _push_seabed_uniforms() -> void:
@@ -1059,7 +1067,7 @@ func _update_spray_rate() -> void:
 	if _spindrift_pm == null:
 		return
 	# Spindrift starts around force 6 and takes over the picture by force 9.
-	var f := clampf((wind_speed - 11.0) / 22.0, 0.0, 1.0)
+	var f := clampf((wind_speed - 11.0) / 40.0, 0.0, 1.0)
 	_spindrift.amount_ratio = maxf(f, 0.02)
 	_spindrift.emitting = f > 0.02 and not camera_under
 	var a := deg_to_rad(wind_direction_deg)
