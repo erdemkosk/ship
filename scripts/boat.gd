@@ -2,6 +2,8 @@ extends RigidBody3D
 ## Small wooden boat. Buoyancy at hull + deck probes; W/S thrust, A/D rudder.
 ## Rolls with the swell. Past vanishing stability it capsizes.
 
+const WeatherScript := preload("res://scripts/weather.gd")
+
 # Hull bottom + deck probes. Deck samples (y > 0) only matter when inverted —
 # they keep a capsized boat floating instead of falling through.
 #
@@ -79,6 +81,8 @@ var _stove_heat_t := 0.0
 var _helm_lamp: OmniLight3D
 var _beacon: OmniLight3D
 var _beacon_mat: StandardMaterial3D
+var _nav_mats: Array[StandardMaterial3D] = []
+var _nav_spots: Array[SpotLight3D] = []
 var _floods: Array[SpotLight3D] = []
 var _flood_lens_mat: StandardMaterial3D
 var _flood_beam_mat: ShaderMaterial
@@ -374,11 +378,12 @@ func _dress_steel() -> void:
 		# waterline bleed amidships
 		[Vector3(0.012, 0.20, 1.60), Vector3(-2.055, -0.02, 1.20), rust_dark],
 		[Vector3(0.012, 0.16, 1.10), Vector3(2.055, -0.06, 2.30), rust],
-		# scupper streaks running DOWN from the deck edge
-		[Vector3(0.012, 0.55, 0.16), Vector3(-2.052, 0.18, 0.10), rust],
-		[Vector3(0.012, 0.48, 0.14), Vector3(-2.052, 0.14, 3.10), rust_dark],
-		[Vector3(0.012, 0.60, 0.18), Vector3(2.052, 0.12, 4.20), rust],
-		[Vector3(0.012, 0.40, 0.13), Vector3(2.052, 0.20, -1.40), rust_dark],
+		# scupper streaks running DOWN from the deck edge — same stations as
+		# the holes in the bulwark, or the rust has no mouth to come from.
+		[Vector3(0.012, 0.55, 0.16), Vector3(-2.052, 0.18, -2.60), rust],
+		[Vector3(0.012, 0.48, 0.14), Vector3(-2.052, 0.14, 1.80), rust_dark],
+		[Vector3(0.012, 0.60, 0.18), Vector3(2.052, 0.12, -0.50), rust],
+		[Vector3(0.012, 0.40, 0.13), Vector3(2.052, 0.20, 4.20), rust_dark],
 		# transom, under the name
 		[Vector3(1.30, 0.35, 0.012), Vector3(0.35, 0.05, 5.822), rust_dark],
 		# stem head, where the chain rides
@@ -493,26 +498,14 @@ const BLOCKERS: Array[AABB] = [
 	AABB(Vector3(-2.08, 0.63, -4.08), Vector3(4.16, 0.90, 0.18)),
 	AABB(Vector3(-2.08, 0.63, 5.52), Vector3(4.16, 0.90, 0.18)),
 	# rail round the deckhouse roof
-	AABB(Vector3(-1.88, 2.91, -0.56), Vector3(0.12, 0.75, 5.70)),
-	AABB(Vector3(1.76, 2.91, -0.56), Vector3(0.12, 0.75, 5.70)),
+	AABB(Vector3(-1.88, 2.91, -0.56), Vector3(0.12, 0.75, 5.74)),
+	AABB(Vector3(1.76, 2.91, -0.56), Vector3(0.12, 0.75, 5.74)),
 	AABB(Vector3(-1.88, 2.91, 5.00), Vector3(3.76, 0.75, 0.12)),
-	# Stairwell coaming, inboard side. Two things about it.
-	#
-	# Its base sits at 3.05 rather than at deck level, and that 14 cm is the
-	# whole design: it stops someone standing on the deck (feet 2.91, head 4.65)
-	# and passes clean over the head of someone on the stairs. At deck level it
-	# caught them and would not let them down.
-	#
-	# And the well it guards is 1.18 m wide. 1.10 left a 0.60 m body with 0.50 m
-	# of room — enough on paper and cramped in the hand. 1.30 walked, but the
-	# hatch mouth on the upper deck was a flue: stove heat and crackle came
-	# straight up. 1.18 keeps 0.58 m of body-room and closes the mouth a little.
-	# It starts at 1.55, not at 0.95: the first two treads are level with the
-	# deck and are the WAY IN. Running the rail the full length of the well
-	# walled the entrance off — coming aft from the wheel you met it head on and
-	# had to go right forward again to get round its end. A companionway rail
-	# has a gap in it where you step through, and now this one does.
-	AABB(Vector3(-0.49, 3.05, 1.55), Vector3(0.10, 0.81, 2.40)),
+	AABB(Vector3(-1.88, 2.91, -0.38), Vector3(3.76, 0.75, 0.12)),
+	# Stairwell coaming, inboard side. Kerb only. Base at 3.05 so someone on
+	# the stairs still passes under it; at deck level it used to catch them.
+	# Starts at z 1.55 so the first two treads stay the way in.
+	AABB(Vector3(-0.49, 3.05, 1.55), Vector3(0.10, 0.26, 2.40)),
 	# Under the companionway. The treads are floors, which made them walkable —
 	# and made the space UNDER them empty, so from the cabin sole you strolled
 	# straight in through the side of the staircase and stood inside it. One
@@ -554,7 +547,7 @@ const BLOCKERS: Array[AABB] = [
 	# the bunk used to have the stove standing in the foot of it, and the
 	# cupboard was let into the forward bulkhead.
 	AABB(Vector3(0.92, 0.68, 1.30), Vector3(0.76, 0.75, 2.00)),    # bunk
-	AABB(Vector3(-1.70, 0.68, 0.10), Vector3(0.48, 1.74, 0.52)),    # dive locker
+	AABB(Vector3(-1.70, 0.68, 0.58), Vector3(0.48, 1.74, 0.52)),    # dive locker, under stair
 	AABB(Vector3(1.05, 0.68, 4.05), Vector3(0.46, 0.90, 0.46)),    # stove
 	AABB(Vector3(1.20, 0.68, -0.25), Vector3(0.46, 1.05, 0.40)),   # cupboard
 	AABB(Vector3(1.16, 0.68, 0.35), Vector3(0.45, 0.62, 0.45)),    # sea chest
@@ -615,7 +608,7 @@ const INTERACT: Array = [
 	{"id": "fusebox", "pos": Vector3(1.17, 3.78, 1.235), "r": 0.10, "name": "Fuse box"},
 	{"id": "sw_cabin", "pos": Vector3(1.05, 3.78, 1.42), "r": 0.055, "name": "Cabin light"},
 	{"id": "sw_helm", "pos": Vector3(1.17, 3.78, 1.42), "r": 0.055, "name": "Wheelhouse light"},
-	{"id": "sw_beacon", "pos": Vector3(1.29, 3.78, 1.42), "r": 0.055, "name": "Beacon"},
+	{"id": "sw_beacon", "pos": Vector3(1.29, 3.78, 1.42), "r": 0.055, "name": "Nav lights"},
 	{"id": "sw_flood", "pos": Vector3(1.05, 3.78, 1.66), "r": 0.055, "name": "Floodlights"},
 	{"id": "sw_wiper", "pos": Vector3(1.17, 3.78, 1.66), "r": 0.055, "name": "Wiper"},
 	{"id": "sw_anchor", "pos": Vector3(1.29, 3.78, 1.66), "r": 0.055, "name": "Windlass (anchor)"},
@@ -623,9 +616,9 @@ const INTERACT: Array = [
 	{"id": "radio", "pos": Vector3(1.49, 3.94, 0.55), "r": 0.20, "name": "Radio"},
 	{"id": "stove", "pos": Vector3(1.28, 1.05, 4.10), "r": 0.30, "name": "Heater"},
 	{"id": "sea_ladder", "pos": Vector3(0.72, 0.80, 5.80), "r": 0.42, "name": "Boarding ladder"},
-	{"id": "locker", "pos": Vector3(-1.22, 1.52, 0.52), "r": 0.34, "name": "Dive locker"},
-	{"id": "divegear", "pos": Vector3(-1.34, 1.76, 0.34), "r": 0.30, "name": "Dive gear"},
-	{"id": "door_eng", "pos": Vector3(-0.50, 1.24, 2.15), "r": 0.42, "name": "Engine hatch"},
+	{"id": "locker", "pos": Vector3(-1.22, 1.52, 0.84), "r": 0.34, "name": "Dive locker"},
+	{"id": "divegear", "pos": Vector3(-1.34, 1.76, 0.84), "r": 0.30, "name": "Dive gear"},
+	{"id": "door_eng", "pos": Vector3(-0.50, 1.55, 2.15), "r": 0.62, "name": "Engine hatch"},
 	{"id": "radar", "pos": Vector3(1.18, 4.28, 0.10), "r": 0.28, "name": "Radar"},
 	{"id": "sounder", "pos": Vector3(1.15, 4.02, 0.08), "r": 0.22, "name": "Sounder"},
 ]
@@ -851,10 +844,11 @@ func _build_visuals() -> void:
 	_box(Vector3(0.12, 0.50, 2.32), Vector3(0.99, 0.86, -4.475), Vector3(0.0, 60.0, 0.0), paint_dark)
 	# Stem-head block closing the vee where the two rails meet.
 	_box(Vector3(0.20, 0.50, 0.24), Vector3(0.0, 0.86, -5.00), Vector3.ZERO, paint_dark)
-	# Rubbing strake, same construction one strake down: sides end at x 2.13,
-	# z -4.17; meet at (0, -5.08).
-	_box(Vector3(0.10, 0.14, 2.35), Vector3(-1.065, 0.52, -4.625), Vector3(0.0, -66.0, 0.0), trim)
-	_box(Vector3(0.10, 0.14, 2.35), Vector3(1.065, 0.52, -4.625), Vector3(0.0, 66.0, 0.0), trim)
+	# Rubbing strake: same 60-degree run, one course down and a hand outboard.
+	# It used to close at 66 degrees so it would meet the stem — that put the
+	# two planks in a wedge, the top rail angling off the one below it.
+	_box(Vector3(0.10, 0.14, 2.32), Vector3(-1.04, 0.52, -4.56), Vector3(0.0, -60.0, 0.0), trim)
+	_box(Vector3(0.10, 0.14, 2.32), Vector3(1.04, 0.52, -4.56), Vector3(0.0, 60.0, 0.0), trim)
 	# Transom, raked.
 	_box(Vector3(4.03, 1.25, 0.22), Vector3(0.0, 0.18, 5.70), Vector3(-9.0, 0.0, 0.0), hull_wood)
 	_build_nameboard()
@@ -871,9 +865,21 @@ func _build_visuals() -> void:
 	_box(Vector3(1.82, 0.14, 0.24), Vector3(-1.03, 0.56, -3.02), Vector3.ZERO, deck)
 	_box(Vector3(1.82, 0.14, 0.24), Vector3(1.03, 0.56, -3.02), Vector3.ZERO, deck)
 	_box(Vector3(3.88, 0.14, 8.45), Vector3(0.0, 0.56, 1.325), Vector3.ZERO, deck)
-	_box(Vector3(0.14, 0.52, 9.4), Vector3(-1.98, 0.86, 0.80), Vector3(0.0, 0.0, 5.0), paint_dark)
-	_box(Vector3(0.14, 0.52, 9.4), Vector3(1.98, 0.86, 0.80), Vector3(0.0, 0.0, -5.0), paint_dark)
+	# Bulwarks in two courses so the scuppers are holes, not painted-on rust.
+	# Upper rail runs through; the lower course breaks at four stations a side.
+	_side_bulwark(-1.98, 5.0, paint_dark)
+	_side_bulwark(1.98, -5.0, paint_dark)
 	_box(Vector3(3.98, 0.10, 0.14), Vector3(0.0, 1.13, -3.95), Vector3.ZERO, trim)
+	# Transom cap, one run. The ladder hangs OUTBOARD and you step over the
+	# cap; cutting a gate in it left a hole you looked through at the sea,
+	# with the grab iron hanging in the gap.
+	_box(Vector3(3.98, 0.10, 0.14), Vector3(0.0, 1.13, 5.58), Vector3.ZERO, trim)
+	# Hull course dies around y 0.80. Close the well up to the cap so there
+	# is no slot of daylight under the rail.
+	_box(Vector3(3.98, 0.36, 0.12), Vector3(0.0, 0.94, 5.64), Vector3(-9.0, 0.0, 0.0), paint_dark)
+	# Posts on the cap where the ladder comes aboard.
+	_cyl(0.032, 0.032, 0.28, Vector3(SEA_LADDER_X - 0.16, 1.32, 5.58), Vector3.ZERO, metal)
+	_cyl(0.032, 0.032, 0.28, Vector3(SEA_LADDER_X + 0.16, 1.32, 5.58), Vector3.ZERO, metal)
 	# Foredeck left clear. There was a cargo hatch and a crate of gear lying on
 	# it — a metre-and-a-bit slab of planking in the middle of the working deck
 	# and a dark box beside it, both of them just something to trip over. The
@@ -982,9 +988,9 @@ func _build_visuals() -> void:
 	_box(Vector3(0.46, 0.09, 0.36), Vector3(1.30, 1.13, 1.52), Vector3.ZERO, linen)
 	_box(Vector3(0.05, 0.26, 2.00), Vector3(0.94, 1.05, 2.30), Vector3.ZERO, trim)
 
-	# Dive locker, port side across from the bunk — where the table used to be.
-	# A steel wardrobe bolted to the frames: a working boat keeps her gear where
-	# it drips onto the sole and not into the bedding.
+	# Dive locker, tucked under the forward end of the companionway — the
+	# dead corner between the port frames and the first treads. Gear still
+	# drips on the sole, not the bunk.
 	_build_dive_locker()
 
 	# Shelf of books on the starboard wall, over the head of the bunk, with a
@@ -1184,13 +1190,12 @@ func _build_visuals() -> void:
 	add_child(mast)
 	_cyl(0.11, 0.075, 5.20, Vector3.ZERO, Vector3.ZERO, trim, mast)
 	_box(Vector3(1.70, 0.07, 0.07), Vector3(0.0, 1.45, 0.0), Vector3.ZERO, trim, mast)
-	# Masthead beacon. The stick leans three degrees, so a world-space lamp at
-	# x = 0 sat beside the truck, not on it. These sit on the mast's own axis,
-	# the base flush with the top of the pole.
+	# Masthead steaming light: white, on the stick's own axis. The old red
+	# blinker sat up here like a navaid; a powerboat shows a white light.
 	_beacon_mat = StandardMaterial3D.new()
-	_beacon_mat.albedo_color = Color(0.32, 0.05, 0.04)
+	_beacon_mat.albedo_color = Color(0.72, 0.70, 0.62)
 	_beacon_mat.emission_enabled = true
-	_beacon_mat.emission = Color(1.0, 0.15, 0.10)
+	_beacon_mat.emission = Color(1.0, 0.96, 0.88)
 	_beacon_mat.emission_energy_multiplier = 0.0
 	var truck := 2.60
 	_cyl(0.10, 0.10, 0.12, Vector3(0.0, truck + 0.06, 0.0), Vector3.ZERO, metal, mast)
@@ -1198,46 +1203,67 @@ func _build_visuals() -> void:
 	_cyl(0.11, 0.02, 0.10, Vector3(0.0, truck + 0.37, 0.0), Vector3.ZERO, metal, mast)
 	_beacon = OmniLight3D.new()
 	_beacon.position = Vector3(0.0, truck + 0.22, 0.0)
-	_beacon.light_color = Color(1.0, 0.16, 0.10)
+	_beacon.light_color = Color(1.0, 0.96, 0.88)
 	_beacon.light_energy = 0.0
-	_beacon.omni_range = 26.0
+	_beacon.omni_range = 32.0
 	_beacon.omni_attenuation = 1.3
 	_beacon.shadow_enabled = false
 	mast.add_child(_beacon)
+	# Standing rigging. Four wires: a forestay to the stem, a shroud each side
+	# to the cap, and a halliard off the yard. Without them the mast is a pole
+	# planted in the deck.
+	var wire := _mat(Color(0.22, 0.22, 0.24), 0.42, 0.72)
+	var halliard := _mat(Color(0.38, 0.30, 0.18), 0.88)
+	var mast_head := _mast_pt(Vector3(0.0, 2.48, 0.0))
+	var shroud_head := _mast_pt(Vector3(0.0, 2.18, 0.0))
+	_stay(shroud_head, Vector3(-1.94, 1.14, -2.18), 0.009, wire)
+	_stay(shroud_head, Vector3(1.94, 1.14, -2.18), 0.009, wire)
+	# Chainplates where the shrouds land, and a tang on the stem-head.
+	_box(Vector3(0.04, 0.16, 0.10), Vector3(-1.96, 1.10, -2.18), Vector3(0.0, 0.0, 5.0), metal)
+	_box(Vector3(0.04, 0.16, 0.10), Vector3(1.96, 1.10, -2.18), Vector3(0.0, 0.0, -5.0), metal)
+	_box(Vector3(0.05, 0.08, 0.08), Vector3(0.0, 1.16, -4.96), Vector3.ZERO, metal)
+	# Forestay is rope, not a rod. The shrouds stay bar-taut; this run is long
+	# enough to take a catenary or it reads as a steel tube planted in the stem.
+	_rope(mast_head, Vector3(0.0, 1.18, -4.96), 0.011, 0.14, halliard)
+	# Halliard belays on a pin on the mast, not in mid-air.
+	_box(Vector3(0.04, 0.03, 0.09), Vector3(0.12, -1.52, 0.0), Vector3.ZERO, metal, mast)
+	_stay(_mast_pt(Vector3(0.82, 1.45, 0.0)), _mast_pt(Vector3(0.12, -1.48, 0.0)),
+			0.007, halliard)
+	# Sidelights on the house, sternlight ON the transom cap — y 1.52 / z 5.84
+	# was a lantern hanging in the air behind the name.
+	_nav_lantern(Vector3(-1.88, 2.12, 0.22), 90.0, Color(0.95, 0.08, 0.06))
+	_nav_lantern(Vector3(1.88, 2.12, 0.22), -90.0, Color(0.06, 0.85, 0.18))
+	_nav_lantern(Vector3(0.0, 1.24, 5.66), 180.0, Color(0.95, 0.94, 0.88))
 	# No funnel. The cabin heater is electric now — it burns nothing, so there
 	# is nothing to take up a flue, and a stack that vents an appliance with no
 	# fire in it is a lie standing on the roof. The balcony is clear.
-	# Foredeck rail: stanchions plus a top rail.
+	# Foredeck rail: stanchions plus a top rail, both parallel to the wooden
+	# bulwark they stand inside. The posts used to splay from 1.69 to 1.94 and
+	# the cap followed them at 4.3 degrees — a top plank that ran away from
+	# the one below it.
+	const FORE_RAIL_X := 1.88
 	for i in 7:
 		var t := float(i) / 6.0
 		var rz := lerpf(-3.85, -0.55, t)
-		var rx := lerpf(1.69, 1.94, t)
-		_cyl(0.035, 0.035, 0.62, Vector3(-rx, 1.42, rz), Vector3.ZERO, metal)
-		_cyl(0.035, 0.035, 0.62, Vector3(rx, 1.42, rz), Vector3.ZERO, metal)
-	# The top rail caps the STANCHIONS. It used to sit at x 1.18 while the posts
-	# it was supposed to cap ran 1.69 to 1.94 — half a metre inboard of its own
-	# supports, so it floated across the deck and buried itself in the bulwark.
-	# Centre and angle are now derived from the posts: mid-point (1.815, -2.20),
-	# and atan2(0.25, 3.30) = 4.3 degrees of splay.
-	_box(Vector3(0.05, 0.05, 3.32), Vector3(-1.815, 1.72, -2.20), Vector3(0.0, 4.33, 0.0), metal)
-	_box(Vector3(0.05, 0.05, 3.32), Vector3(1.815, 1.72, -2.20), Vector3(0.0, -4.33, 0.0), metal)
+		_cyl(0.035, 0.035, 0.62, Vector3(-FORE_RAIL_X, 1.42, rz), Vector3.ZERO, metal)
+		_cyl(0.035, 0.035, 0.62, Vector3(FORE_RAIL_X, 1.42, rz), Vector3.ZERO, metal)
+	_box(Vector3(0.05, 0.05, 3.32), Vector3(-FORE_RAIL_X, 1.72, -2.20), Vector3.ZERO, metal)
+	_box(Vector3(0.05, 0.05, 3.32), Vector3(FORE_RAIL_X, 1.72, -2.20), Vector3.ZERO, metal)
 	# Rail round the deckhouse roof, so standing up there is not a sheer drop.
-	_box(Vector3(0.05, 0.05, 4.9), Vector3(-1.80, 3.29, 2.10), Vector3.ZERO, metal)
-	_box(Vector3(0.05, 0.05, 4.9), Vector3(1.80, 3.29, 2.10), Vector3.ZERO, metal)
-	for i in 7:
-		var sz := lerpf(-0.30, 4.50, float(i) / 6.0)
+	# The roof plating runs to z 5.10; the old side pipes died at 4.55 and the
+	# aft pipe sat at 5.06 with a half-metre of nothing between them — that is
+	# the broken ring as seen from astern. One closed rectangle now.
+	_box(Vector3(0.05, 0.05, 5.36), Vector3(-1.80, 3.29, 2.38), Vector3.ZERO, metal)
+	_box(Vector3(0.05, 0.05, 5.36), Vector3(1.80, 3.29, 2.38), Vector3.ZERO, metal)
+	for i in 8:
+		var sz := lerpf(-0.30, 5.06, float(i) / 7.0)
 		_cyl(0.03, 0.03, 0.56, Vector3(-1.80, 3.11, sz), Vector3.ZERO, metal)
 		_cyl(0.03, 0.03, 0.56, Vector3(1.80, 3.11, sz), Vector3.ZERO, metal)
-	# Ladder up the back of the deckhouse: deck -> roof -> wheelhouse door.
-	# The side rails run well PAST the roof, the way every real ship's ladder
-	# does — they are what you grab to swing yourself on at the top.
-	# Rail right across the aft edge of the roof. No opening in it now: you go
-	# below through the wheelhouse and down the companionway, so there is
-	# nothing back here left to fall off.
-	_box(Vector3(3.62, 0.05, 0.05), Vector3(0.0, 3.29, 5.06), Vector3.ZERO, metal)
+	_box(Vector3(3.65, 0.05, 0.05), Vector3(0.0, 3.29, 5.06), Vector3.ZERO, metal)
 	for i in 5:
-		_cyl(0.03, 0.03, 0.56, Vector3(-1.78 + float(i) * 0.89, 3.11, 5.06),
+		_cyl(0.03, 0.03, 0.56, Vector3(-1.80 + float(i) * 0.90, 3.11, 5.06),
 				Vector3.ZERO, metal)
+	_box(Vector3(3.65, 0.05, 0.05), Vector3(0.0, 3.29, -0.30), Vector3.ZERO, metal)
 
 	_build_deck_gear(trim, metal)
 
@@ -1256,91 +1282,51 @@ func _build_visuals() -> void:
 		_box(Vector3(1.16, 0.06, 0.30), Vector3(-1.08, ty - 0.03, tz), Vector3.ZERO, trim)
 		_box(Vector3(1.16, 0.163, 0.05), Vector3(-1.08, ty - 0.1415, tz + 0.125),
 				Vector3.ZERO, trim)
-	# The inboard side of the flight is three separate pieces of joinery in
-	# three separate SLABS OF X, and that is the whole point of these numbers.
-	# They used to share one: the stringer at -0.52, the closing boards at
-	# -0.515 and the engine-door frame at -0.515, all 4 to 5 cm thick — three
-	# solids inside the same two centimetres of space, coplanar faces and all.
-	# That is the flicker and the clash down the side of the stair.
-	#
-	#   stringer        -0.600 .. -0.550   the raking beam that carries it
-	#   closing boards  -0.550 .. -0.500   the panel between beam and cabin
-	#   door frame      -0.500 .. -0.455   standing proud of the panel, as a
-	#                                      frame does
-	_box(Vector3(0.05, 0.30, 3.10), Vector3(-0.575, 1.86, 2.42), Vector3(-36.6, 0.0, 0.0), trim)
-	# Handrail. A companionway has one, and without it this read as a flight of
-	# boards with two bare posts standing near it. It rakes with the treads, one
-	# hand's width off the joinery, on two short stanchions.
-	var rail_m := _mat(Color(0.30, 0.21, 0.11), 0.55, 0.25)
-	_cyl(0.024, 0.024, 3.05, Vector3(-0.62, 2.62, 2.42), Vector3(-36.6, 0.0, 0.0), rail_m)
-	for rz in [1.55, 3.25]:
-		# Stanchion from the stringer up to the rail, at the rake of the stair.
-		var ry: float = 2.91 - (rz - 1.10) * 0.7431
-		_cyl(0.017, 0.017, 0.60, Vector3(-0.62, ry + 0.42, rz), Vector3.ZERO, rail_m)
-	# Closing boards down the inboard side, stepping with the treads, so the
-	# stair reads as a solid piece of joinery from the cabin rather than a
-	# flight of planks with daylight under it. The middle of the flight is
-	# left open: that is the engine-room window, framed in steel.
+	# Underside of the flight. Without this the well is a hole: stand at the
+	# foot, look forward, and the machine sits in a triangle under bare treads.
+	# The slab is the same rake as the going (0.223 on 0.30 = 36.6°) and sits
+	# a couple of centimetres under the tread bottoms so the two do not fight.
+	_box(Vector3(1.16, 0.04, 3.36), Vector3(-1.08, 1.817, 2.45),
+			Vector3(36.6, 0.0, 0.0), trim)
+	# Closing boards on the cabin face, except the hatch bay (k 2..5).
 	var frame := _mat(Color(0.18, 0.19, 0.20), 0.35, 0.55)
 	for k in 9:
-		# Trim only, so these can close right up under the tread even though the
-		# collision volume behind them has to stop short.
 		var by := 2.910 - float(k) * 0.223 - 0.03
 		if k >= 2 and k <= 5:
-			# The engine bay is left ENTIRELY open. There used to be a strip of
-			# closing board over the door head; it was still standing across the
-			# view with the door swung back, which is the one thing an access
-			# door exists to prevent. The leaf below now runs the full height of
-			# the bay, so there is nothing left for a strip to close.
 			continue
 		_box(Vector3(0.05, by - 0.68, 0.30), Vector3(-0.525, (0.68 + by) * 0.5,
 				1.10 + float(k) * 0.30), Vector3.ZERO, trim)
 
-	# The engine door. Hinged on its forward edge, steel-framed like the
-	# machinery panel it is, swinging into the cabin so the whole well shows.
+	# Engine hatch. The opening is bays k 2..5: z 1.55 .. 2.75, sole to the
+	# soffit. Top edge is the same slope as the stairs, so shut it is a wall
+	# and there is no wedge of daylight over the leaf.
+	var slope := 0.223 / 0.30
+	var z0 := 1.55
+	var z1 := 2.75
+	var hinge_y := 1.24
 	_door_eng = Node3D.new()
-	_door_eng.position = Vector3(-0.500, 1.24, 1.70)
+	_door_eng.position = Vector3(-0.500, hinge_y, z0)
 	add_child(_door_eng)
-	var leaf := _box_node(Vector3(0.045, 1.44, 0.90), Vector3(0.0, 0.23, 0.45), trim)
+	var y_bot := 0.70 - hinge_y
+	var y_hf := 2.850 - (z0 - 1.10) * slope - hinge_y - 0.012
+	var y_ha := 2.850 - (z1 - 1.10) * slope - hinge_y - 0.012
+	var z_e := z1 - z0
+	var hatch_m: StandardMaterial3D = trim.duplicate()
+	hatch_m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var leaf := _trap_prism(0.045, y_bot, y_hf, y_ha, z_e, hatch_m)
 	_door_eng.add_child(leaf)
-	var lf := _box_node(Vector3(0.052, 1.44, 0.05), Vector3(0.0, 0.23, 0.025), frame)
-	_door_eng.add_child(lf)
-	var lf2 := _box_node(Vector3(0.052, 1.44, 0.05), Vector3(0.0, 0.23, 0.875), frame)
-	_door_eng.add_child(lf2)
-	var lf3 := _box_node(Vector3(0.052, 0.06, 0.90), Vector3(0.0, 0.92, 0.45), frame)
-	_door_eng.add_child(lf3)
-	var lf4 := _box_node(Vector3(0.052, 0.06, 0.90), Vector3(0.0, -0.46, 0.45), frame)
-	_door_eng.add_child(lf4)
-	# Latch handle on the free edge, and a pair of hinge knuckles on the hung one.
 	var bronze_h := _mat(Color(0.36, 0.27, 0.13), 0.4, 0.7)
-	var hnd := _box_node(Vector3(0.028, 0.13, 0.030), Vector3(-0.035, 0.02, 0.82), bronze_h)
+	var hnd := _box_node(Vector3(0.028, 0.13, 0.030),
+			Vector3(-0.035, (y_bot + y_ha) * 0.5, z_e - 0.10), bronze_h)
 	_door_eng.add_child(hnd)
-	for hy in [-0.34, 0.34, 0.82]:
+	for hy in [y_bot + 0.16, (y_bot + y_hf) * 0.5, y_hf - 0.16]:
 		var kn := _box_node(Vector3(0.055, 0.075, 0.030), Vector3(0.0, hy, 0.03), frame)
 		_door_eng.add_child(kn)
-	# The frame stands PROUD of the closing boards, the way a door frame does,
-	# and it is a closed rectangle. The stray post that used to stand at z 2.88
-	# was buried inside a closing board — one of the two bare rods you could see
-	# from the cabin with nothing joining them to anything.
-	_box(Vector3(0.045, 1.52, 0.045), Vector3(-0.478, 1.47, 1.655), Vector3.ZERO, frame)
-	_box(Vector3(0.045, 1.52, 0.045), Vector3(-0.478, 1.47, 2.645), Vector3.ZERO, frame)
-	_box(Vector3(0.045, 0.045, 1.035), Vector3(-0.478, 2.208, 2.15), Vector3.ZERO, frame)
-	_box(Vector3(0.045, 0.045, 1.035), Vector3(-0.478, 0.732, 2.15), Vector3.ZERO, frame)
-	_cyl(0.028, 0.028, 3.35, Vector3(-0.52, 2.66, 2.42), Vector3(53.4, 0.0, 0.0), metal)
-	for i in 4:
-		_cyl(0.022, 0.022, 0.90, Vector3(-0.52, 1.42 + float(i) * 0.50,
-				3.35 - float(i) * 0.67), Vector3.ZERO, metal)
 	# Coaming round the opening on the upper deck, so it reads as a stairwell.
 	# Trim only — it used to be a collider too, and between it and the wheelhouse
 	# side that left a three-centimetre gap to squeeze the top step through.
 	_box(Vector3(0.05, 0.26, 2.40), Vector3(-0.52, 3.04, 2.75), Vector3.ZERO, trim)
 	_box(Vector3(1.22, 0.26, 0.05), Vector3(-1.08, 3.04, 3.95), Vector3.ZERO, trim)
-	# Guard rail on top of the coaming, matching the collider. A 26 cm kerb is
-	# something you trip over on the way past; this is something you hold.
-	_box(Vector3(0.05, 0.05, 2.40), Vector3(-0.52, 3.80, 2.75), Vector3.ZERO, metal)
-	for i in 4:
-		_cyl(0.025, 0.025, 0.62, Vector3(-0.52, 3.48, 1.70 + float(i) * 0.72),
-				Vector3.ZERO, metal)
 
 	# --- forward floodlights ------------------------------------------------
 	# Two of them, on the roof edge between the decks, throwing light out ahead
@@ -1808,7 +1794,7 @@ func _update_gauges(delta: float) -> void:
 
 	var ch := 0.0
 	if tackle != null:
-		ch = float(tackle.get("chain_out"))
+		ch = tackle.get("chain_out") as float
 	_needles[2].rotation.y = lerp_angle(_needles[2].rotation.y,
 			_dial_angle(ch, 70.0), k)
 
@@ -1876,7 +1862,7 @@ func _build_switchboard(trim: Material, metal: Material) -> void:
 	# Six toggles, two rows of three. The lever of each carries its own state.
 	var ids: Array[String] = ["sw_cabin", "sw_helm", "sw_beacon",
 			"sw_flood", "sw_wiper", "sw_anchor"]
-	var names: Array[String] = ["CABIN", "HELM", "BEACON", "FLOOD", "WIPER", "ANCHOR"]
+	var names: Array[String] = ["CABIN", "HELM", "NAV", "FLOOD", "WIPER", "ANCHOR"]
 	for i in 6:
 		var col := i % 3
 		var row: int = i / 3
@@ -2081,6 +2067,40 @@ func _box_node(size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
 	bm.material = mat
 	mi.mesh = bm
 	mi.position = pos
+	return mi
+
+
+func _trap_prism(thick: float, y0: float, y_hi: float, y_lo: float, length: float,
+		mat: Material) -> MeshInstance3D:
+	## Vertical trapezoid of thickness `thick`. Hinge edge at z=0 from y0 to
+	## y_hi; free edge at z=length from y0 to y_lo. Both faces, so it reads as
+	## a door from the cabin and from the well.
+	var hx := thick * 0.5
+	var v: Array[Vector3] = [
+		Vector3(-hx, y0, 0.0), Vector3(-hx, y_hi, 0.0),
+		Vector3(-hx, y_lo, length), Vector3(-hx, y0, length),
+		Vector3(hx, y0, 0.0), Vector3(hx, y_hi, 0.0),
+		Vector3(hx, y_lo, length), Vector3(hx, y0, length),
+	]
+	var faces: Array = [
+		[0, 3, 2, 1], [4, 5, 6, 7],
+		[0, 1, 5, 4], [3, 7, 6, 2],
+		[1, 2, 6, 5], [0, 4, 7, 3],
+	]
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for f: Array in faces:
+		var n: Vector3 = (v[f[1]] - v[f[0]]).cross(v[f[2]] - v[f[0]])
+		if n.length_squared() < 1e-10:
+			continue
+		n = n.normalized()
+		for tri: Array in [[0, 1, 2], [0, 2, 3]]:
+			for k: int in tri:
+				st.set_normal(n)
+				st.add_vertex(v[f[k]])
+	var mi := MeshInstance3D.new()
+	mi.mesh = st.commit()
+	mi.material_override = mat
 	return mi
 
 
@@ -2468,11 +2488,17 @@ func _update_radio(delta: float) -> void:
 	# mode, and on the frame the handset was taken the camera had not been placed
 	# yet — so the cord read as five hundred metres long and snatched it straight
 	# back out of your hand.
-	var in_fps: bool = camera_rig != null and int(camera_rig.get("mode")) == 1
+	var in_fps := false
+	var cam: Camera3D = null
+	if camera_rig != null:
+		var m: Variant = camera_rig.get("mode")
+		in_fps = typeof(m) == TYPE_INT and m == 1
+		var c: Variant = camera_rig.get("_cam")
+		if c is Camera3D:
+			cam = c
 	if radio_held and in_fps and not radio_pose_locked:
 		# Held up by your face. Worked out in the boat's frame so it rides with
 		# her: a handset in your hand does not swing about when she rolls.
-		var cam: Camera3D = camera_rig.get("_cam")
 		if cam != null and cam.global_position.is_finite():
 			# Where a handset actually goes: up by your right cheek, close in.
 			# It used to be sent to (0.21, -0.11, -0.31) — a third of a metre
@@ -2514,7 +2540,7 @@ func _update_radio(delta: float) -> void:
 	if radio_held and in_fps and radio_pose_locked:
 		# The viewmodel owns the pose; still yank the set out of the hand if
 		# the cord comes taut.
-		var cam2: Camera3D = camera_rig.get("_cam")
+		var cam2: Camera3D = cam
 		if cam2 != null:
 			var here: Vector3 = global_transform.affine_inverse() * _radio_hand.global_position
 			if (here - RADIO_ANCHOR).length() > RADIO_CORD + 0.04:
@@ -2661,6 +2687,126 @@ func _box(size: Vector3, pos: Vector3, rot_deg: Vector3, mat: Material, parent: 
 		add_child(mi)
 	else:
 		parent.add_child(mi)
+
+
+func _mast_pt(local: Vector3) -> Vector3:
+	## Mast sits at (0, 3.10, -2.35) and leans three degrees to starboard.
+	## Stays land on the boat, so their mast ends have to be in boat space.
+	var a := deg_to_rad(3.0)
+	var c := cos(a)
+	var s := sin(a)
+	return Vector3(0.0, 3.10, -2.35) + Vector3(
+			local.x * c - local.y * s, local.x * s + local.y * c, local.z)
+
+
+func _stay(a: Vector3, b: Vector3, r: float, mat: Material) -> void:
+	var d := b - a
+	var h := d.length()
+	if h < 0.04:
+		return
+	var mi := MeshInstance3D.new()
+	var m := CylinderMesh.new()
+	m.top_radius = r
+	m.bottom_radius = r
+	m.height = h
+	m.radial_segments = 6
+	m.rings = 1
+	m.material = mat
+	mi.mesh = m
+	mi.position = (a + b) * 0.5
+	var y := d / h
+	var x := y.cross(Vector3.UP)
+	if x.length_squared() < 1e-8:
+		x = y.cross(Vector3.FORWARD)
+	x = x.normalized()
+	mi.basis = Basis(x, y, x.cross(y))
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mi)
+
+
+func _rope(a: Vector3, b: Vector3, r: float, sag: float, mat: Material, n := 14) -> void:
+	## A hanging line. `_stay` is a rod; this is a catenary in the boat's own
+	## down, so it rides with her instead of hanging into the sea when she heels.
+	if n < 2:
+		return
+	var prev := a
+	for i in range(1, n + 1):
+		var t := float(i) / float(n)
+		var p: Vector3 = a.lerp(b, t)
+		p.y -= 4.0 * t * (1.0 - t) * sag
+		_stay(prev, p, r, mat)
+		prev = p
+
+
+func _nav_lantern(pos: Vector3, yaw_deg: float, col: Color) -> void:
+	## Housing on the boat, lens facing the arc the light is allowed. Spot
+	## default is -Z, so yaw 90 is port, -90 starboard, 180 the transom.
+	var bronze := _mat(Color(0.32, 0.24, 0.12), 0.45, 0.7)
+	var lens := StandardMaterial3D.new()
+	lens.albedo_color = Color(col.r * 0.35, col.g * 0.35, col.b * 0.35)
+	lens.emission_enabled = true
+	lens.emission = col
+	lens.emission_energy_multiplier = 0.0
+	_nav_mats.append(lens)
+	var rig := Node3D.new()
+	rig.position = pos
+	rig.rotation_degrees = Vector3(0.0, yaw_deg, 0.0)
+	add_child(rig)
+	_box(Vector3(0.07, 0.11, 0.08), Vector3(0.0, 0.0, 0.025), Vector3.ZERO, bronze, rig)
+	_cyl(0.036, 0.036, 0.085, Vector3(0.0, 0.0, -0.018), Vector3(90.0, 0.0, 0.0), lens, rig)
+	var sp := SpotLight3D.new()
+	sp.position = Vector3(0.0, 0.0, -0.05)
+	sp.light_color = col
+	sp.light_energy = 0.0
+	sp.spot_range = 24.0
+	sp.spot_angle = 58.0
+	sp.spot_attenuation = 0.7
+	sp.shadow_enabled = false
+	sp.light_volumetric_fog_energy = 5.0
+	rig.add_child(sp)
+	_nav_spots.append(sp)
+
+
+func _side_bulwark(x: float, rot_z: float, mat: Material) -> void:
+	## Continuous cap, lower course broken at the scuppers. The 5-degree lean
+	## is the same flare the old single plank had.
+	_box(Vector3(0.14, 0.32, 9.62), Vector3(x, 0.96, 0.89), Vector3(0.0, 0.0, rot_z), mat)
+	var z0 := -3.92
+	var z1 := 5.70
+	var gap := 0.26
+	var holes: Array[float] = [-2.60, -0.50, 1.80, 4.20]
+	var cuts: Array[float] = [z0]
+	for hz in holes:
+		cuts.append(hz - gap * 0.5)
+		cuts.append(hz + gap * 0.5)
+	cuts.append(z1)
+	var i := 0
+	while i + 1 < cuts.size():
+		var a: float = cuts[i]
+		var b: float = cuts[i + 1]
+		var L: float = b - a
+		if L > 0.08:
+			_box(Vector3(0.14, 0.20, L), Vector3(x, 0.70, (a + b) * 0.5),
+					Vector3(0.0, 0.0, rot_z), mat)
+		i += 2
+
+
+func _warp_coil(pos: Vector3, mat: Material, rad: float) -> void:
+	## Laid-up warp: three turns on the deck, not a torus floating at knee height.
+	for t in 3:
+		var mi := MeshInstance3D.new()
+		var torus := TorusMesh.new()
+		torus.inner_radius = rad * 0.42
+		torus.outer_radius = rad * (1.0 - float(t) * 0.08)
+		torus.rings = 10
+		torus.ring_segments = 16
+		torus.material = mat
+		mi.mesh = torus
+		mi.position = pos + Vector3(0.0, (torus.outer_radius - torus.inner_radius) * 0.5
+				+ float(t) * 0.020, 0.0)
+		mi.rotation_degrees = Vector3(0.0, float(t) * 22.0, 0.0)
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(mi)
 
 
 func _build_motor() -> void:
@@ -3205,7 +3351,7 @@ func _process(delta: float) -> void:
 		# drum divided by its radius. Pays out one way, heaves in the other.
 		_windlass.rotation.x += float(tackle.chain_rate) / 0.16 * delta
 		# What is over the bow is not in the locker.
-		var stowed: float = 1.0 - clampf(float(tackle.get("chain_out")) / 42.0, 0.0, 1.0)
+		var stowed: float = 1.0 - clampf((tackle.get("chain_out") as float) / 42.0, 0.0, 1.0)
 		if _chain_heap != null:
 			_chain_heap.scale = Vector3(lerpf(0.45, 1.0, stowed),
 					lerpf(0.30, 1.0, stowed), lerpf(0.45, 1.0, stowed))
@@ -3220,10 +3366,11 @@ func _process(delta: float) -> void:
 	# stutter, and every so often lose the picture altogether. The lamps dip
 	# with them, because it is all the same battery.
 	var rough := 0.0
-	if weather != null:
-		rough = clampf(float(weather.get("wind_speed")) / 34.0 * 0.55
-				+ float(weather.get("rain_amount")) * 0.28
-				+ (0.30 if bool(weather.get("storm")) else 0.0), 0.0, 1.0)
+	var wx := weather as WeatherScript
+	if wx != null:
+		rough = clampf(wx.wind_speed / 34.0 * 0.55
+				+ wx.rain_amount * 0.28
+				+ (0.30 if wx.storm else 0.0), 0.0, 1.0)
 	# Slamming shakes the connections as surely as the weather does.
 	rough = clampf(rough + clampf(absf(linear_velocity.y) / 7.0, 0.0, 0.30), 0.0, 1.0)
 	_supply = lerpf(_supply, 1.0 - rough * 0.88, 1.0 - exp(-1.4 * delta))
@@ -3311,10 +3458,11 @@ func _update_wetness(delta: float) -> void:
 	var wy: float = ocean.get_height(global_position)
 	# Driving into a head sea keeps the topsides soaked; it dries off slowly.
 	var target := clampf(Vector2(linear_velocity.x, linear_velocity.z).length() / 7.0, 0.0, 1.0)
-	target = maxf(target, clampf(float(ocean.get("sig_height")) / 5.0 - 0.35, 0.0, 1.0))
+	target = maxf(target, clampf((ocean.get("sig_height") as float) / 5.0 - 0.35, 0.0, 1.0))
 	# Rain soaks her from above. Half an hour of it and every plank is dark.
-	if weather != null:
-		target = maxf(target, clampf(float(weather.get("rain_amount")) * 1.25, 0.0, 1.0))
+	var wr := weather as WeatherScript
+	if wr != null:
+		target = maxf(target, clampf(wr.rain_amount * 1.25, 0.0, 1.0))
 	var k := (1.0 - exp(-2.5 * delta)) if target > _soak else (1.0 - exp(-0.35 * delta))
 	_soak = lerpf(_soak, target, k)
 	for m: ShaderMaterial in _hull_mats:
@@ -3323,9 +3471,8 @@ func _update_wetness(delta: float) -> void:
 
 
 func _update_lantern(delta: float) -> void:
-	## Ship's lighting. Three circuits, three switches, and a beacon that keeps
-	## its own rhythm: two quick flashes then a long dark, so you can pick her
-	## out of a squall by the pattern rather than the brightness.
+	## Ship's lighting. Cabin, helm, floods, and the nav lights on the BEACON
+	## switch: steaming light, sidelights, sternlight. Steady, not a blinker.
 
 	# Wiper: a steady metronome sweep while on; parked upright when off. The
 	# glass and rain state ride along to both glass materials.
@@ -3340,8 +3487,9 @@ func _update_lantern(delta: float) -> void:
 		_wiper_pivot.rotation.z = lerp_angle(_wiper_pivot.rotation.z, -w_ang,
 				1.0 - exp(-14.0 * delta))
 	var rain_now := 0.0
-	if weather != null:
-		rain_now = clampf(float(weather.get("rain_amount")), 0.0, 1.0)
+	var wr2 := weather as WeatherScript
+	if wr2 != null:
+		rain_now = clampf(wr2.rain_amount, 0.0, 1.0)
 	# Glass does not dry the instant the rain stops — it stays streaked for a
 	# good while, which is when a wiper earns its keep.
 	_glass_wet = maxf(rain_now, _glass_wet - delta * 0.055)
@@ -3376,8 +3524,9 @@ func _update_lantern(delta: float) -> void:
 		_flood_lens_mat.emission_energy_multiplier = (8.0 * _flicker) if light_flood else 0.0
 	if _flood_beam_mat != null:
 		var haze := 1.0
-		if weather != null:
-			haze = 1.0 + clampf(float(weather.get("rain_amount")), 0.0, 1.0) * 0.6
+		var wr3 := weather as WeatherScript
+		if wr3 != null:
+			haze = 1.0 + clampf(wr3.rain_amount, 0.0, 1.0) * 0.6
 		_flood_beam_mat.set_shader_parameter("intensity",
 				(1.35 * _flicker) if light_flood else 0.0)
 		_flood_beam_mat.set_shader_parameter("haze", haze)
@@ -3385,14 +3534,16 @@ func _update_lantern(delta: float) -> void:
 		_helm_glow.emission_energy_multiplier = 2.2 * _flicker if light_helm else 0.0
 
 	if _beacon != null:
-		var on := 0.0
-		if light_beacon:
-			var ph := fmod(_t, 3.4)
-			if ph < 0.16 or (ph > 0.42 and ph < 0.58):
-				on = 1.0
-		_beacon.light_energy = lerpf(_beacon.light_energy, on * 5.5, 1.0 - exp(-28.0 * delta))
+		var on := (1.0 * _flicker) if light_beacon else 0.0
+		_beacon.light_energy = lerpf(_beacon.light_energy, on * 4.8, 1.0 - exp(-10.0 * delta))
 		if _beacon_mat != null:
-			_beacon_mat.emission_energy_multiplier = _beacon.light_energy * 1.6
+			_beacon_mat.emission_energy_multiplier = _beacon.light_energy * 1.8
+	var nav_e := (3.2 * _flicker) if light_beacon else 0.0
+	for i in _nav_spots.size():
+		_nav_spots[i].light_energy = lerpf(_nav_spots[i].light_energy, nav_e,
+				1.0 - exp(-10.0 * delta))
+	for nm: StandardMaterial3D in _nav_mats:
+		nm.emission_energy_multiplier = (4.5 * _flicker) if light_beacon else 0.0
 
 
 func weather_openness(world_pos: Vector3) -> float:
@@ -3502,8 +3653,8 @@ func _build_dive_locker() -> void:
 	var rubber := _mat(Color(0.045, 0.048, 0.052), 0.88)
 	var glassy := _mat(Color(0.30, 0.42, 0.46, 0.55), 0.10, 0.0)
 	glassy.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	var LX := -1.46          # centre of the carcass
-	var LZ := 0.36
+	var LX := -1.46          # centre of the carcass, against the port frames
+	var LZ := 0.84           # under the first treads; aft face kisses z 1.10
 	var Y0 := 0.68
 	var Y1 := 2.38
 	var HY := (Y0 + Y1) * 0.5
@@ -3822,36 +3973,52 @@ func _build_deck_gear(trim: Material, metal: Material) -> void:
 	var wood := trim
 
 	# Horn cleats: bow, just forward of the house, and the quarters.
+	# A coil at the foot of each, and a spare warp on the foredeck — empty
+	# iron is a showroom.
 	for sx in [-1.0, 1.0]:
 		_cleat(Vector3(sx * 1.88, 1.16, -3.62), metal)
+		_warp_coil(Vector3(sx * 1.52, 0.63, -3.62), hemp, 0.11)
+		# Warp from the horn to the fairlead — slack, because it is a rope on
+		# a cleat, not a stay on the mast.
+		_rope(Vector3(sx * 1.88, 1.18, -3.62), Vector3(sx * 0.62, 1.20, -3.98),
+				0.012, 0.09, hemp)
 		_cleat(Vector3(sx * 1.92, 1.16, -0.72), metal)
-		_cleat(Vector3(sx * 1.72, 1.16, 5.28), metal)
+		_warp_coil(Vector3(sx * 1.55, 0.63, -0.72), hemp, 0.10)
+		_cleat(Vector3(sx * 1.72, 1.18, 5.58), metal)
+		# Quarter coil sits ON the cap next to the cleat, not hovering in the well.
+		_warp_coil(Vector3(sx * 1.48, 1.18, 5.50), hemp, 0.09)
 		# Closed fairleads on the stem and the transom corners.
 		_fairlead(Vector3(sx * 0.62, 1.16, -3.98), metal)
-		_fairlead(Vector3(sx * 1.55, 1.16, 5.52), metal)
+		_fairlead(Vector3(sx * 1.55, 1.18, 5.58), metal)
+	# Spare on the foredeck, against the starboard bulwark, clear of the pipe.
+	_warp_coil(Vector3(1.22, 0.63, -3.48), hemp, 0.16)
 
 	# --- boarding ladder, over the transom ----------------------------------
 	# The one way back aboard. Rungs carry on well below the waterline because
 	# the bottom one has to be there when she rolls away from you, and a ladder
 	# you can only reach at the top of a swell is a ladder that drowns people.
+	# One parent, six degrees of rake: stiles, rungs and the grab sit in the
+	# same plane. Rotate the parts independently and the rungs hang in a
+	# zigzag that is not a ladder.
+	var lad := Node3D.new()
+	lad.position = Vector3(SEA_LADDER_X, 0.0, SEA_LADDER_Z)
+	lad.rotation_degrees = Vector3(6.0, 0.0, 0.0)
+	add_child(lad)
 	var lad_iron := _mat(Color(0.150, 0.115, 0.088), 0.90, 0.30)
 	for lsx in [-0.16, 0.16]:
-		_box(Vector3(0.045, 2.10, 0.045),
-				Vector3(SEA_LADDER_X + lsx, -0.32, SEA_LADDER_Z),
-				Vector3(6.0, 0.0, 0.0), lad_iron)
+		_box(Vector3(0.045, 2.52, 0.045), Vector3(lsx, -0.11, 0.0),
+				Vector3.ZERO, lad_iron, lad)
 	var lad_n := 7
 	for li in lad_n:
 		var ly: float = SEA_LADDER_TOP - 0.10 - float(li) * 0.27
-		_cyl(0.020, 0.020, 0.36, Vector3(SEA_LADDER_X, ly, SEA_LADDER_Z + 0.02),
-				Vector3(0.0, 0.0, 90.0), lad_iron)
-	# Top brackets bolting the stiles through the transom cap, and grab handles
-	# standing above the deck — what your hands find first coming up.
+		_cyl(0.020, 0.020, 0.36, Vector3(0.0, ly, 0.0),
+				Vector3(0.0, 0.0, 90.0), lad_iron, lad)
+	# Stiles stop at the cap. Grab U sits on the wood, between the two posts —
+	# nothing hanging in a hole in the transom.
 	for lsx in [-0.16, 0.16]:
-		_box(Vector3(0.07, 0.09, 0.22), Vector3(SEA_LADDER_X + lsx, 0.60, SEA_LADDER_Z - 0.09),
+		_cyl(0.020, 0.020, 0.18, Vector3(SEA_LADDER_X + lsx, 1.36, 5.58),
 				Vector3.ZERO, lad_iron)
-		_cyl(0.020, 0.020, 0.46, Vector3(SEA_LADDER_X + lsx, 0.86, SEA_LADDER_Z - 0.04),
-				Vector3(10.0, 0.0, 0.0), lad_iron)
-	_cyl(0.020, 0.020, 0.36, Vector3(SEA_LADDER_X, 1.07, SEA_LADDER_Z - 0.08),
+	_cyl(0.020, 0.020, 0.36, Vector3(SEA_LADDER_X, 1.44, 5.58),
 			Vector3(0.0, 0.0, 90.0), lad_iron)
 
 	# Fenders: three a side, hanging outboard from the rail. Bow, waist,
@@ -3887,10 +4054,12 @@ func _fairlead(pos: Vector3, metal: Material) -> void:
 
 
 func _fender(pos: Vector3, rubber: Material, hemp: Material) -> void:
-	var fender_top := pos.y + 0.26
-	var rail_y := 1.70
-	_cyl(0.008, 0.008, rail_y - fender_top,
-			Vector3(pos.x, (rail_y + fender_top) * 0.5, pos.z), Vector3.ZERO, hemp)
+	## Line runs FROM the cap, not a vertical hanging in the air 16 cm outboard
+	## of the rail it pretends to be made fast to.
+	var sx: float = 1.0 if pos.x > 0.0 else -1.0
+	var hitch := Vector3(sx * 1.98, 1.13, pos.z)
+	var top := pos + Vector3(0.0, 0.26, 0.0)
+	_rope(hitch, top, 0.008, 0.05, hemp, 8)
 	_cyl(0.095, 0.10, 0.52, pos, Vector3.ZERO, rubber)
 	_cyl(0.07, 0.07, 0.04, pos + Vector3(0.0, 0.26, 0.0), Vector3.ZERO, rubber)
 	_cyl(0.07, 0.07, 0.04, pos + Vector3(0.0, -0.26, 0.0), Vector3.ZERO, rubber)

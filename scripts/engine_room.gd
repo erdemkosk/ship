@@ -77,29 +77,32 @@ func _build() -> void:
 		_box(Vector3(0.08, 0.04, 1.22), Vector3(-1.08 + s * 0.22, 0.795, 2.18),
 				Vector3.ZERO, steel)
 
-	# Fore and aft bulkheads so the well reads as a room, not a hole.
-	_box(Vector3(1.14, 1.05, 0.04), Vector3(-1.08, 1.22, 1.42), Vector3.ZERO, plate)
-	_box(Vector3(1.14, 0.62, 0.04), Vector3(-1.08, 1.00, 2.92), Vector3.ZERO, plate)
+	# Fore and aft bulkheads, sole to the stair soffit. The aft one used to
+	# stop at 1.31 — a half-wall under the flight, with the machine showing
+	# in the triangle above it.
+	_box(Vector3(1.14, 1.90, 0.04), Vector3(-1.08, 1.65, 1.42), Vector3.ZERO, wood)
+	_box(Vector3(1.14, 0.78, 0.04), Vector3(-1.08, 1.09, 2.92), Vector3.ZERO, wood)
 
 	var eng := Node3D.new()
 	eng.position = Vector3(-1.05, 1.02, 2.16)
 	add_child(eng)
 
-	# Oil pan, block, head, valve cover — a small inline marine diesel.
-	# The castings sit outboard so the inboard crankcase is actually open.
-	_box(Vector3(0.30, 0.14, 0.72), Vector3(-0.06, -0.20, 0.0), Vector3.ZERO, iron, eng)
-	_box(Vector3(0.32, 0.28, 0.70), Vector3(-0.08, 0.00, 0.0), Vector3.ZERO, green, eng)
-	_box(Vector3(0.30, 0.10, 0.68), Vector3(-0.06, 0.18, 0.0), Vector3.ZERO, iron, eng)
-	_box(Vector3(0.28, 0.07, 0.64), Vector3(-0.05, 0.26, 0.0), Vector3.ZERO, cover, eng)
+	# Castings live OUTBOARD. The inboard half is a cutaway: from the hatch
+	# you read the crank, the rods and the three pistons, not a closed block
+	# with a window that only showed the shaft.
+	_box(Vector3(0.22, 0.14, 0.72), Vector3(-0.16, -0.20, 0.0), Vector3.ZERO, iron, eng)
+	_box(Vector3(0.22, 0.28, 0.70), Vector3(-0.16, 0.00, 0.0), Vector3.ZERO, green, eng)
+	_box(Vector3(0.20, 0.10, 0.68), Vector3(-0.15, 0.18, 0.0), Vector3.ZERO, iron, eng)
+	_box(Vector3(0.18, 0.07, 0.64), Vector3(-0.14, 0.26, 0.0), Vector3.ZERO, cover, eng)
 	# Injector pump and rail along the outboard side.
-	_box(Vector3(0.08, 0.12, 0.42), Vector3(-0.22, 0.08, 0.02), Vector3.ZERO, black, eng)
+	_box(Vector3(0.08, 0.12, 0.42), Vector3(-0.24, 0.08, 0.02), Vector3.ZERO, black, eng)
 	for i in 3:
-		_cyl(0.012, 0.012, 0.16, Vector3(-0.18, 0.22, CYL_Z[i]),
+		_cyl(0.012, 0.012, 0.16, Vector3(-0.20, 0.22, CYL_Z[i]),
 				Vector3(0.0, 0.0, 18.0), black, eng)
-	# Heat exchanger on top aft — the thing that makes it a marine engine.
-	_cyl(0.055, 0.055, 0.38, Vector3(0.02, 0.34, 0.12), Vector3(90.0, 0.0, 0.0), alum, eng)
-	_cyl(0.058, 0.058, 0.04, Vector3(0.02, 0.34, -0.08), Vector3(90.0, 0.0, 0.0), bronze, eng)
-	_cyl(0.058, 0.058, 0.04, Vector3(0.02, 0.34, 0.32), Vector3(90.0, 0.0, 0.0), bronze, eng)
+	# Heat exchanger sits ON the remaining block, not over the open bores.
+	_cyl(0.055, 0.055, 0.38, Vector3(-0.14, 0.34, 0.12), Vector3(90.0, 0.0, 0.0), alum, eng)
+	_cyl(0.058, 0.058, 0.04, Vector3(-0.14, 0.34, -0.08), Vector3(90.0, 0.0, 0.0), bronze, eng)
+	_cyl(0.058, 0.058, 0.04, Vector3(-0.14, 0.34, 0.32), Vector3(90.0, 0.0, 0.0), bronze, eng)
 	# Raw-water pump.
 	_cyl(0.045, 0.045, 0.07, Vector3(0.18, -0.04, 0.38), Vector3(90.0, 0.0, 0.0), bronze, eng)
 	# Fuel filters, dry and brass-bowled.
@@ -123,16 +126,17 @@ func _build() -> void:
 	_box(Vector3(0.16, 0.16, 0.14), Vector3(-0.16, 0.14, 0.83), Vector3.ZERO, black, eng)
 	_cyl(0.030, 0.030, 0.10, Vector3(-0.16, 0.14, 0.93), Vector3(90.0, 0.0, 0.0), black, eng)
 
-	# Open crankcase on the inboard (+X) face: a bolted frame, not a toy cutaway.
-	_box(Vector3(0.02, 0.22, 0.66), Vector3(0.22, 0.00, 0.0), Vector3.ZERO, steel, eng)
-	_box(Vector3(0.02, 0.22, 0.04), Vector3(0.22, 0.00, -0.35), Vector3.ZERO, steel, eng)
-	_box(Vector3(0.02, 0.22, 0.04), Vector3(0.22, 0.00, 0.35), Vector3.ZERO, steel, eng)
-	_box(Vector3(0.02, 0.04, 0.66), Vector3(0.22, 0.13, 0.0), Vector3.ZERO, steel, eng)
-	_box(Vector3(0.02, 0.04, 0.66), Vector3(0.22, -0.13, 0.0), Vector3.ZERO, steel, eng)
-
-	# Cylinder sleeves, open inboard so the pistons read.
+	# Cutaway frame around crank AND bores, so the whole motion reads.
+	_box(Vector3(0.018, 0.52, 0.018), Vector3(0.02, 0.08, -0.36), Vector3.ZERO, steel, eng)
+	_box(Vector3(0.018, 0.52, 0.018), Vector3(0.02, 0.08, 0.36), Vector3.ZERO, steel, eng)
+	_box(Vector3(0.018, 0.018, 0.74), Vector3(0.02, -0.17, 0.0), Vector3.ZERO, steel, eng)
+	_box(Vector3(0.018, 0.018, 0.74), Vector3(0.02, 0.33, 0.0), Vector3.ZERO, steel, eng)
+	# Open bores: three walls each, inboard face left off so the piston is
+	# the thing you see from the hatch.
 	for z in CYL_Z:
-		_cyl(0.058, 0.058, 0.20, Vector3(0.06, 0.16, z), Vector3.ZERO, iron, eng)
+		_box(Vector3(0.11, 0.24, 0.012), Vector3(-0.04, 0.16, z - 0.058), Vector3.ZERO, iron, eng)
+		_box(Vector3(0.11, 0.24, 0.012), Vector3(-0.04, 0.16, z + 0.058), Vector3.ZERO, iron, eng)
+		_box(Vector3(0.012, 0.24, 0.104), Vector3(-0.09, 0.16, z), Vector3.ZERO, iron, eng)
 
 	_crank = Node3D.new()
 	_crank.position = Vector3(0.0, 0.0, 0.0)
@@ -173,15 +177,19 @@ func _build() -> void:
 	_cyl(0.05, 0.05, 0.11, Vector3.ZERO, Vector3(90.0, 0.0, 0.0), black, _alt)
 	_cyl(0.042, 0.042, 0.018, Vector3(0.0, 0.0, -0.06), Vector3(90.0, 0.0, 0.0), steel, _alt)
 
+	var piston_crown := _mat(Color(0.62, 0.60, 0.52), 0.28, 0.55)
+	var piston_skirt := _mat(Color(0.28, 0.27, 0.24), 0.40, 0.35)
 	for i in 3:
 		var p := Node3D.new()
 		eng.add_child(p)
-		_cyl(0.048, 0.048, 0.055, Vector3.ZERO, Vector3.ZERO, steel, p)
-		_box(Vector3(0.04, 0.03, 0.04), Vector3(0.0, -0.04, 0.0), Vector3.ZERO, iron, p)
+		_cyl(0.050, 0.050, 0.028, Vector3(0.0, 0.018, 0.0), Vector3.ZERO, piston_crown, p)
+		_cyl(0.048, 0.048, 0.055, Vector3(0.0, -0.022, 0.0), Vector3.ZERO, piston_skirt, p)
+		_cyl(0.051, 0.051, 0.008, Vector3(0.0, 0.002, 0.0), Vector3.ZERO, steel, p)
+		_box(Vector3(0.036, 0.022, 0.036), Vector3(0.0, -0.055, 0.0), Vector3.ZERO, iron, p)
 		_pistons.append(p)
 		var r := Node3D.new()
 		eng.add_child(r)
-		_cyl(0.011, 0.011, ROD, Vector3.ZERO, Vector3.ZERO, steel, r)
+		_cyl(0.015, 0.015, ROD, Vector3.ZERO, Vector3.ZERO, steel, r)
 		_rods.append(r)
 
 	# Drip tray under the pan — every dry bilge has one, and it is what says
@@ -207,19 +215,22 @@ func _build() -> void:
 	tag.font_size = 28
 	tag.pixel_size = 0.00055
 	tag.modulate = Color(0.78, 0.70, 0.42)
-	tag.position = Vector3(0.22, 0.20, -0.02)
+	tag.position = Vector3(-0.04, 0.02, 0.0)
 	tag.rotation_degrees = Vector3(0.0, 90.0, 0.0)
 	tag.shaded = false
 	eng.add_child(tag)
 
+	# Bulkhead lamp on the fore wall. The old one hung in the hatch mouth
+	# with no rose and no wire — a glowing egg in empty air.
 	_lamp_mat = _mat(Color(0.85, 0.82, 0.70), 0.35)
 	_lamp_mat.emission_enabled = true
 	_lamp_mat.emission = Color(1.0, 0.92, 0.72)
 	_lamp_mat.emission_energy_multiplier = 0.7
-	_cyl(0.03, 0.025, 0.08, Vector3(-0.72, 1.72, 2.18), Vector3.ZERO, black)
-	_cyl(0.045, 0.045, 0.05, Vector3(-0.72, 1.64, 2.18), Vector3.ZERO, _lamp_mat)
+	_box(Vector3(0.05, 0.04, 0.04), Vector3(-1.22, 1.86, 1.45), Vector3.ZERO, black)
+	_cyl(0.016, 0.016, 0.06, Vector3(-1.22, 1.80, 1.48), Vector3(18.0, 0.0, 0.0), black)
+	_cyl(0.048, 0.040, 0.08, Vector3(-1.22, 1.72, 1.52), Vector3(12.0, 0.0, 0.0), _lamp_mat)
 	_lamp = OmniLight3D.new()
-	_lamp.position = Vector3(-0.72, 1.55, 2.18)
+	_lamp.position = Vector3(-1.18, 1.68, 1.62)
 	_lamp.light_color = Color(1.0, 0.93, 0.78)
 	_lamp.light_energy = 0.55
 	_lamp.omni_range = 2.4

@@ -25,6 +25,15 @@ uniform vec3 cloud_dark_color : source_color = vec3(0.12, 0.13, 0.14);
 
 uniform float star_intensity : hint_range(0.0, 1.0) = 0.0;
 uniform float flash_energy = 0.0;
+uniform vec3 flash_dir = vec3(0.0, 1.0, 0.0);
+uniform float flash_lobe = 0.0;
+
+vec3 sky_flash_add(vec3 dir, float shade) {
+	float lobe = pow(max(dot(normalize(dir), normalize(flash_dir)), 0.0), 7.0);
+	lobe *= smoothstep(-0.02, 0.20, dir.y);
+	return vec3(0.78, 0.84, 1.0)
+			* (flash_energy * (0.28 + 0.22 * shade) + flash_lobe * lobe * 1.2);
+}
 
 float sky_hash12(vec2 p) {
 	vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -98,7 +107,7 @@ vec3 sky_color_n(vec3 dir, float blur, float disk_mul, int layers) {
 		m_low = sky_cloud_mask(nl, cloud_coverage, 1.06, 1.16, 0.18, 0.68);
 		m_low *= smoothstep(0.02, 0.22, dir.y) * 0.75;
 		low_col = mix(cloud_lit_color, cloud_dark_color, clamp(nl * cloud_density, 0.0, 1.0)) * 0.85;
-		low_col += vec3(0.72, 0.78, 1.0) * flash_energy * 0.12;
+		low_col += sky_flash_add(dir, clamp(nl * cloud_density, 0.0, 1.0));
 	}
 
 	// --- stars (fade behind clouds / daylight) ---
@@ -127,13 +136,13 @@ vec3 sky_color_n(vec3 dir, float blur, float disk_mul, int layers) {
 	vec3 cloud_col = mix(cloud_lit_color, cloud_dark_color, clamp(shade * cloud_density, 0.0, 1.0));
 	float rim = pow(max(sd, 0.0), 5.0) * 0.4 * (1.0 - shade);
 	cloud_col += sun_color * rim * sun_energy * 0.8;
-	cloud_col += vec3(0.72, 0.78, 1.0) * flash_energy * (0.10 + 0.16 * shade);
+	cloud_col += sky_flash_add(dir, shade);
 
 	if (layers > 1) {
 		col = mix(col, low_col, m_low * 0.9);
 	}
 	col = mix(col, cloud_col, m * 0.96);
-	col += vec3(0.5, 0.55, 0.75) * flash_energy * 0.02;
+	col += vec3(0.62, 0.68, 0.95) * flash_energy * 0.08;
 	return col;
 }
 
@@ -161,10 +170,10 @@ vec3 sky_color(vec3 dir, float blur, float disk_mul) {
 	float shade = mix(clamp(n, 0.0, 1.0), 0.5, blur * 0.7);
 	vec3 cloud_col = mix(cloud_lit_color, cloud_dark_color, clamp(shade * cloud_density, 0.0, 1.0));
 	cloud_col += sun_color * pow(max(sd, 0.0), 5.0) * 0.4 * (1.0 - shade) * sun_energy * 0.8;
-	cloud_col += vec3(0.72, 0.78, 1.0) * flash_energy * (0.10 + 0.16 * shade);
+	cloud_col += sky_flash_add(dir, shade);
 
 	col = mix(col, cloud_col, m * 0.96);
-	col += vec3(0.5, 0.55, 0.75) * flash_energy * 0.02;
+	col += vec3(0.62, 0.68, 0.95) * flash_energy * 0.08;
 	return col;
 }
 

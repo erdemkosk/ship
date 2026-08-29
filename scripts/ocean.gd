@@ -446,7 +446,9 @@ func _push_seabed_uniforms() -> void:
 	if seabed == null:
 		return
 	var htex: Texture2D = seabed.get("height_texture")
-	var tsize: float = float(seabed.get("terrain_size"))
+	var tsize: float = 2048.0
+	if "terrain_size" in seabed:
+		tsize = seabed.terrain_size
 	for mat: ShaderMaterial in _mats():
 		if htex != null:
 			mat.set_shader_parameter("height_map", htex)
@@ -509,6 +511,17 @@ func _process(delta: float) -> void:
 			mat.set_shader_parameter("surface_drift", drift)
 			mat.set_shader_parameter("current_vec", cur)
 		_mat_close.set_shader_parameter("boat_inv", follow_target.global_transform.affine_inverse())
+		var inside := 0
+		var cam := get_viewport().get_camera_3d()
+		if cam != null:
+			var lp: Vector3 = follow_target.global_transform.affine_inverse() * cam.global_position
+			# Lower cabin only. The roof / wheelhouse test used to count as
+			# inside too, and a tall clip from up there cuts the sea along
+			# the gunwale the moment she heels.
+			if lp.y >= 0.58 and lp.y < 2.80 and absf(lp.x) < 1.62 \
+					and lp.z > -0.28 and lp.z < 4.50:
+				inside = 1
+		_mat_close.set_shader_parameter("interior_clip", inside)
 		for mat: ShaderMaterial in _mats():
 			mat.set_shader_parameter("boat_pos", bp)
 			mat.set_shader_parameter("boat_speed", spd)

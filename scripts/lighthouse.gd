@@ -3,6 +3,7 @@ extends StaticBody3D
 ## glass lantern, and a rotating two-faced optic (real characteristic).
 
 const PERIOD := 16.0  # seconds per revolution
+const WeatherScript := preload("res://scripts/weather.gd")
 
 var seabed: Node3D
 var weather: Node3D
@@ -62,9 +63,9 @@ func _process(delta: float) -> void:
 		# A beam is only visible because of what is in the air between you and
 		# it, so fog and rain are what make it a shaft rather than a dot.
 		var thickness := 0.35
-		if weather != null:
-			thickness = clampf(float(weather.get("fog_amount")) * 0.9
-					+ float(weather.get("rain_amount")) * 0.5, 0.0, 1.4)
+		var w := weather as WeatherScript
+		if w != null:
+			thickness = clampf(w.fog_amount * 0.9 + w.rain_amount * 0.5, 0.0, 1.4)
 		var hz := 0.55 + thickness * 1.05
 		var rc := clampf(1.15 - thickness * 0.5, 0.35, 1.15)
 		_beam_mat.set_shader_parameter("haze", hz)
@@ -78,9 +79,10 @@ func _process(delta: float) -> void:
 
 
 func _night_k() -> float:
-	if weather == null:
+	var w := weather as WeatherScript
+	if w == null:
 		return 1.0
-	var t := float(weather.get("time_of_day"))
+	var t: float = w.time_of_day
 	var elev := sin((t - 6.0) / 12.0 * PI)
 	return clampf(1.0 - elev * 1.15, 0.06, 1.0)
 

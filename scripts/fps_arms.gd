@@ -181,14 +181,14 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		want_grip = 0.45
 	elif engaged == "chart":
 		want_grip = 0.20
-	elif bool(boat.get("radio_held")) and _hold_id != "radio":
+	elif boat != null and boat.get("radio_held") == true and _hold_id != "radio":
 		_start_inspect("radio")
 	_grip = move_toward(_grip, want_grip, delta * 8.0)
 	if _kind != Kind.POKE and _grip > 0.01:
 		_curl_fingers(_fingers_r, _grip, false)
 		_curl_fingers(_fingers_l, _grip * 0.85, false)
 
-	if not bool(boat.get("radio_held")) and _hold_id == "radio" and not _returning:
+	if (boat == null or boat.get("radio_held") != true) and _hold_id == "radio" and not _returning:
 		_start_return()
 
 

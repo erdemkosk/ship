@@ -469,7 +469,7 @@ func _radio_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	for i in 4:
 		await get_tree().create_timer(0.7).timeout
 		rig.set("pitch", [-0.10, 0.10, -0.30, 0.0][i])
-		rig.set("yaw", float(rig.get("yaw")) + [0.0, 0.22, -0.30, 0.10][i])
+		rig.set("yaw", _as_f(rig.get("yaw")) + [0.0, 0.22, -0.30, 0.10][i])
 		await get_tree().create_timer(0.25).timeout
 		await _shot(dir, "radio%d" % i)
 	get_tree().quit()
@@ -695,7 +695,7 @@ func _stance_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 		await get_tree().create_timer(0.4).timeout
 		var fwd: Vector3 = -boat.global_basis.z
 		var base: float = atan2(-fwd.x, -fwd.z)
-		var rel: float = rad_to_deg(wrapf(float(rig.get("yaw")) - base, -PI, PI))
+		var rel: float = rad_to_deg(wrapf(_as_f(rig.get("yaw")) - base, -PI, PI))
 		print("[stance] istendi %+.0f deg -> basa gore %+.1f deg" % [
 				rad_to_deg(want), rel])
 	await _shot(dir, "stance_limit")
@@ -815,7 +815,7 @@ func _dive_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 				float(boat.SEA_LADDER_X), 0.1, float(boat.SEA_LADDER_Z) + 0.4))
 		var d: Vector3 = lw - cam.global_position
 		rig.set("yaw", atan2(-d.x, -d.z))
-		if bool(w.get("can_board")):
+		if w.get("can_board") == true:
 			break
 		await get_tree().create_timer(0.3).timeout
 	Input.action_release("boat_forward")
@@ -894,7 +894,7 @@ func _process(_delta: float) -> void:
 		"hawse":
 			goal = _look_boat.to_global(Vector3(0.0, 0.30, -3.02))
 		"rail":
-			goal = _look_boat.to_global(Vector3(1.815, 1.72, -2.20))
+			goal = _look_boat.to_global(Vector3(1.88, 1.72, -2.20))
 		"fusebox":
 			goal = _look_boat.to_global(Vector3(1.30, 3.72, 1.54))
 		_:
@@ -975,3 +975,11 @@ func _take_test_screenshot() -> void:
 	img.save_png(_screenshot_path)
 	print("screenshot saved: ", _screenshot_path)
 	get_tree().quit()
+
+
+func _as_f(v: Variant) -> float:
+	if typeof(v) == TYPE_FLOAT:
+		return v
+	if typeof(v) == TYPE_INT:
+		return float(v)
+	return 0.0

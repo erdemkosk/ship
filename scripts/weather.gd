@@ -25,6 +25,9 @@ var storm := true:
 		_apply_atmosphere()
 		if storm and _lightning_timer != null and _lightning_timer.is_stopped():
 			_schedule_lightning()
+		elif not storm:
+			_end_strike()
+			_thunder_token += 1
 var rain_amount := 0.6:
 	set(v):
 		rain_amount = v
@@ -45,6 +48,31 @@ var _env: Environment
 var _sky_mat: ShaderMaterial
 var _sun: DirectionalLight3D
 var _flash: DirectionalLight3D
+var _strike_omni: OmniLight3D
+var _bolt_mi: MeshInstance3D
+var _hit_disc: MeshInstance3D
+var _bolt_mat: ShaderMaterial
+var _hit_mat: ShaderMaterial
+var _bolt_pts: PackedVector3Array = PackedVector3Array()
+var _forks: Array[PackedVector3Array] = []
+var _strike_pos := Vector3.ZERO
+var _cloud_pos := Vector3.ZERO
+var _strike_t := -1.0
+var _sheet := false
+var _flash_k := 1.0
+var _omni_k := 1.0
+var _splash_k := 1.0
+var _bolt_width := 1.05
+var _fork_width := 0.42
+var _restrike_a := -1.0
+var _restrike_b := -1.0
+var _splashed := false
+var _thunder_token := 0
+var _cloud_glow: MeshInstance3D
+var _cloud_mat: ShaderMaterial
+var _cloud_omni: OmniLight3D
+var _thunder_pl: Array[AudioStreamPlayer3D] = []
+var _thunder_wavs: Array[AudioStreamWAV] = []
 var _rain: GPUParticles3D
 var _lightning_timer: Timer
 var _cloud_offset := Vector2.ZERO
@@ -142,12 +170,61 @@ func _ready() -> void:
 	add_child(_sun)
 
 	_flash = DirectionalLight3D.new()
-	_flash.light_color = Color(0.8, 0.85, 1.0)
+	_flash.light_color = Color(0.82, 0.88, 1.0)
 	_flash.light_energy = 0.0
 	_flash.shadow_enabled = false
 	_flash.light_angular_distance = 2.0
 	_flash.light_volumetric_fog_energy = 5.0
 	add_child(_flash)
+	_strike_omni = OmniLight3D.new()
+	_strike_omni.light_color = Color(0.78, 0.86, 1.0)
+	_strike_omni.light_energy = 0.0
+	_strike_omni.omni_range = 95.0
+	_strike_omni.omni_attenuation = 1.35
+	_strike_omni.light_volumetric_fog_energy = 8.0
+	_strike_omni.shadow_enabled = false
+	add_child(_strike_omni)
+	_bolt_mat = ShaderMaterial.new()
+	_bolt_mat.shader = load("res://shaders/lightning.gdshader")
+	_bolt_mi = MeshInstance3D.new()
+	_bolt_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_bolt_mi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	_bolt_mi.extra_cull_margin = 400.0
+	_bolt_mi.material_override = _bolt_mat
+	_bolt_mi.visible = false
+	add_child(_bolt_mi)
+	_hit_mat = ShaderMaterial.new()
+	_hit_mat.shader = load("res://shaders/lightning_hit.gdshader")
+	var disc := QuadMesh.new()
+	disc.size = Vector2(9.0, 9.0)
+	_hit_disc = MeshInstance3D.new()
+	_hit_disc.mesh = disc
+	_hit_disc.material_override = _hit_mat
+	_hit_disc.extra_cull_margin = 40.0
+	_hit_disc.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
+	_hit_disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_hit_disc.visible = false
+	add_child(_hit_disc)
+	_cloud_mat = ShaderMaterial.new()
+	_cloud_mat.shader = load("res://shaders/lightning_cloud.gdshader")
+	var cg := QuadMesh.new()
+	cg.size = Vector2(58.0, 40.0)
+	_cloud_glow = MeshInstance3D.new()
+	_cloud_glow.mesh = cg
+	_cloud_glow.material_override = _cloud_mat
+	_cloud_glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_cloud_glow.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	_cloud_glow.extra_cull_margin = 200.0
+	_cloud_glow.visible = false
+	add_child(_cloud_glow)
+	_cloud_omni = OmniLight3D.new()
+	_cloud_omni.light_color = Color(0.76, 0.84, 1.0)
+	_cloud_omni.light_energy = 0.0
+	_cloud_omni.omni_range = 160.0
+	_cloud_omni.omni_attenuation = 1.1
+	_cloud_omni.light_volumetric_fog_energy = 14.0
+	_cloud_omni.shadow_enabled = false
+	add_child(_cloud_omni)
 
 	_lightning_timer = Timer.new()
 	_lightning_timer.one_shot = true
@@ -156,10 +233,11 @@ func _ready() -> void:
 
 	_build_rain()
 	_build_weather_audio()
+	_build_thunder()
 	_apply_atmosphere()
 	_apply_rain()
 	if storm:
-		_schedule_lightning()
+		_lightning_timer.start(randf_range(1.1, 2.2))
 
 
 func set_wind(speed: float, direction_deg: float) -> void:
@@ -186,7 +264,8 @@ func set_underwater(on: bool) -> void:
 
 
 func _set_sky(pname: String, value: Variant) -> void:
-	_sky_mat.set_shader_parameter(pname, value)
+	if _sky_mat != null:
+		_sky_mat.set_shader_parameter(pname, value)
 	if ocean != null and ocean.has_method("set_sky_param"):
 		ocean.set_sky_param(pname, value)
 
@@ -443,23 +522,347 @@ func _process(delta: float) -> void:
 	_set_sky("cloud_offset", _cloud_offset)
 	_set_sky("cloud_time", _cloud_time)
 	_set_sky("flash_energy", _flash.light_energy)
+	if _env != null:
+		var fe := clampf(_flash.light_energy / 10.0, 0.0, 1.6)
+		_env.volumetric_fog_emission = Color(0.42, 0.50, 0.72) * fe
+	_update_strike(delta)
 	_update_weather_audio(delta)
 
 
 func _schedule_lightning() -> void:
-	_lightning_timer.start(randf_range(4.0, 14.0))
+	if _lightning_timer != null:
+		_lightning_timer.start(randf_range(2.4, 6.4))
 
 
 func _do_flash() -> void:
 	if not storm:
 		return
-	_flash.rotation_degrees = Vector3(-randf_range(35.0, 60.0), randf_range(0.0, 360.0), 0.0)
-	var tw := create_tween()
-	tw.tween_property(_flash, "light_energy", 7.0, 0.04)
-	tw.tween_property(_flash, "light_energy", 0.4, 0.08)
-	tw.tween_property(_flash, "light_energy", 5.0, 0.06)
-	tw.tween_property(_flash, "light_energy", 0.0, 0.4)
-	tw.finished.connect(_schedule_lightning)
+	_start_strike()
+
+
+func _start_strike() -> void:
+	var cam := get_viewport().get_camera_3d()
+	var origin := Vector3.ZERO
+	if boat != null:
+		origin = boat.global_position
+	elif cam != null:
+		origin = cam.global_position
+	var fwd := Vector3(0.0, 0.0, -1.0)
+	if cam != null:
+		fwd = -cam.global_basis.z
+		fwd.y = 0.0
+		if fwd.length_squared() < 0.02:
+			fwd = -cam.global_basis.x
+			fwd.y = 0.0
+		if fwd.length_squared() > 0.02:
+			fwd = fwd.normalized()
+
+	var roll := randf()
+	_sheet = roll < 0.24
+	var near := not _sheet and roll < 0.68
+	var dist: float
+	var yaw: float
+	if _sheet:
+		dist = randf_range(140.0, 320.0)
+		yaw = randf() * TAU
+		_flash_k = randf_range(0.85, 1.25)
+		_omni_k = 0.0
+		_splash_k = 0.0
+		_bolt_width = 0.0
+	elif near:
+		dist = randf_range(36.0, 72.0)
+		yaw = randf_range(-0.70, 0.70)
+		_flash_k = 1.0
+		_omni_k = 1.0
+		_splash_k = 1.35
+		_bolt_width = 1.05
+		_fork_width = 0.42
+	else:
+		dist = randf_range(95.0, 165.0)
+		yaw = randf_range(-1.15, 1.15)
+		_flash_k = 0.55
+		_omni_k = 0.38
+		_splash_k = 0.7
+		_bolt_width = 0.58
+		_fork_width = 0.24
+
+	var hit: Vector3 = origin + fwd.rotated(Vector3.UP, yaw) * dist
+	if ocean != null and ocean.has_method("get_height"):
+		hit.y = ocean.get_height(hit)
+	else:
+		hit.y = 0.0
+	_strike_pos = hit
+	var cloud_h := randf_range(90.0, 150.0) if not _sheet else randf_range(110.0, 170.0)
+	_cloud_pos = hit + Vector3(randf_range(-22.0, 22.0), cloud_h, randf_range(-22.0, 22.0))
+	_forks.clear()
+	_bolt_pts = PackedVector3Array()
+	if not _sheet:
+		_bolt_pts = _jagged_path(_cloud_pos, hit, 6, 5.5 if near else 4.2)
+		var nfork := randi_range(2, 4) if near else randi_range(1, 3)
+		for _f in nfork:
+			if _bolt_pts.size() < 10:
+				break
+			var k := randi_range(6, _bolt_pts.size() - 6)
+			var root: Vector3 = _bolt_pts[k]
+			var down := (hit - _cloud_pos).normalized()
+			var side := down.cross(Vector3.UP)
+			if side.length_squared() < 0.01:
+				side = down.cross(Vector3.RIGHT)
+			side = side.normalized()
+			var reach := randf_range(12.0, 36.0)
+			var tip: Vector3 = root + down * reach * randf_range(0.4, 1.0) \
+					+ side * randf_range(-1.0, 1.0) * reach * 0.55 \
+					+ Vector3.UP * randf_range(-6.0, 4.0)
+			if tip.y < hit.y + 2.0:
+				tip.y = hit.y + randf_range(6.0, 22.0)
+			_forks.append(_jagged_path(root, tip, 5, 3.0))
+		_rebuild_bolt_mesh()
+		var tint := Color(0.82, 0.90, 1.0) if near else Color(0.68, 0.72, 1.0)
+		_bolt_mat.set_shader_parameter("tint", Vector3(tint.r, tint.g, tint.b))
+
+	_flash.basis = Basis.looking_at((hit - _cloud_pos).normalized(), Vector3.UP)
+	var fdir: Vector3 = _cloud_pos - origin
+	fdir.y = maxf(fdir.y, absf(fdir.x) + absf(fdir.z)) * 0.35
+	if fdir.length_squared() > 0.01:
+		_set_sky("flash_dir", fdir.normalized())
+	if _strike_omni != null:
+		_strike_omni.omni_range = 150.0 if near else 110.0
+		_strike_omni.global_position = hit + Vector3(0.0, 6.0, 0.0)
+	if _cloud_omni != null:
+		_cloud_omni.global_position = _cloud_pos
+	if _cloud_glow != null:
+		_cloud_glow.global_position = _cloud_pos
+	if _hit_disc != null:
+		_hit_disc.global_position = hit + Vector3(0.0, 0.35, 0.0)
+	_restrike_a = 0.30 if randf() < (0.85 if near or _sheet else 0.45) else -1.0
+	_restrike_b = 0.50 if _restrike_a > 0.0 and randf() < 0.55 else -1.0
+	_splashed = false
+	_strike_t = 0.0
+	_queue_thunder(dist, _sheet, hit)
+
+
+func _jagged_path(a: Vector3, b: Vector3, depth: int, jag: float) -> PackedVector3Array:
+	## Midpoint displacement across the channel, not along it. Big sideways
+	## jumps turn each segment into a card; keep the wander small against
+	## the length so it reads as a filament with kinks.
+	var axis: Vector3 = b - a
+	var len := maxf(axis.length(), 0.01)
+	var down := axis / len
+	var right := down.cross(Vector3.UP)
+	if right.length_squared() < 0.01:
+		right = down.cross(Vector3.RIGHT)
+	right = right.normalized()
+	var out := down.cross(right).normalized()
+	var pts: PackedVector3Array = PackedVector3Array([a, b])
+	var amp := minf(jag, len * 0.085)
+	for _d in depth:
+		var nxt := PackedVector3Array()
+		for i in pts.size() - 1:
+			var p0: Vector3 = pts[i]
+			var p1: Vector3 = pts[i + 1]
+			var mid: Vector3 = (p0 + p1) * 0.5
+			mid += right * randf_range(-amp, amp) + out * randf_range(-amp * 0.45, amp * 0.45)
+			nxt.append(p0)
+			nxt.append(mid)
+		nxt.append(pts[pts.size() - 1])
+		pts = nxt
+		amp *= 0.48
+	pts[0] = a
+	pts[pts.size() - 1] = b
+	return pts
+
+
+func _update_strike(delta: float) -> void:
+	if _strike_t < 0.0:
+		_set_sky("flash_lobe", 0.0)
+		return
+	_strike_t += delta
+	if _strike_t > 1.22:
+		_end_strike()
+		if storm:
+			_schedule_lightning()
+		return
+	var look := _eval_strike(_strike_t)
+	var fade: float = look.x
+	var reveal: float = look.y
+	var flash_e: float = look.z
+	var lobe: float = look.w
+	_flash.light_energy = flash_e
+	_set_sky("flash_lobe", lobe)
+	if _bolt_mat != null:
+		_bolt_mat.set_shader_parameter("fade", fade)
+		_bolt_mat.set_shader_parameter("reveal", reveal)
+		_bolt_mat.set_shader_parameter("core_gain", 2.4 + 4.2 * fade)
+	if _hit_mat != null:
+		var hit_p := maxf(_pulse_at(_strike_t, 0.12, 0.10),
+				maxf(_pulse_at(_strike_t, _restrike_a, 0.08),
+						_pulse_at(_strike_t, _restrike_b, 0.07)))
+		_hit_mat.set_shader_parameter("fade", 0.0 if _sheet else maxf(hit_p, fade * 0.18))
+	if _cloud_mat != null:
+		_cloud_mat.set_shader_parameter("fade", lobe * 1.15)
+	if _strike_omni != null:
+		_strike_omni.light_energy = 0.0 if _sheet else (6.0 + 92.0 * fade) * _omni_k \
+				* _pulse_at(_strike_t, 0.12, 0.10)
+		if _restrike_a > 0.0:
+			_strike_omni.light_energy = maxf(_strike_omni.light_energy,
+					(4.0 + 60.0 * fade) * _omni_k * _pulse_at(_strike_t, _restrike_a, 0.08))
+		if _restrike_b > 0.0:
+			_strike_omni.light_energy = maxf(_strike_omni.light_energy,
+					(3.0 + 48.0 * fade) * _omni_k * _pulse_at(_strike_t, _restrike_b, 0.07))
+	if _cloud_omni != null:
+		_cloud_omni.light_energy = 18.0 * lobe
+	if ocean != null and ocean.has_method("get_height") and not _sheet:
+		_strike_pos.y = ocean.get_height(_strike_pos)
+		if _hit_disc != null:
+			_hit_disc.global_position = _strike_pos + Vector3(0.0, 0.35, 0.0)
+		if _strike_omni != null:
+			_strike_omni.global_position = _strike_pos + Vector3(0.0, 6.0, 0.0)
+	if _strike_t > 0.118 and not _splashed and not _sheet:
+		_splashed = true
+		if ocean != null and ocean.has_method("splash"):
+			ocean.splash(_strike_pos, _splash_k)
+	var show := fade > 0.015 and not _underwater
+	if _bolt_mi != null:
+		_bolt_mi.visible = show and not _sheet and _bolt_pts.size() > 1
+	if _hit_disc != null:
+		_hit_disc.visible = show and not _sheet
+	if _cloud_glow != null:
+		_cloud_glow.visible = lobe > 0.03 and not _underwater
+
+
+func _eval_strike(t: float) -> Vector4:
+	## x fade, y reveal, z directional flash, w cloud lobe.
+	var reveal := 1.0
+	var fade := 0.0
+	var flash := 0.0
+	var lobe := 0.0
+	if t < 0.12:
+		reveal = t / 0.12
+		fade = 0.06 + 0.10 * reveal
+		if _sheet:
+			fade = 0.0
+			reveal = 1.0
+		flash = 0.38 * _flash_k
+		lobe = 0.22 * _flash_k * reveal
+	else:
+		var stroke := _pulse_at(t, 0.12, 0.048)
+		var r1 := _pulse_at(t, _restrike_a, 0.036)
+		var r2 := _pulse_at(t, _restrike_b, 0.032)
+		var peak := maxf(stroke, maxf(r1, r2))
+		var after := 0.0
+		if t > 0.16:
+			after = 0.13 * exp(-(t - 0.16) * 2.6)
+		fade = 0.0 if _sheet else maxf(peak, after)
+		flash = (0.35 + 15.5 * peak + 1.1 * after) * _flash_k
+		lobe = (0.28 + 1.35 * peak + 0.32 * after) * _flash_k
+	return Vector4(fade, reveal, flash, lobe)
+
+
+func _pulse_at(t: float, t0: float, width: float) -> float:
+	if t0 < 0.0 or t < t0 or width < 0.001:
+		return 0.0
+	var u := (t - t0) / width
+	if u > 1.0:
+		return 0.0
+	return exp(-u * 4.6) * (1.0 - u * 0.12)
+
+
+func _end_strike() -> void:
+	_strike_t = -1.0
+	if _flash != null:
+		_flash.light_energy = 0.0
+	if _strike_omni != null:
+		_strike_omni.light_energy = 0.0
+	if _cloud_omni != null:
+		_cloud_omni.light_energy = 0.0
+	if _bolt_mi != null:
+		_bolt_mi.visible = false
+	if _hit_disc != null:
+		_hit_disc.visible = false
+	if _cloud_glow != null:
+		_cloud_glow.visible = false
+	_set_sky("flash_energy", 0.0)
+	_set_sky("flash_lobe", 0.0)
+	if _env != null:
+		_env.volumetric_fog_emission = Color(0.0, 0.0, 0.0)
+
+
+func _rebuild_bolt_mesh() -> void:
+	## Crossed world-space ribbons. Built once per strike so the channel
+	## does not crawl when the camera turns.
+	if _bolt_mi == null:
+		return
+	var im := ImmediateMesh.new()
+	_ribbon_world(im, _bolt_pts, _bolt_width)
+	for fork: PackedVector3Array in _forks:
+		_ribbon_world(im, fork, _fork_width)
+	_bolt_mi.mesh = im
+
+
+func _ribbon_world(im: ImmediateMesh, pts: PackedVector3Array, width: float) -> void:
+	if pts.size() < 2 or width < 0.01:
+		return
+	var n := pts.size()
+	var tan := PackedVector3Array()
+	tan.resize(n)
+	for i in n:
+		if i == 0:
+			tan[i] = pts[1] - pts[0]
+		elif i == n - 1:
+			tan[i] = pts[n - 1] - pts[n - 2]
+		else:
+			tan[i] = pts[i + 1] - pts[i - 1]
+	var lens := PackedFloat32Array()
+	lens.resize(n)
+	lens[0] = 0.0
+	var total := 0.0
+	for i in n - 1:
+		total += pts[i].distance_to(pts[i + 1])
+		lens[i + 1] = total
+	var inv := 1.0 / maxf(total, 0.001)
+	for plane in range(2):
+		im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+		for i in n - 1:
+			var s0 := _cross_side(tan[i], plane)
+			var s1 := _cross_side(tan[i + 1], plane)
+			if s0.length_squared() < 0.5 or s1.length_squared() < 0.5:
+				continue
+			var t0 := lens[i] * inv
+			var t1 := lens[i + 1] * inv
+			var w0: float = width * lerpf(1.05, 0.40, t0)
+			var w1: float = width * lerpf(1.05, 0.40, t1)
+			var a0: Vector3 = pts[i] - s0 * w0
+			var a1: Vector3 = pts[i] + s0 * w0
+			var b0: Vector3 = pts[i + 1] - s1 * w1
+			var b1: Vector3 = pts[i + 1] + s1 * w1
+			_tri(im, a0, Vector2(0.0, t0), b0, Vector2(0.0, t1), a1, Vector2(1.0, t0))
+			_tri(im, a1, Vector2(1.0, t0), b0, Vector2(0.0, t1), b1, Vector2(1.0, t1))
+		im.surface_end()
+
+
+func _cross_side(along: Vector3, which: int) -> Vector3:
+	var s: Vector3 = along.cross(Vector3.UP)
+	if s.length_squared() < 1e-6:
+		s = along.cross(Vector3.RIGHT)
+	if s.length_squared() < 1e-6:
+		return Vector3.ZERO
+	s = s.normalized()
+	if which == 1:
+		s = along.cross(s)
+		if s.length_squared() < 1e-6:
+			return Vector3.ZERO
+		s = s.normalized()
+	return s
+
+
+func _tri(im: ImmediateMesh, p0: Vector3, u0: Vector2, p1: Vector3, u1: Vector2,
+		p2: Vector3, u2: Vector2) -> void:
+	im.surface_set_uv(u0)
+	im.surface_add_vertex(p0)
+	im.surface_set_uv(u1)
+	im.surface_add_vertex(p1)
+	im.surface_set_uv(u2)
+	im.surface_add_vertex(p2)
 
 
 func _build_weather_audio() -> void:
@@ -473,6 +876,69 @@ func _build_weather_audio() -> void:
 	add_child(_wind_pl)
 	add_child(_storm_pl)
 	_wind_pl.play()
+
+
+func _build_thunder() -> void:
+	for i in 3:
+		_thunder_wavs.append(_synth_thunder(1000 + i * 97))
+		var p := AudioStreamPlayer3D.new()
+		p.bus = "Weather"
+		p.unit_size = 16.0
+		p.max_distance = 520.0
+		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		add_child(p)
+		_thunder_pl.append(p)
+
+
+func _synth_thunder(seed: int) -> AudioStreamWAV:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed
+	var rate := 22050
+	var n := int(rate * 2.35)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var lp := 0.0
+	for i in n:
+		var t := float(i) / float(rate)
+		var crack := exp(-t * 16.0) * (rng.randf() * 2.0 - 1.0)
+		var rumble := sin(t * TAU * (28.0 + rng.randf() * 8.0)) * exp(-t * 1.55)
+		rumble += sin(t * TAU * (17.0 + rng.randf() * 5.0)) * exp(-t * 1.15) * 0.7
+		var nse := rng.randf() * 2.0 - 1.0
+		lp = lerpf(lp, nse, 0.07)
+		var s := crack * 0.52 + rumble * 0.48 + lp * 0.22 * exp(-t * 2.0)
+		s = clampf(s * 0.72, -1.0, 1.0)
+		data.encode_s16(i * 2, int(s * 32767.0))
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = rate
+	wav.stereo = false
+	wav.data = data
+	return wav
+
+
+func _queue_thunder(dist: float, sheet: bool, at: Vector3) -> void:
+	var delay := clampf(dist / 340.0, 0.07, 1.15)
+	var token := _thunder_token
+	get_tree().create_timer(delay).timeout.connect(
+			func() -> void: _play_thunder(token, dist, sheet, at))
+
+
+func _play_thunder(token: int, dist: float, sheet: bool, at: Vector3) -> void:
+	if token != _thunder_token or not storm or _thunder_pl.is_empty():
+		return
+	var p: AudioStreamPlayer3D = _thunder_pl[randi() % _thunder_pl.size()]
+	if _thunder_wavs.is_empty():
+		return
+	p.stream = _thunder_wavs[randi() % _thunder_wavs.size()]
+	p.global_position = at + Vector3(0.0, 8.0, 0.0)
+	var lin := clampf(1.2 * (48.0 / maxf(dist, 22.0)), 0.07, 1.0)
+	if sheet:
+		lin *= 0.55
+	if _underwater:
+		lin *= 0.12
+	p.volume_db = linear_to_db(maxf(lin, 0.0001))
+	p.pitch_scale = randf_range(0.78, 1.06) * (0.72 if sheet else 1.0)
+	p.play()
 
 
 func _ensure_weather_bus() -> void:

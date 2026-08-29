@@ -90,6 +90,10 @@ uniform vec2 boat_pos = vec2(0.0);
 uniform float boat_speed = 0.0;
 uniform int hull_mask = 0;
 uniform mat4 boat_inv = mat4(1.0);
+// 1 when the camera is in the closed cabin. Then the house volume is
+// clipped too — otherwise a crest rides through the sole (clip used to
+// stop at y 0.52) and the wave is a sheet in the room until the trough.
+uniform int interior_clip = 0;
 
 // Lighthouse: two rotating beams. The sea does not pick up clustered
 // SpotLights (radiance is already in EMISSION), so the glitter path is
@@ -314,12 +318,22 @@ float scene_depth(vec2 uv, mat4 inv_proj) {
 }
 
 void fragment() {
-	// never draw sea inside the hull — clip water within the boat's interior
+	// never draw sea inside the hull. The clip is the INTERIOR below the
+	// deck, not a 2.4 m box around the whole house: a tall box leans
+	// outboard through the waterline the moment she heels, and punches a
+	// sharp parallelogram out of the sea along the gunwale.
 	if (hull_mask == 1) {
 		vec3 lp = (boat_inv * vec4(v_world_pos, 1.0)).xyz;
-		float pad = camera_under == 1 ? 0.35 : 0.0;
-		if (abs(lp.x) < 1.32 + pad && abs(lp.z) < 4.55 + pad
-				&& lp.y > -1.35 - pad && lp.y < 2.40 + pad) {
+		float pad = camera_under == 1 ? 0.20 : 0.0;
+		bool cut = abs(lp.x) < 1.50 + pad && abs(lp.z) < 4.70 + pad
+				&& lp.y > -1.20 - pad && lp.y < 0.52 + pad;
+		// Inset from the skin so a heel does not take this box outboard
+		// through the waterline (that was the gunwale parallelogram).
+		if (interior_clip == 1) {
+			cut = cut || (abs(lp.x) < 1.62 && lp.z > -0.35 && lp.z < 4.55
+					&& lp.y > 0.56 && lp.y < 2.82);
+		}
+		if (cut) {
 			discard;
 		}
 	}

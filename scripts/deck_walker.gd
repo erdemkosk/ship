@@ -411,7 +411,7 @@ func _sea_stand(boat: Node3D, y: float) -> Vector3:
 	## Where the BODY is for a given rung. The stiles are raked six degrees, so
 	## the climbing line leans aft with them — hold it vertical and your chest
 	## goes through the transom at the top while your feet swing off the bottom.
-	var z: float = float(boat.SEA_LADDER_Z) + 0.02 + (y + 0.32) * SEA_LEAN
+	var z: float = float(boat.SEA_LADDER_Z) + y * SEA_LEAN
 	return Vector3(float(boat.SEA_LADDER_X), y, z + SEA_STANDOFF)
 
 

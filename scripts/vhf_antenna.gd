@@ -11,6 +11,7 @@ const ALIGN := 5.2
 const WIND_K := 0.14
 const SAG := 0.22
 const ITERS := 6
+const WeatherScript := preload("res://scripts/weather.gd")
 
 var _pts: PackedVector3Array
 var _prev: PackedVector3Array
@@ -94,10 +95,11 @@ func _physics_process(delta: float) -> void:
 	var a_local: Vector3 = inv * a_mount
 	var g_local: Vector3 = inv * Vector3(0.0, -9.81, 0.0)
 	var wind_local := Vector3.ZERO
-	var weather: Variant = boat.get("weather")
-	if weather != null:
-		var wa: float = deg_to_rad(float(weather.get("wind_direction_deg")))
-		var ws: float = float(weather.get("wind_speed"))
+	var wx: Variant = boat.get("weather")
+	var wthr := wx as WeatherScript
+	if wthr != null:
+		var wa: float = deg_to_rad(wthr.wind_direction_deg)
+		var ws: float = wthr.wind_speed
 		var wind_w := Vector3(cos(wa), 0.0, sin(wa)) * ws - v
 		wind_local = inv * wind_w
 

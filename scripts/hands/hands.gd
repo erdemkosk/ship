@@ -29,7 +29,7 @@ const GESTURE_GRIP := {
 	"door_fwd": {"pos": Vector3(0.86, 1.62, 0.05), "pose": "wrap"},
 	"door_aft": {"pos": Vector3(0.86, 1.62, 0.05), "pose": "wrap"},
 	"door_wh": {"pos": Vector3(-0.86, 0.94, -0.05), "pose": "wrap"},
-	"door_eng": {"pos": Vector3(-0.07, 0.02, 0.82), "pose": "wrap"},
+	"door_eng": {"pos": Vector3(-0.07, -0.08, 1.10), "pose": "wrap"},
 	"locker": {"pos": Vector3(0.03, 0.10, 0.41), "pose": "wrap"},
 	"windlass": {"pos": Vector3(0.30, 0.10, 0.0), "pose": "fist"},
 }
@@ -163,7 +163,7 @@ func notify_use(id: String) -> void:
 		# that is all.
 		var setter := "set_radar_pull" if id == "radar" else "set_sounder_pull"
 		var other_setter := "set_sounder_pull" if id == "radar" else "set_radar_pull"
-		var was_out: bool = float(boat.get(id + "_pull")) > 0.5
+		var was_out: bool = _num(boat, id + "_pull") > 0.5
 		if was_out:
 			boat.call(setter, 0.0)
 		else:
@@ -279,7 +279,7 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 
 
 	# Radio state belongs to boat.gd; mirror it.
-	if bool(boat.get("radio_held")):
+	if _on(boat, "radio_held"):
 		if _claim["R"] != "radio":
 			_take("R", "radio")
 	elif _claim["R"] == "radio":
@@ -555,7 +555,7 @@ const RUNG_SPAN := 0.13    # hands either side of the stile centreline
 func _rung_local(i: int) -> Vector3:
 	var y: float = float(boat.SEA_LADDER_TOP) - 0.10 - float(i) * RUNG_PITCH
 	# Same six-degree rake the walker climbs; see deck_walker._sea_stand.
-	var z: float = float(boat.SEA_LADDER_Z) + 0.02 + (y + 0.32) * 0.1045
+	var z: float = float(boat.SEA_LADDER_Z) + y * 0.1045
 	return Vector3(float(boat.SEA_LADDER_X), y, z)
 
 
@@ -584,7 +584,7 @@ func _drive_ladder(side: String, delta: float) -> void:
 	if i_hi < 0:
 		var hy: float = clampf(_ladder_y + RUNG_REACH, 0.70, 1.02)
 		lp = Vector3(float(boat.SEA_LADDER_X) + out * 0.16 + out * 0.024, hy,
-				float(boat.SEA_LADDER_Z) - 0.04 + (hy + 0.32) * 0.1045)
+				float(boat.SEA_LADDER_Z) + hy * 0.1045)
 		# A vertical post: the palm faces it, the fingers wrap round toward her.
 		f_l = Vector3(0.0, -0.25, -1.0)
 		p_l = Vector3(-out, -0.10, 0.0)
@@ -798,3 +798,18 @@ func _grip_node(id: String, side: String) -> Node3D:
 			g.transform = Transform3D.IDENTITY
 	_grips[key] = g
 	return g
+
+
+func _on(obj: Object, key: String) -> bool:
+	return obj != null and obj.get(key) == true
+
+
+func _num(obj: Object, key: String) -> float:
+	if obj == null:
+		return 0.0
+	var v: Variant = obj.get(key)
+	if typeof(v) == TYPE_FLOAT:
+		return v
+	if typeof(v) == TYPE_INT:
+		return float(v)
+	return 0.0

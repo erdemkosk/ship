@@ -18,6 +18,7 @@ const SHORTCUTS := {
 	"anchor": "sw_anchor", "light_cabin": "sw_cabin", "light_helm": "sw_helm",
 	"light_beacon": "sw_beacon", "light_flood": "sw_flood", "wiper": "sw_wiper",
 }
+const WeatherScript := preload("res://scripts/weather.gd")
 
 var target: Node3D
 var ocean: Node3D
@@ -240,7 +241,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	# Mask on: 3 is a finger across the WET glass, not the beacon. The fuse
 	# still throws that circuit from the panel; the shortcut yields while you
 	# are looking through a lens covered in sea.
-	if mode == Mode.FPS and target != null and bool(target.get("gear_worn")) \
+	if mode == Mode.FPS and target != null and _flag(target, "gear_worn") \
 			and event.is_action_pressed("light_beacon"):
 		_wipe_drops()
 		return
@@ -375,14 +376,14 @@ func _process_fps(delta: float) -> void:
 				continue
 			# The suit hangs INSIDE the locker. Through a shut steel door it is
 			# not a thing you can reach, so it is not a thing you are offered.
-			if iid == "divegear" and not (bool(target.get("locker_open"))
-					or bool(target.get("gear_worn"))):
+			if iid == "divegear" and not (_flag(target, "locker_open")
+					or _flag(target, "gear_worn")):
 				continue
 			# Same for the switchboard: the toggles are under a steel hood. With
 			# the hood down they are not merely inoperable — they are not there
 			# to point at, and offering them was the confusing part, because the
 			# prompt appeared and then E did nothing.
-			if iid.begins_with("sw_") and not bool(target.get("fusebox_open")):
+			if iid.begins_with("sw_") and not _flag(target, "fusebox_open"):
 				continue
 			var ipos: Vector3 = it["pos"]
 			if target.has_method("interact_pos"):
@@ -422,7 +423,7 @@ func _process_fps(delta: float) -> void:
 		_reticle.visible = mode == Mode.FPS
 
 	if Input.is_action_just_pressed("use"):
-		if cand.is_empty() and engaged == "" and bool(target.get("radio_held")):
+		if cand.is_empty() and engaged == "" and _flag(target, "radio_held"):
 			# Holding the handset with nothing else under the crosshair: E puts
 			# it back on its hook. You should not have to hunt for the cradle
 			# with your nose to hang up a radio.
@@ -431,7 +432,7 @@ func _process_fps(delta: float) -> void:
 				_arms.boat = target
 				_arms.notify_use("radio")
 		elif cand.is_empty() and engaged == "" and _fog >= 0.10 and _wipe <= 0.0 \
-				and bool(target.get("gear_worn")):
+				and _flag(target, "gear_worn"):
 			# Nothing under the crosshair and the glass is milky: that is the
 			# only thing E can sensibly mean.
 			_wipe_mask()
@@ -459,7 +460,7 @@ func _process_fps(delta: float) -> void:
 				_arms.boat = target
 				if iid == "radio":
 					# One key, both ways: off the hook and back onto it.
-					target.set("radio_held", not bool(target.get("radio_held")))
+					target.set("radio_held", not _flag(target, "radio_held"))
 				_arms.notify_use(iid)
 			match iid:
 				"helm":
@@ -503,14 +504,14 @@ func _process_fps(delta: float) -> void:
 		elif _walker.get("swimming"):
 			if _walker.get("can_board"):
 				_prompt.text = "SPACE — take the ladder"
-			elif bool(_walker.get("submerged")):
+			elif _flag(_walker, "submerged"):
 				_prompt.text = "SPACE — swim up"
 			else:
 				_prompt.text = "You are in the sea — swim to the stern ladder   ·   CTRL: dive"
 			_prompt.visible = true
 		elif engaged == "helm":
 			if not cand.is_empty() and str(cand["id"]) == "ignition":
-				var st := int(target.get("engine"))
+				var st := _inum(target, "engine")
 				_prompt.text = "E — Ignition  (%s)" % (
 						"stop" if st == 2 else ("cranking" if st == 1 else "start"))
 			else:
@@ -526,30 +527,30 @@ func _process_fps(delta: float) -> void:
 			_prompt.text = "E — stow the screen"
 			_prompt.visible = true
 		elif cand.is_empty() and _drops >= 0.22 and _drop_wipe <= 0.0 \
-				and bool(target.get("gear_worn")):
+				and _flag(target, "gear_worn"):
 			_prompt.text = "3 — wipe the water off the mask"
 			_prompt.visible = true
 		elif cand.is_empty() and _fog >= 0.10 and _wipe <= 0.0 \
-				and bool(target.get("gear_worn")):
+				and _flag(target, "gear_worn"):
 			_prompt.text = "E — wipe the mask"
 			_prompt.visible = true
-		elif bool(target.get("radio_held")) and cand.is_empty():
+		elif _flag(target, "radio_held") and cand.is_empty():
 			_prompt.text = "E — hang up the handset"
 			_prompt.visible = true
 		elif not cand.is_empty():
-			if cand["id"] == "radio" and bool(target.get("radio_held")):
+			if cand["id"] == "radio" and _flag(target, "radio_held"):
 				_prompt.text = "E — hang up the handset"
 			elif str(cand["id"]) in ["radar", "sounder"] and _arms != null \
 					and _arms.inspecting_id() == str(cand["id"]):
 				_prompt.text = "E — stow the screen"
 			elif str(cand["id"]) == "locker":
 				_prompt.text = "E — %s the locker" % (
-						"close" if bool(target.get("locker_open")) else "open")
+						"close" if _flag(target, "locker_open") else "open")
 			elif str(cand["id"]) == "divegear":
 				_prompt.text = "E — %s the dive gear" % (
-						"take off" if bool(target.get("gear_worn")) else "put on")
+						"take off" if _flag(target, "gear_worn") else "put on")
 			elif str(cand["id"]) == "ignition":
-				var st := int(target.get("engine"))
+				var st := _inum(target, "engine")
 				_prompt.text = "E — Ignition  (%s)" % (
 						"stop" if st == 2 else ("cranking" if st == 1 else "start"))
 			elif (str(cand["id"]).begins_with("sw_") or str(cand["id"]).begins_with("door_")) \
@@ -633,8 +634,8 @@ func _process_fps(delta: float) -> void:
 	# washing the lens every time she rolls is nobody's idea of a boat. In the
 	# sea, or on the transom ladder with the sea coming over you, that clamp is
 	# exactly wrong: it is the one moment the view SHOULD go under.
-	if ocean != null and not bool(_walker.get("swimming")) \
-			and not bool(_walker.get("on_sea_ladder")):
+	if ocean != null and not _flag(_walker, "swimming") \
+			and not _flag(_walker, "on_sea_ladder"):
 		cam_pos.y = maxf(cam_pos.y, ocean.get_height(cam_pos) + 0.35)
 	_cam.global_position = cam_pos
 
@@ -670,7 +671,7 @@ func _process_fps(delta: float) -> void:
 	elif engaged == "chart":
 		st_base = _yaw_of(xf.basis * (target.CHART_LOOK - target.CHART_EYE))
 		st_lim = deg_to_rad(58.0)
-	elif bool(_walker.get("on_sea_ladder")):
+	elif _flag(_walker, "on_sea_ladder"):
 		# Facing the iron. You are hanging OFF the transom, so the ladder is
 		# toward the bow from you — her forward, not her stern.
 		st_base = _yaw_of(-xf.basis.z)
@@ -682,7 +683,7 @@ func _process_fps(delta: float) -> void:
 	# the cap looking down at it; now you are on it, facing it, with the ship in
 	# front of your nose — and no amount of head-turning does that, the whole
 	# body comes about.
-	var on_lad: bool = bool(_walker.get("on_sea_ladder"))
+	var on_lad: bool = _flag(_walker, "on_sea_ladder")
 	if on_lad and not _was_ladder:
 		yaw = _yaw_of(-xf.basis.z)
 		pitch = clampf(pitch, -0.5, 0.5)
@@ -703,8 +704,8 @@ func _process_fps(delta: float) -> void:
 					float(weather.get("time_of_day")) if weather != null else 12.0,
 					float(_walker.get("swim_depth")))
 		if _arms.has_method("set_sea_ladder"):
-			_arms.set_sea_ladder(bool(_walker.get("on_sea_ladder")), _walker.pos.y)
-		_arms.update(delta, target, engaged, walking, bool(_walker.get("swimming")))
+			_arms.set_sea_ladder(_flag(_walker, "on_sea_ladder"), _walker.pos.y)
+		_arms.update(delta, target, engaged, walking, _flag(_walker, "swimming"))
 	_update_warmth(delta)
 
 
@@ -1040,8 +1041,13 @@ func _update_mask(delta: float, under: bool) -> void:
 	## is a fitting on the ship.
 	if _mask_rect == null or target == null:
 		return
-	var wear: float = float(target.call("gear_wear_t")) if target.has_method("gear_wear_t") \
-			else 0.0
+	var wear := 0.0
+	if target.has_method("gear_wear_t"):
+		var gt: Variant = target.call("gear_wear_t")
+		if typeof(gt) == TYPE_FLOAT:
+			wear = gt
+		elif typeof(gt) == TYPE_INT:
+			wear = float(gt)
 	var worn: bool = wear > 0.001 and mode == Mode.FPS
 	_mask_rect.visible = worn
 	if not worn:
@@ -1061,9 +1067,7 @@ func _update_mask(delta: float, under: bool) -> void:
 	if under:
 		_drops = minf(_drops + delta * 1.6, 1.0)
 	else:
-		var rain_now := 0.0
-		if weather != null:
-			rain_now = clampf(float(weather.get("rain_amount")), 0.0, 1.0)
+		var rain_now := _rain()
 		_drops = minf(_drops + rain_now * delta * 0.40, 0.92)
 		_drops = maxf(_drops - delta * 0.018 * (1.0 - rain_now), 0.0)
 	if _drop_wipe > 0.0:
@@ -1101,9 +1105,7 @@ func _update_mask(delta: float, under: bool) -> void:
 	_mask_mat.set_shader_parameter("aspect", maxf(vp.x, 1.0) / maxf(vp.y, 1.0))
 	if ocean != null:
 		_mask_mat.set_shader_parameter("wave_time", ocean.wave_time)
-	var rain_amt := 0.0
-	if weather != null:
-		rain_amt = clampf(float(weather.get("rain_amount")), 0.0, 1.0)
+	var rain_amt := _rain()
 	_mask_mat.set_shader_parameter("rain", rain_amt)
 	_breath_amt = lerpf(_breath_amt, 1.0 if not _br_in else 0.0,
 			1.0 - exp(-delta * (3.2 if under else 1.6)))
@@ -1147,7 +1149,7 @@ func _wipe_mask() -> void:
 func _wipe_drops() -> void:
 	## Water on the glass is not fog. A fog wipe leaves it; this is the pass
 	## that takes the beads, and even then the skirt keeps a few.
-	if not bool(target.get("gear_worn")) or _drops < 0.12:
+	if not _flag(target, "gear_worn") or _drops < 0.12:
 		return
 	if _wipe > 0.0 or _drop_wipe > 0.0:
 		return
@@ -1162,7 +1164,7 @@ func _update_breath(under: bool) -> void:
 	if _breath == null or _cam == null:
 		return
 	var diver: bool = mode == Mode.FPS and _walker != null \
-			and (bool(_walker.get("swimming")) or bool(_walker.get("on_sea_ladder")))
+			and (_flag(_walker, "swimming") or _flag(_walker, "on_sea_ladder"))
 	var sub: bool = diver and under
 	if sub and not _was_sub:
 		_breath_burst = 0.75
@@ -1195,7 +1197,7 @@ func _update_warmth(delta: float) -> void:
 	else:
 		src = float(target.heat_at(_walker.pos))
 		if src < 0.05 and weather != null:
-			src = maxf(src - clampf(float(weather.get("rain_amount")), 0.0, 1.0) * 0.10, 0.0)
+			src = maxf(src - _rain() * 0.10, 0.0)
 		tau = 9.5 if src > _warmth else 6.5
 	_warmth = lerpf(_warmth, src, 1.0 - exp(-delta / tau))
 	if _warm_rect == null or _warm_mat == null:
@@ -1209,6 +1211,26 @@ func _update_warmth(delta: float) -> void:
 	_warm_mat.set_shader_parameter("close", close)
 	if ocean != null:
 		_warm_mat.set_shader_parameter("wave_time", ocean.wave_time)
+
+
+func _rain() -> float:
+	var w := weather as WeatherScript
+	return clampf(w.rain_amount, 0.0, 1.0) if w != null else 0.0
+
+
+func _flag(obj: Object, key: String) -> bool:
+	return obj != null and obj.get(key) == true
+
+
+func _inum(obj: Object, key: String) -> int:
+	if obj == null:
+		return 0
+	var v: Variant = obj.get(key)
+	if typeof(v) == TYPE_INT:
+		return v
+	if typeof(v) == TYPE_FLOAT:
+		return int(v)
+	return 0
 
 
 
