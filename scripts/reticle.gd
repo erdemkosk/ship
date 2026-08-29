@@ -7,8 +7,8 @@ extends Control
 ## short ticks close in around it and brighten. Nothing spins, nothing pulses:
 ## it reads as a focus, not as a video-game crosshair.
 
-const DOT := Color(0.86, 0.88, 0.90, 0.30)
-const LIVE := Color(1.0, 0.76, 0.40, 0.92)
+const DOT := Color(0.82, 0.84, 0.86, 0.18)
+const LIVE := Color(0.90, 0.86, 0.72, 0.55)
 const FAR_R := 17.0
 const NEAR_R := 8.0
 const TICK := 5.0

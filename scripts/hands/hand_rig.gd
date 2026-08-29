@@ -113,6 +113,16 @@ const STRAP_FRONT := 1.12
 var _watch_n := Vector3.UP
 var _watch_ax := Vector3.FORWARD
 var _watch_invs := 1.0
+## Seat on the FOREARM bone axis, in that bone's space. The case stands off
+## this point along `_watch_n`. It used to live on the wrist bone, and every
+## grip that rolled the wrist walked the watch off the arm.
+var _watch_seat := Vector3.ZERO
+var _watch_read := 0.0
+var _watch_attach: BoneAttachment3D
+var _watch_xf_fore := Transform3D.IDENTITY
+var _watch_xf_wrist := Transform3D.IDENTITY
+var _watch_fore_name := ""
+var _watch_wrist_name := ""
 ## Palm-normal sign per side. The cross-product handedness of this rig's rest
 ## pose was settled empirically (see _handcal bar test), not assumed: +1 keeps
 ## the measured direction, -1 flips it.
@@ -198,6 +208,11 @@ func update(delta: float) -> void:
 	var cam_pitch: float = asin(clampf(fwd.y, -1.0, 1.0))
 	var follow: float = FOLLOW_DOWN if cam_pitch < 0.0 else FOLLOW_UP
 	_lag.rotation.x = -cam_pitch * (1.0 - follow)
+	# Bone first, then the pose: BoneAttachment3D follows the bone that is
+	# set when the skeleton advances. Switching after advance left the case
+	# on the old bone for a frame (and, worse, applied the other bone's
+	# local transform to it).
+	_seat_watch()
 	# Fingers pose before the modifier pass; IK and wrist align only touch the
 	# arm chain and wrist, so this survives.
 	skeleton.reset_bone_poses()
@@ -359,7 +374,25 @@ func set_watch_tilt(v: float) -> void:
 
 func set_watch_standoff(v: float) -> void:
 	if _watch_holder != null:
-		_watch_holder.position = (_watch_n * v - _watch_ax * 0.032) * _watch_invs
+		_watch_holder.position = _watch_seat + _watch_n * (v * _watch_invs)
+
+
+func set_watch_read(amt: float) -> void:
+	_watch_read = clampf(amt, 0.0, 1.0)
+
+
+func _seat_watch() -> void:
+	## Forearm while you work. Wrist only while B is up — that is the
+	## reading pose. No world-space rewrite: that scaled the case to nothing.
+	if _watch_attach == null or _watch_holder == null:
+		return
+	var read := _watch_read > 0.35
+	var want: String = _watch_wrist_name if read else _watch_fore_name
+	if want == "":
+		return
+	if _watch_attach.bone_name != want:
+		_watch_attach.bone_name = want
+	_watch_holder.transform = _watch_xf_wrist if read else _watch_xf_fore
 
 
 func set_watch_display(h: float, m: float, t: float, depth: float,
@@ -385,40 +418,55 @@ func _build_watch() -> void:
 	## across your chest and that is exactly how a watch face sits.
 	if skeleton == null or not _sem_inv.has("L"):
 		return
+	# On the FOREARM, just shy of the wrist. A real watch sits there. On the
+	# wrist bone, every grip that rolled the hand took the case with it.
+	# B still lifts the whole arm, so the face comes up the same way.
 	var ba := BoneAttachment3D.new()
-	ba.bone_name = str(CHAINS["L"]["end"])
+	var fore_name := str(CHAINS["L"]["mid"])
+	var wrist_name := str(CHAINS["L"]["end"])
+	_watch_fore_name = fore_name
+	_watch_wrist_name = wrist_name
+	ba.bone_name = fore_name
+	_watch_attach = ba
 	skeleton.add_child(ba)
-	# Columns of the measured semantic basis, in wrist-bone local space.
 	var sem: Basis = (_sem_inv["L"] as Basis).inverse()
-	var F: Vector3 = sem.z.normalized()          # wrist -> fingers
-	var n: Vector3 = (-sem.y).normalized()       # back of the wrist
-	# The display reads ALONG the arm, elbow toward hand. The proof is the
-	# gesture everyone makes: forearm horizontal across the chest — and the
-	# text on a real watch sits level, reading with the arm. (This axis went
-	# across-arm for one revision, "fixed" against a pose that held the arm
-	# vertically; the pose was the thing that was wrong.)
-	#
-	# And that is ALL the orientation there is. An earlier pass added a roll
-	# trim and a wedge so the face met the raised eye squarely — and it read
-	# instantly as wrong, because a watch does not look at you. It is strapped
-	# flat to the wrist and goes where the wrist goes; whatever angle your
-	# forearm presents is the angle you read it at.
-	# Along the arm, in the plane of the wrist's own back.
-	#
-	# An attempt to use the true elbow-to-wrist axis instead was reverted, and
-	# the sweep is why: deriving `arm_ax` from the forearm bone and then
-	# squaring the dorsal normal against it rotated the mount round the wrist,
-	# so the case sat on the FLANK. Photographed at six standoffs from 22 to
-	# 32 mm, the arm cut the same diagonal across the display in every one —
-	# distance cannot fix a direction. The finger axis, projected into the
-	# dorsal plane, is what puts it on the back of the wrist where it belongs.
+	var F: Vector3 = sem.z.normalized()
+	var n_w: Vector3 = (-sem.y).normalized()
+	var n: Vector3 = n_w
 	var X: Vector3 = (F - F.project(n)).normalized()
+	var seat_bone := Vector3.ZERO
+	var fi: int = skeleton.find_bone(fore_name)
+	var wi: int = skeleton.find_bone(wrist_name)
+	var inv_s: float = 1.0 / maxf(float(_measured.get("scale", 1.0)), 1e-6)
+	if fi >= 0 and wi >= 0:
+		var fr: Transform3D = skeleton.get_bone_global_rest(fi)
+		var wr: Transform3D = skeleton.get_bone_global_rest(wi)
+		# Wrist -> elbow in skeleton space, then into the forearm bone.
+		# Subtracting a "toward hand" axis flipped the case ONTO the palm
+		# whenever that axis was the wrong way around.
+		var to_wrist: Vector3 = wr.origin - fr.origin
+		if to_wrist.length_squared() < 1e-8:
+			to_wrist = fr.basis.y
+		var back: Vector3 = -to_wrist.normalized()
+		var wr_in_f: Transform3D = fr.affine_inverse() * wr
+		var n_fore: Vector3 = (fr.basis.inverse() * (wr.basis * n_w)).normalized()
+		var along: Vector3 = (fr.basis.inverse() * to_wrist).normalized()
+		n_fore = (n_fore - n_fore.project(along)).normalized()
+		if n_fore.length_squared() > 0.25:
+			n = n_fore
+		X = (along - along.project(n)).normalized()
+		# 80 mm up the forearm from the crease. The walk swing bunches the
+		# wrist mesh; anything sitting on that joint is inside the hand.
+		seat_bone = wr_in_f.origin + (fr.basis.inverse() * back) * (0.080 * inv_s)
 	var arm_ax: Vector3 = X
 	var Y: Vector3 = n.cross(X).normalized()
-	# Bone space is not metres; _measured.scale is the factor the palm-contact
-	# maths already trusts, so the watch is authored in metres and converted
-	# through the same number.
-	var inv_s: float = 1.0 / maxf(float(_measured.get("scale", 1.0)), 1e-6)
+	if Y.length_squared() < 0.25:
+		Y = X.cross(n).normalized()
+	var X_w: Vector3 = (F - F.project(n_w)).normalized()
+	var Y_w: Vector3 = n_w.cross(X_w).normalized()
+	if Y_w.length_squared() < 0.25:
+		Y_w = X_w.cross(n_w).normalized()
+	_watch_seat = seat_bone
 	# How far out to stand it off the bone — MEASURED off the arm mesh, not
 	# guessed. A fixed 2.05 cm was right for exactly one wrist rotation; the
 	# moment the reading pose changed, the case was sitting inside the
@@ -452,16 +500,23 @@ func _build_watch() -> void:
 	# off the arm. The sweep lives on as --watch-sweep if it ever needs
 	# re-choosing (a different arm asset, a different reading pose).
 	const WRIST_STANDOFF := 0.0300
-	var back_off: float = WRIST_STANDOFF
+	# Further up the forearm the limb is thicker. Same 30 mm that cleared the
+	# wrist crease buries the caseback in the meat here.
+	const FORE_STANDOFF := 0.0340
+	var back_off: float = FORE_STANDOFF
 	_watch_n = n
 	_watch_ax = arm_ax
 	_watch_invs = inv_s
+	_watch_xf_wrist = Transform3D(
+			Basis(X_w, Y_w, n_w).orthonormalized() * Basis.from_scale(Vector3.ONE * inv_s),
+			(n_w * WRIST_STANDOFF - X_w * 0.032) * inv_s)
 	var holder := Node3D.new()
 	holder.name = "WatchHolder"
 	_watch_holder = holder
 	holder.transform = Transform3D(
 			Basis(X, Y, n).orthonormalized() * Basis.from_scale(Vector3.ONE * inv_s),
-			(n * back_off - arm_ax * 0.032) * inv_s)
+			_watch_seat + n * (back_off * inv_s))
+	_watch_xf_fore = holder.transform
 	ba.add_child(holder)
 	# Flat on the wrist, full stop. (A wedge lived here once, leaning the case
 	# toward the eye — it made the watch follow the viewer like a screen, and
@@ -538,9 +593,25 @@ func _build_watch() -> void:
 	bez.mesh = bm
 	bez.material_override = worn
 	head.add_child(bez)
-	# No lugs. The band runs straight out of the case sides — see the angle
-	# list below, which starts where the case's own edge ends, so the first
-	# link emerges from under it with nothing bridging and nothing to notice.
+	# Lugs on the case itself, so the strap is born from the watch rather
+	# than appearing beside it. Side pair is where the hoop meets; the 12/6
+	# pair is the silhouette everybody reads as "this is a watch".
+	for sy: float in [-1.0, 1.0]:
+		var lug_s := MeshInstance3D.new()
+		var lsm := BoxMesh.new()
+		lsm.size = Vector3(0.0240, 0.0075, 0.0080)
+		lug_s.mesh = lsm
+		lug_s.material_override = worn
+		lug_s.position = Vector3(0.0, sy * 0.0178, -0.0008)
+		head.add_child(lug_s)
+	for sx: float in [-1.0, 1.0]:
+		var lug_e := MeshInstance3D.new()
+		var lem := BoxMesh.new()
+		lem.size = Vector3(0.0070, 0.0260, 0.0075)
+		lug_e.mesh = lem
+		lug_e.material_override = worn
+		lug_e.position = Vector3(sx * 0.0198, 0.0, -0.0006)
+		head.add_child(lug_e)
 	var screen := MeshInstance3D.new()
 	var qm := QuadMesh.new()
 	qm.size = Vector2(0.0248, 0.0155)
@@ -599,42 +670,33 @@ func _build_watch() -> void:
 	# short of 100 per cent does not necessarily mean penetration, and only a
 	# band big enough to be wrong reaches 100. 6 mm is where the ring stops
 	# reading as buried without starting to read as a hoop.
-	var palm_off := 0.0060
+	var palm_off := 0.0075
 	var axis_z: float = -back_off - palm_off
-	var rad_n: float = back_off - 0.0058 + palm_off
+	# A few millimetres prouder than the wrist-tuned ring: this seat is on
+	# thicker forearm, and the old radius cut the skin at the crease.
+	var rad_n: float = back_off - 0.0020 + palm_off
 	var rad_a: float = rad_n * STRAP_RATIO
 	_strap_geom = {"rn": rad_n, "ratio": STRAP_RATIO, "axis": axis_z,
 			"rn0": back_off - 0.0058, "axis0": -back_off}
 	for sgn: float in [-1.0, 1.0]:
-		# Starting at the LUGS: below about fifty degrees the ring runs under
-		# the case, so links there are buried inside it and the strap appeared
-		# to begin in mid-air beside the watch rather than at its ends. Close
-		# enough together, and wide enough, that the band has no gaps in it.
-		# From 36 degrees — where the ellipse clears the side of the case, so
-		# the strap appears to come out of it — round to 176, which meets its
-		# opposite number under the wrist. The wrap is complete: there is no
-		# arc of bare arm left anywhere except under the case itself.
-		for a_deg: float in [40.0, 55.0, 70.0, 85.0, 100.0, 115.0, 130.0,
-				145.0, 160.0, 175.0]:
+		# 20° puts the first link under the side lug, not a centimetre off
+		# in mid-air. The old 40° start was why the band looked like a pile
+		# of crumbs next to the case instead of a strap coming out of it.
+		for a_deg: float in [20.0, 30.0, 42.0, 55.0, 70.0, 85.0, 100.0, 115.0,
+				130.0, 145.0, 160.0, 175.0]:
 			var a: float = deg_to_rad(a_deg) * sgn
 			var r: float = rad_n * rad_a / sqrt(
 					pow(rad_a * cos(a), 2.0) + pow(rad_n * sin(a), 2.0))
 
 			var sm2 := MeshInstance3D.new()
 			var sb := BoxMesh.new()
-			# Long along the arm, narrow across it: that is a strap link.
-			sb.size = Vector3(0.0200, 0.0165, 0.0042)
+			# First two sit under the lug and are longer so the join reads as
+			# one piece. The rest overlap enough to be a band, not bakla.
+			var near_case := a_deg < 36.0
+			sb.size = Vector3(0.0240 if near_case else 0.0210,
+					0.0200 if near_case else 0.0175, 0.0046)
 			sm2.mesh = sb
 			sm2.material_override = rubber
-			# Placed on the measured surface, then referred back to the holder,
-			# whose origin is the case face rather than the bone.
-			# AROUND the arm, in the across x dorsal plane.
-			#
-			# Which plane that is was finally settled by DRAWING the frame —
-			# three coloured rods along the holder's own axes (watch_axes_debug)
-			# — after two revisions had guessed it from the case's proportions
-			# and from a sweep, and guessed wrong in both directions. Local X
-			# runs along the arm, Y across it, Z out of the wrist.
 			sm2.position = Vector3(0.0, sin(a) * r, axis_z + cos(a) * r)
 			sm2.rotation.x = -a
 			holder.add_child(sm2)

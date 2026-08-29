@@ -87,6 +87,10 @@ var _ladder_y := 0.0
 var _lad_pos := {}
 var _dbg := 0
 var _swim_t := 0.0
+## Walk cycle for the idle hang. `walking` arrives from the camera; we keep
+## our own phase so the two arms stay opposite and start/stop without a snap.
+var _stride := 0.0
+var _gait := 0.0
 
 
 func debug_frames(n: int) -> void:
@@ -267,6 +271,14 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		_finish(delta)
 		return
 	rig.set_visible_hands(true)
+	# Want the stride even when the walker is sliding on a wet deck and
+	# `walking` (speed/3) stays small — WASD is the truth of the step.
+	var stick := Input.get_vector("boat_left", "boat_right",
+			"boat_backward", "boat_forward").length()
+	var want: float = maxf(clampf(walking, 0.0, 1.0), clampf(stick, 0.0, 1.0))
+	_stride = lerpf(_stride, want, 1.0 - exp(-10.0 * delta))
+	if _stride > 0.02:
+		_gait += delta * lerpf(2.8, 6.4, _stride)
 	if _dbg > 0:
 		_dbg -= 1
 		print("[hands] engaged=%s claim=%s" % [engaged, _claim])
@@ -311,6 +323,8 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 
 
 func _finish(delta: float) -> void:
+	if rig.has_method("set_watch_read"):
+		rig.set_watch_read(_watch_t)
 	rig.update(delta)
 
 
@@ -373,29 +387,29 @@ func _drive(side: String, delta: float) -> void:
 
 
 func _rest_hand(side: String) -> void:
-	## Idle: hands DOWN and OUT of shot, at the sides where they hang. The old
-	## rest sat them at camera-space y -0.52, which at this field of view is
-	## still on screen — so every finished gesture left a hand parked in the
-	## middle of the picture. It also snapped there, because the IK target
-	## jumped. Now the hand travels from wherever it let go, on an ease, to a
-	## spot well below the frustum.
+	## Idle hang in the lower corners. Standing, they just sit there. Walking,
+	## they swing opposite each other — right forward with the left foot —
+	## the way a body does, not a HUD bob.
 	var out: float = 1.0 if side == "R" else -1.0
 	var c: Transform3D = _cam.global_transform
-	# BEHIND the lens plane (+z in camera space), not merely low. The old home
-	# at y -0.86 was 0.66 m from the shoulder and the arm is 0.55 — so the
-	# solver could not reach it, stopped short, and left the hand parked in the
-	# bottom of the picture, which is the "hand stuck on screen" all over again.
-	# This one is 0.26 m away and behind the near plane: reachable, and gone.
-	var home: Vector3 = c * Vector3(out * 0.36, -0.52, 0.12)
+	var ph: float = _gait + (0.0 if side == "R" else PI)
+	var s := sin(ph)
+	var w: float = smoothstep(0.02, 0.38, _stride)
+	var idle := sin(_watch_clock * 1.15 + (0.0 if side == "R" else 1.7)) * 0.010
+	# Visible in the lower third, a real step, but the wrist does not roll —
+	# that is what walked the watch off the left arm.
+	var home: Vector3 = c * Vector3(
+			out * (0.168 + (1.0 - absf(s)) * 0.030 * w),
+			-0.30 + s * 0.085 * w + idle,
+			-0.28 - s * 0.12 * w)
 	var u: float = clampf(_rest_t[side] / 0.34, 0.0, 1.0)
 	u = u * u * (3.0 - 2.0 * u)
 	var from: Vector3 = _last_grip[side] if u < 1.0 else home
 	var contact: Vector3 = from.lerp(home, u)
-	var fingers: Vector3 = c.basis * Vector3(out * 0.12, -0.90, -0.42)
-	var palm: Vector3 = c.basis * Vector3(-out, -0.10, 0.0)
-	# Weight falls away with the travel: by the time it is home the solver has
-	# let go entirely and the arm hangs on its own.
-	rig.grip(side, contact, fingers, palm, 1.0 - u * 0.55, "open", 0.0)
+	var fingers: Vector3 = c.basis * Vector3(out * 0.08, -0.86, -0.46)
+	var palm: Vector3 = c.basis * Vector3(-out * 0.95, -0.12, 0.16)
+	_last_grip[side] = contact
+	rig.grip(side, contact, fingers, palm, 1.0, "open", 0.18)
 
 
 func _drive_swim(side: String, _delta: float) -> void:

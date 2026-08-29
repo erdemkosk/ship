@@ -41,7 +41,17 @@ func setup(p_rig: Node3D, p_boat: RigidBody3D, p_ocean: Node3D, p_weather: Node3
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel"):
-		_choose("quit")
+		# The ESC that opened this shot must not also close it.
+		if _t < 0.20:
+			get_viewport().set_input_as_handled()
+			return
+		# Same key that opened this shot: back into the man. Weather board
+		# first, if it is up — then a second ESC sails. ABANDON SHIP still
+		# quits; that is the button that means it.
+		if _panel_on:
+			_choose("weather")
+		else:
+			_choose("sail")
 		get_viewport().set_input_as_handled()
 
 
