@@ -3,6 +3,7 @@ extends RigidBody3D
 ## Rolls with the swell. Past vanishing stability it capsizes.
 
 const WeatherScript := preload("res://scripts/weather.gd")
+const ShaderSet := preload("res://scripts/shader_set.gd")
 
 # Hull bottom + deck probes. Deck samples (y > 0) only matter when inverted —
 # they keep a capsized boat floating instead of falling through.
@@ -66,8 +67,10 @@ var _helm_glow: StandardMaterial3D
 var _glass_mat: ShaderMaterial
 var _front_glass_mat: ShaderMaterial
 var weather: Node3D
-## Wiper switch — 5 at the helm. Sweeps only while on; parks upright when off.
+## Wiper switch — 5 at the helm. Sweeps only while on; parks to port when off.
 var wiper_on := false
+var _wiper_arm: Node3D
+var _wiper_pose := -1.08
 var _cabin_lamp: OmniLight3D
 var _stove_lamp: OmniLight3D
 var _stove_fill: OmniLight3D
@@ -130,6 +133,11 @@ var aground := false
 ## True while you stand at the telegraph alone: W/S work the lever, no steering.
 var telegraph_engaged := false
 var _hull_mats: Array[ShaderMaterial] = []
+## Static _box/_cyl/_prism pieces, keyed by material, flushed into one
+## ArrayMesh each. Pivots, glass and anything that must hide on its own
+## stay as separate instances — merging those would move or smear them.
+var _mesh_batch: Dictionary = {}
+var _batching := false
 var _soak := 0.0
 var _glass_wet := 0.0
 var _sounder_mat: ShaderMaterial
@@ -300,6 +308,7 @@ func _ready() -> void:
 	_prev_wh.resize(PROBES.size())
 	_build_collision()
 	_build_rain_shields()
+	_batching = true
 	_build_visuals()
 	_dress_steel()
 	_build_motor()
@@ -310,6 +319,7 @@ func _ready() -> void:
 	vhf.position = Vector3(1.58, 5.52, 3.78)
 	add_child(vhf)
 	_build_radar_scanner()
+	_flush_mesh_batch()
 	_build_engine_sound()
 	_build_door_sound()
 	_build_hull_creak()
@@ -1189,8 +1199,11 @@ func _build_visuals() -> void:
 	_front_glass_mat = _glass_mat.duplicate()
 	_front_glass_mat.set_shader_parameter("has_wiper", 1)
 	_glass(Vector3(WH_X * 2.0 - 0.16, 1.68, 0.05), Vector3(0.0, 4.25, WH_Z0), _front_glass_mat)
-	# The wipe lives in the glass shader. A 3D arm parked on the pane sat
-	# dead-centre of the view as a black rectangle, which is all anyone saw.
+	# The dry fan lives in the glass shader. The arm itself is out on the
+	# weather face — a thin steel whip, not the black plank that used to sit
+	# dead-centre of the view and hide the horizon. It parks to port so the
+	# helm is not a bar.
+	_build_wiper(WH_Z0)
 	# Aft face. The doorway is on the centreline, out onto the roof balcony.
 	# Port of it is a solid panel (it also closes the stairwell). Starboard is
 	# glass over a sill, with a jamb so the door has something to hang on.
@@ -2286,17 +2299,12 @@ func _prism(w: float, depth: float, h: float, pos: Vector3, mat: Material) -> vo
 	## A plan-view wedge: triangular cross-section in the deck plane, apex
 	## pointing forward. This is the one primitive a pointed bow needs and the
 	## one thing a BoxMesh cannot fake.
-	var mi := MeshInstance3D.new()
 	var pm := PrismMesh.new()
 	pm.left_to_right = 0.5
 	pm.size = Vector3(w, depth, h)
-	pm.material = mat
-	mi.mesh = pm
 	# PrismMesh points +Y; lying it on its back points the apex forward (-Z)
 	# and turns the extrusion into height.
-	mi.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
-	mi.position = pos
-	add_child(mi)
+	_emit_mesh(pm, pos, Vector3(-90.0, 0.0, 0.0), mat, null)
 
 
 func _box_node(size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
@@ -2862,6 +2870,31 @@ func _build_radar_scanner() -> void:
 	_cyl(0.028, 0.022, 0.06, Vector3(0.0, 0.155, 0.0), Vector3.ZERO, ss, _radar_scan)
 
 
+func _build_wiper(front_z: float) -> void:
+	## Outside the front pane, same pivot the shader uses: bottom centre,
+	## local y = -0.72 on a pane centred at 4.25. The blade rides a few
+	## millimetres off the glass so it never z-fights the pane.
+	var steel := _mat(Color(0.38, 0.39, 0.40), 0.22, 0.78)
+	var rubber := _mat(Color(0.07, 0.07, 0.08), 0.88, 0.0)
+	var pivot_y := 4.25 - 0.72
+	_box(Vector3(0.11, 0.08, 0.09), Vector3(0.0, 3.36, front_z - 0.07), Vector3.ZERO, steel)
+	_cyl(0.022, 0.022, 0.07, Vector3(0.0, pivot_y, front_z - 0.04),
+			Vector3(90.0, 0.0, 0.0), steel)
+	_wiper_arm = Node3D.new()
+	_wiper_arm.position = Vector3(0.0, pivot_y, front_z - 0.058)
+	_wiper_arm.rotation.z = -_wiper_pose
+	add_child(_wiper_arm)
+	var arm := _box_node(Vector3(0.022, 1.02, 0.012), Vector3(0.0, 0.54, 0.0), steel)
+	arm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_wiper_arm.add_child(arm)
+	var spine := _box_node(Vector3(0.014, 0.94, 0.008), Vector3(0.0, 0.56, 0.014), steel)
+	spine.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_wiper_arm.add_child(spine)
+	var blade := _box_node(Vector3(0.010, 0.92, 0.007), Vector3(0.0, 0.56, 0.022), rubber)
+	blade.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_wiper_arm.add_child(blade)
+
+
 func _build_helm(trim: Material, metal: Material) -> void:
 	## No pedestal. It read as a lectern planted in the middle of the room, and
 	## it hid the dials. The wheel stands on a slim brass column out of the
@@ -2912,37 +2945,100 @@ func _build_helm(trim: Material, metal: Material) -> void:
 	_wheel.add_child(hub)
 
 
+func _local_xform(pos: Vector3, rot_deg: Vector3) -> Transform3D:
+	var e := Vector3(deg_to_rad(rot_deg.x), deg_to_rad(rot_deg.y), deg_to_rad(rot_deg.z))
+	return Transform3D(Basis.from_euler(e), pos)
+
+
+func _can_batch(mat: Material, parent: Node3D) -> bool:
+	if not _batching or parent != null:
+		return false
+	if mat is StandardMaterial3D:
+		return true
+	# Wet hull is world-space; the rest of the shaders read MODEL VERTEX
+	# (glass rain, worn letters) and a merge would smear them across the boat.
+	return mat is ShaderMaterial and _hull_mats.has(mat)
+
+
+func _emit_mesh(mesh: Mesh, pos: Vector3, rot_deg: Vector3, mat: Material,
+		parent: Node3D, shadows := true) -> void:
+	if _can_batch(mat, parent):
+		if not _mesh_batch.has(mat):
+			_mesh_batch[mat] = []
+		(_mesh_batch[mat] as Array).append({
+			"mesh": mesh,
+			"xform": _local_xform(pos, rot_deg),
+			"shadow": shadows,
+		})
+		return
+	var mi := MeshInstance3D.new()
+	if mesh is PrimitiveMesh:
+		(mesh as PrimitiveMesh).material = mat
+	else:
+		mesh.surface_set_material(0, mat)
+	mi.mesh = mesh
+	mi.position = pos
+	mi.rotation_degrees = rot_deg
+	if not shadows:
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if parent == null:
+		add_child(mi)
+	else:
+		parent.add_child(mi)
+
+
+func _flush_mesh_batch() -> void:
+	_batching = false
+	for mat: Material in _mesh_batch:
+		var items: Array = _mesh_batch[mat]
+		if items.is_empty():
+			continue
+		if items.size() == 1:
+			var one: Dictionary = items[0]
+			var mi1 := MeshInstance3D.new()
+			var mesh: Mesh = one["mesh"]
+			if mesh is PrimitiveMesh:
+				(mesh as PrimitiveMesh).material = mat
+			else:
+				mesh.surface_set_material(0, mat)
+			mi1.mesh = mesh
+			mi1.transform = one["xform"]
+			if not one["shadow"]:
+				mi1.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			add_child(mi1)
+			continue
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		var any_shadow := false
+		for it: Dictionary in items:
+			if it["shadow"]:
+				any_shadow = true
+			st.append_from(it["mesh"], 0, it["xform"])
+		var combined: ArrayMesh = st.commit()
+		var mi := MeshInstance3D.new()
+		mi.mesh = combined
+		mi.material_override = mat
+		if not any_shadow:
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(mi)
+	_mesh_batch.clear()
+
+
 func _cyl(r_bot: float, r_top: float, h: float, pos: Vector3, rot_deg: Vector3,
 		mat: Material, parent: Node3D = null) -> void:
-	var mi := MeshInstance3D.new()
 	var m := CylinderMesh.new()
 	m.bottom_radius = r_bot
 	m.top_radius = r_top
 	m.height = h
 	m.radial_segments = 10
 	m.rings = 1
-	m.material = mat
-	mi.mesh = m
-	mi.position = pos
-	mi.rotation_degrees = rot_deg
-	if parent == null:
-		add_child(mi)
-	else:
-		parent.add_child(mi)
+	_emit_mesh(m, pos, rot_deg, mat, parent)
 
 
 func _box(size: Vector3, pos: Vector3, rot_deg: Vector3, mat: Material, parent: Node3D = null) -> void:
-	var mi := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = size
-	bm.material = mat
-	mi.mesh = bm
-	mi.position = pos
-	mi.rotation_degrees = rot_deg
-	if parent == null:
-		add_child(mi)
-	else:
-		parent.add_child(mi)
+	_emit_mesh(bm, pos, rot_deg, mat, parent)
 
 
 func _dog(piv: Node3D, pos: Vector3, iron: Material, face := 1.0) -> void:
@@ -3976,8 +4072,8 @@ func _update_wetness(delta: float) -> void:
 	var k := (1.0 - exp(-2.5 * delta)) if target > _soak else (1.0 - exp(-0.35 * delta))
 	_soak = lerpf(_soak, target, k)
 	for m: ShaderMaterial in _hull_mats:
-		m.set_shader_parameter("water_y", wy)
-		m.set_shader_parameter("soak", _soak)
+		ShaderSet.param(m, &"water_y", wy)
+		ShaderSet.param(m, &"soak", _soak)
 
 
 func _update_lantern(delta: float) -> void:
@@ -3993,21 +4089,36 @@ func _update_lantern(delta: float) -> void:
 	var w_ang := 0.0
 	if wiper_on:
 		w_ang = sin(_wiper_phase) * 1.02
+	# The arm and the dry fan share this angle. Off, it eases to port so the
+	# helm is not a steel bar; on, it locks to the shader.
+	if wiper_on:
+		_wiper_pose = w_ang
+	else:
+		_wiper_pose = lerpf(_wiper_pose, -1.08, 1.0 - exp(-6.0 * delta))
+	if _wiper_arm != null:
+		_wiper_arm.rotation.z = -_wiper_pose
 	var rain_now := 0.0
 	var wr2 := weather as WeatherScript
 	if wr2 != null:
 		rain_now = clampf(wr2.rain_amount, 0.0, 1.0)
-	# Glass does not dry the instant the rain stops — it stays streaked for a
-	# good while, which is when a wiper earns its keep.
-	_glass_wet = maxf(rain_now, _glass_wet - delta * 0.055)
+	# Wetting rate follows the rain, not the clock. A drizzle takes its time;
+	# a downpour sheets the pane in a few seconds. Isolated beads lingering
+	# through a squall is the wrong picture. Drying is slower still, which is
+	# when a wiper earns its keep.
+	if rain_now > _glass_wet:
+		var wet_rate := 0.022 + rain_now * rain_now * 0.62
+		var k := 1.0 - exp(-wet_rate * delta)
+		_glass_wet = lerpf(_glass_wet, rain_now, k)
+	else:
+		_glass_wet = maxf(rain_now, _glass_wet - delta * 0.038)
 	if _front_glass_mat != null:
-		_front_glass_mat.set_shader_parameter("wiper_on", 1 if wiper_on else 0)
-		_front_glass_mat.set_shader_parameter("wiper_ang", w_ang)
-		_front_glass_mat.set_shader_parameter("wiper_phase", _wiper_phase)
-		_front_glass_mat.set_shader_parameter("wiper_rate", WIPER_RATE)
-		_front_glass_mat.set_shader_parameter("rain", _glass_wet)
+		ShaderSet.param(_front_glass_mat, &"wiper_on", 1 if wiper_on else 0)
+		ShaderSet.param(_front_glass_mat, &"wiper_ang", w_ang)
+		ShaderSet.param(_front_glass_mat, &"wiper_phase", _wiper_phase)
+		ShaderSet.param(_front_glass_mat, &"wiper_rate", WIPER_RATE)
+		ShaderSet.param(_front_glass_mat, &"rain", _glass_wet)
 	if _glass_mat != null:
-		_glass_mat.set_shader_parameter("rain", _glass_wet)
+		ShaderSet.param(_glass_mat, &"rain", _glass_wet)
 
 	# Filament lamps do not switch instantly, and a boat's wiring sags.
 	# Filament lamps ride the same sagging supply the electronics do, so in a

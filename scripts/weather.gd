@@ -1,4 +1,5 @@
 extends Node3D
+const ShaderSet := preload("res://scripts/shader_set.gd")
 ## Environment controller: sun/time of day, procedural weather-driven sky
 ## (clouds, stars, lightning glow), fog, rain. Parameters driven from the UI.
 ##
@@ -277,7 +278,7 @@ func set_underwater(on: bool) -> void:
 
 func _set_sky(pname: String, value: Variant) -> void:
 	if _sky_mat != null:
-		_sky_mat.set_shader_parameter(pname, value)
+		ShaderSet.param(_sky_mat, pname, value)
 	if ocean != null and ocean.has_method("set_sky_param"):
 		ocean.set_sky_param(pname, value)
 

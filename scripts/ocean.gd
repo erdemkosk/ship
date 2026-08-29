@@ -1,4 +1,5 @@
 extends Node3D
+const ShaderSet := preload("res://scripts/shader_set.gd")
 ## FFT wave ocean. A TMA/JONSWAP spectrum is inverse-transformed on the GPU
 ## every frame into a stack of displacement/normal cascades (scripts/wave/), and
 ## the same texels are read back coarsely so CPU buoyancy floats the boat on the
@@ -198,24 +199,22 @@ func set_sky_param(pname: String, value: Variant) -> void:
 	## Called by weather.gd for every sky uniform, so the sea reflects exactly
 	## the sky that is being drawn overhead.
 	_sky_params[pname] = value
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter(pname, value)
+	ShaderSet.many(_mats(), pname, value)
 
 
 func set_lighthouse_beams(pos: Vector3, dir_a: Vector3, dir_b: Vector3, on: float) -> void:
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("lh_pos", pos)
-		mat.set_shader_parameter("lh_dir_a", dir_a)
-		mat.set_shader_parameter("lh_dir_b", dir_b)
-		mat.set_shader_parameter("lh_on", on)
+	var mats := _mats()
+	ShaderSet.many(mats, &"lh_pos", pos)
+	ShaderSet.many(mats, &"lh_dir_a", dir_a)
+	ShaderSet.many(mats, &"lh_dir_b", dir_b)
+	ShaderSet.many(mats, &"lh_on", on)
 
 
 func _bind_fallback_height() -> void:
 	var img := Image.create(1, 1, false, Image.FORMAT_RF)
 	img.set_pixel(0, 0, Color(-74.0, 0.0, 0.0))
 	var tex := ImageTexture.create_from_image(img)
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("height_map", tex)
+	ShaderSet.many(_mats(), &"height_map", tex)
 
 
 func set_wind(speed: float, direction_deg: float, height: float, steep: float) -> void:
@@ -384,39 +383,38 @@ func _push_uniforms() -> void:
 	# Cox-Munk: the slope variance of a wind-roughened sea. Drives the width of
 	# the sun glitter path and the roughness of the far water.
 	var slope_var := clampf(0.003 + 0.0052 * wind_speed, 0.004, 0.22)
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("wave_displacements", _wave_gen.displacement_maps)
-		mat.set_shader_parameter("wave_normals", _wave_gen.normal_maps)
-		mat.set_shader_parameter("num_cascades", _cascades.size())
-		mat.set_shader_parameter("map_scales", scales)
-		mat.set_shader_parameter("choppiness", steepness)
-		mat.set_shader_parameter("max_amp", max_amplitude)
-		mat.set_shader_parameter("wind_dir", wind_dir)
-		# Stokes drift is roughly 3% of the wind. _process adds the tidal stream
-		# on top of this every frame.
-		mat.set_shader_parameter("surface_drift", wind_dir * wind_speed * 0.03)
-		mat.set_shader_parameter("mss", slope_var)
-		mat.set_shader_parameter("curvature_k", 1.0 / (2.0 * EARTH_RADIUS))
-		mat.set_shader_parameter("foam_amount", clampf(0.18 + wind_speed * 0.022, 0.0, 1.8))
+	var mats := _mats()
+	ShaderSet.many(mats, &"wave_displacements", _wave_gen.displacement_maps)
+	ShaderSet.many(mats, &"wave_normals", _wave_gen.normal_maps)
+	ShaderSet.many(mats, &"num_cascades", _cascades.size())
+	ShaderSet.many(mats, &"map_scales", scales)
+	ShaderSet.many(mats, &"choppiness", steepness)
+	ShaderSet.many(mats, &"max_amp", max_amplitude)
+	ShaderSet.many(mats, &"wind_dir", wind_dir)
+	# Stokes drift is roughly 3% of the wind. _process adds the tidal stream
+	# on top of this every frame.
+	ShaderSet.many(mats, &"surface_drift", wind_dir * wind_speed * 0.03)
+	ShaderSet.many(mats, &"mss", slope_var)
+	ShaderSet.many(mats, &"curvature_k", 1.0 / (2.0 * EARTH_RADIUS))
+	ShaderSet.many(mats, &"foam_amount", clampf(0.18 + wind_speed * 0.022, 0.0, 1.8))
 	# Where each cascade stops displacing. Pushed to every ring identically —
 	# that is the whole point, see _cascade_fade_distances().
 	var fades := _cascade_fade_distances()
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("cascade_fade", fades)
-	_mat_close.set_shader_parameter("hull_mask", 1)
-	_mat_close.set_shader_parameter("far_clip", 0)
-	_mat_mid.set_shader_parameter("hull_mask", 0)
-	_mat_mid.set_shader_parameter("far_clip", 1)
-	_mat_mid.set_shader_parameter("near_radius", _clip_radius(CLOSE_SIZE))
-	_mat_wide.set_shader_parameter("hull_mask", 0)
-	_mat_wide.set_shader_parameter("far_clip", 1)
-	_mat_wide.set_shader_parameter("near_radius", _clip_radius(MID_SIZE))
-	_mat_far.set_shader_parameter("hull_mask", 0)
-	_mat_far.set_shader_parameter("far_clip", 1)
-	_mat_far.set_shader_parameter("near_radius", _clip_radius(WIDE_SIZE))
+	ShaderSet.many(mats, &"cascade_fade", fades)
+	ShaderSet.param(_mat_close, &"hull_mask", 1)
+	ShaderSet.param(_mat_close, &"far_clip", 0)
+	ShaderSet.param(_mat_mid, &"hull_mask", 0)
+	ShaderSet.param(_mat_mid, &"far_clip", 1)
+	ShaderSet.param(_mat_mid, &"near_radius", _clip_radius(CLOSE_SIZE))
+	ShaderSet.param(_mat_wide, &"hull_mask", 0)
+	ShaderSet.param(_mat_wide, &"far_clip", 1)
+	ShaderSet.param(_mat_wide, &"near_radius", _clip_radius(MID_SIZE))
+	ShaderSet.param(_mat_far, &"hull_mask", 0)
+	ShaderSet.param(_mat_far, &"far_clip", 1)
+	ShaderSet.param(_mat_far, &"near_radius", _clip_radius(WIDE_SIZE))
 	# The horizon plate has no geometry left to carry chop, so all of its slope
 	# variance has to arrive as roughness.
-	_mat_far.set_shader_parameter("normal_strength", 0.0)
+	ShaderSet.param(_mat_far, &"normal_strength", 0.0)
 	if seabed != null and seabed.has_method("set_caustics"):
 		# A short, steep sea makes a fine, fast caustic net; a long swell makes a
 		# broad slow one.
@@ -429,9 +427,9 @@ func _push_uniforms() -> void:
 
 
 func _apply_sky_params() -> void:
+	var mats := _mats()
 	for k: String in _sky_params:
-		for mat: ShaderMaterial in _mats():
-			mat.set_shader_parameter(k, _sky_params[k])
+		ShaderSet.many(mats, k, _sky_params[k])
 
 
 func set_seabed_sun(dir: Vector3) -> void:
@@ -449,11 +447,11 @@ func _push_seabed_uniforms() -> void:
 	var tsize: float = 2048.0
 	if "terrain_size" in seabed:
 		tsize = seabed.terrain_size
-	for mat: ShaderMaterial in _mats():
-		if htex != null:
-			mat.set_shader_parameter("height_map", htex)
-		mat.set_shader_parameter("terrain_size", tsize)
-		mat.set_shader_parameter("camera_under", 1 if camera_under else 0)
+	var mats := _mats()
+	if htex != null:
+		ShaderSet.many(mats, &"height_map", htex)
+	ShaderSet.many(mats, &"terrain_size", tsize)
+	ShaderSet.many(mats, &"camera_under", 1 if camera_under else 0)
 
 
 func _exit_tree() -> void:
@@ -463,8 +461,8 @@ func _exit_tree() -> void:
 	## exit" means.
 	for mat: ShaderMaterial in _mats():
 		if mat != null:
-			mat.set_shader_parameter("wave_displacements", null)
-			mat.set_shader_parameter("wave_normals", null)
+			ShaderSet.param(mat, &"wave_displacements", null)
+			ShaderSet.param(mat, &"wave_normals", null)
 	if _wave_gen != null:
 		_wave_gen.release()
 
@@ -484,8 +482,8 @@ func _process(delta: float) -> void:
 			_cpu_prev_t = wave_time
 			_cpu_prev = _cpu_last
 			_cpu_last = _wave_gen.cpu_data
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("wave_time", wave_time)
+	var mats := _mats()
+	ShaderSet.many(mats, &"wave_time", wave_time)
 
 	if follow_target != null:
 		var p := follow_target.global_position
@@ -507,10 +505,9 @@ func _process(delta: float) -> void:
 		var cur := current_at(p)
 		var wdir := Vector2(cos(deg_to_rad(wind_direction_deg)), sin(deg_to_rad(wind_direction_deg)))
 		var drift := wdir * wind_speed * 0.03 + cur
-		for mat: ShaderMaterial in _mats():
-			mat.set_shader_parameter("surface_drift", drift)
-			mat.set_shader_parameter("current_vec", cur)
-		_mat_close.set_shader_parameter("boat_inv", follow_target.global_transform.affine_inverse())
+		ShaderSet.many(mats, &"surface_drift", drift)
+		ShaderSet.many(mats, &"current_vec", cur)
+		ShaderSet.param(_mat_close, &"boat_inv", follow_target.global_transform.affine_inverse())
 		var inside := 0
 		var cam := get_viewport().get_camera_3d()
 		if cam != null:
@@ -521,12 +518,10 @@ func _process(delta: float) -> void:
 			if lp.y >= 0.58 and lp.y < 2.80 and absf(lp.x) < 1.62 \
 					and lp.z > -0.28 and lp.z < 4.50:
 				inside = 1
-		_mat_close.set_shader_parameter("interior_clip", inside)
-		for mat: ShaderMaterial in _mats():
-			mat.set_shader_parameter("boat_pos", bp)
-			mat.set_shader_parameter("boat_speed", spd)
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("camera_under", 1 if camera_under else 0)
+		ShaderSet.param(_mat_close, &"interior_clip", inside)
+		ShaderSet.many(mats, &"boat_pos", bp)
+		ShaderSet.many(mats, &"boat_speed", spd)
+	ShaderSet.many(mats, &"camera_under", 1 if camera_under else 0)
 	if seabed != null:
 		var wd := Vector2(cos(deg_to_rad(wind_direction_deg)), sin(deg_to_rad(wind_direction_deg)))
 		seabed.set_underwater(camera_under, wave_time, wd)
@@ -579,8 +574,7 @@ func _build_reflection() -> void:
 	_refl_cam.current = true
 
 	var tex := _refl_vp.get_texture()
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("reflect_tex", tex)
+	ShaderSet.many(_mats(), &"reflect_tex", tex)
 
 
 func _update_reflection(delta: float) -> void:
@@ -590,8 +584,7 @@ func _update_reflection(delta: float) -> void:
 	# Nothing to mirror from below the surface, and the mirror plane would be
 	# behind the camera anyway.
 	var on := cam != null and not camera_under
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("reflect_on", 1 if on else 0)
+	ShaderSet.many(_mats(), &"reflect_on", 1 if on else 0)
 	if not on:
 		_refl_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		return
@@ -624,8 +617,7 @@ func _update_reflection(delta: float) -> void:
 	if not is_finite(_refl_plane_y):
 		_refl_plane_y = h
 	_refl_plane_y = lerpf(_refl_plane_y, h, 1.0 - exp(-22.0 * delta))
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("reflect_plane_y", _refl_plane_y)
+	ShaderSet.many(_mats(), &"reflect_plane_y", _refl_plane_y)
 
 	# Same position and orientation reflected in that plane. This is an ordinary
 	# camera looking at the real world from under the surface — no world
@@ -683,9 +675,9 @@ func _update_floaters() -> void:
 	var n_used := mini(found.size(), MAX_FLOATERS)
 	for i in n_used:
 		arr[i] = Vector4(found[i][1].x, found[i][1].y, found[i][2], found[i][3])
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("floaters", arr)
-		mat.set_shader_parameter("num_floaters", n_used)
+	var mats := _mats()
+	ShaderSet.many(mats, &"floaters", arr)
+	ShaderSet.many(mats, &"num_floaters", n_used)
 
 
 func shoal_factor(world_pos: Vector3) -> float:
@@ -750,9 +742,9 @@ func _update_trail(bp: Vector2, spd: float, delta: float) -> void:
 		n += 1
 		if n >= MAX_TRAIL:
 			break
-	for mat: ShaderMaterial in _mats():
-		mat.set_shader_parameter("trail", arr)
-		mat.set_shader_parameter("trail_count", n)
+	var mats := _mats()
+	ShaderSet.many(mats, &"trail", arr)
+	ShaderSet.many(mats, &"trail_count", n)
 
 
 func tide() -> float:
