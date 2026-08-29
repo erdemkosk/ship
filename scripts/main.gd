@@ -21,7 +21,6 @@ func _enter_tree() -> void:
 	_add_action("toggle_fps", [KEY_QUOTEDBL, KEY_APOSTROPHE])
 	# Only ever means one thing: in the water, swim DOWN. On deck it is dead.
 	_add_action("dive", [KEY_CTRL, KEY_C])
-	_add_action("watch", [KEY_B])
 	# The circuits. Every one of these is also a physical switch under the fuse
 	# box lid — these are the shorthand the status panel prints beside each row,
 	# and the panel is lying if they are not bound.

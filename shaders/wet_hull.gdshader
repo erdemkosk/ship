@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode world_vertex_coords, specular_schlick_ggx, cull_back;
+render_mode world_vertex_coords, specular_schlick_ggx, cull_disabled;
 
 // Wooden hull that knows where the waterline is.
 //

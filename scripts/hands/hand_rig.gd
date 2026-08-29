@@ -488,35 +488,6 @@ func shoulder_global(side: String) -> Vector3:
 	return (skeleton.global_transform * skeleton.get_bone_global_rest(b)).origin
 
 
-func has_wrist(side: String) -> bool:
-	var b: int = int(_end_bone.get(side, -1))
-	return _wrist != null and b >= 0 and _wrist.solved.has(b)
-
-
-func watch_xf(side: String) -> Transform3D:
-	## World transform for a watch on the back of this wrist. Not parented to
-	## the scaled GLB — that shrank a 4 cm case to a speck.
-	var wrist: Transform3D = wrist_global(side)
-	if not _sem_inv.has(side) or not _palm_local.has(side):
-		return wrist
-	var sem: Basis = wrist.basis * _sem_inv[side].inverse()
-	var p: Vector3 = sem.y.normalized()
-	var f: Vector3 = sem.z.normalized()
-	if p.length_squared() < 0.5 or f.length_squared() < 0.5:
-		return wrist
-	var palm_pt: Vector3 = wrist.origin + wrist.basis * _palm_local[side]
-	var origin: Vector3 = palm_pt - p * 0.017 - f * 0.028
-	var face: Vector3 = -p
-	var along: Vector3 = -f
-	var across: Vector3 = face.cross(along)
-	if across.length_squared() < 0.2:
-		across = sem.x
-	across = across.normalized()
-	along = across.cross(face).normalized()
-	face = along.cross(across).normalized()
-	return Transform3D(Basis(across, face, along), origin)
-
-
 func wrist_global(side: String) -> Transform3D:
 	## Read from the wrist modifier: outside a modification pass the skeleton
 	## reports the PRE-modifier pose, which makes a working solver look broken.

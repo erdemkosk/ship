@@ -504,9 +504,9 @@ func _process_fps(delta: float) -> void:
 			if _walker.get("can_board"):
 				_prompt.text = "SPACE — take the ladder"
 			elif bool(_walker.get("submerged")):
-				_prompt.text = "SPACE — swim up   ·   B — watch"
+				_prompt.text = "SPACE — swim up"
 			else:
-				_prompt.text = "You are in the sea — swim to the stern ladder   ·   CTRL: dive   ·   B — watch"
+				_prompt.text = "You are in the sea — swim to the stern ladder   ·   CTRL: dive"
 			_prompt.visible = true
 		elif engaged == "helm":
 			if not cand.is_empty() and str(cand["id"]) == "ignition":
@@ -514,7 +514,7 @@ func _process_fps(delta: float) -> void:
 				_prompt.text = "E — Ignition  (%s)" % (
 						"stop" if st == 2 else ("cranking" if st == 1 else "start"))
 			else:
-				_prompt.text = "E — let go of the wheel   ·   B — watch"
+				_prompt.text = "E — let go of the wheel"
 			_prompt.visible = true
 		elif engaged == "telegraph":
 			_prompt.text = "E — let go of the throttle"
@@ -560,8 +560,7 @@ func _process_fps(delta: float) -> void:
 				_prompt.text = "E — %s" % cand["name"]
 			_prompt.visible = true
 		else:
-			_prompt.text = "B — watch"
-			_prompt.visible = true
+			_prompt.visible = false
 
 	if engaged == "helm":
 		# Locked to the wheel: the boat's controls are yours, your feet are not.
@@ -698,24 +697,6 @@ func _process_fps(delta: float) -> void:
 	if _arms != null:
 		if _arms.has_method("set_sea_ladder"):
 			_arms.set_sea_ladder(bool(_walker.get("on_sea_ladder")), _walker.pos.y)
-		if _arms.has_method("set_watch_glance"):
-			var glance := Input.is_key_pressed(KEY_B)
-			if InputMap.has_action("watch"):
-				glance = glance or Input.is_action_pressed("watch")
-			_arms.set_watch_glance(mode == Mode.FPS and glance)
-		var wet := false
-		var depth := 0.0
-		if ocean != null and _cam != null:
-			var wh: float = ocean.get_height(_cam.global_position)
-			depth = maxf(wh - _cam.global_position.y, 0.0)
-			wet = _cam.global_position.y < wh - 0.05
-		if not wet:
-			depth = 0.0
-		var tod := 12.0
-		if weather != null:
-			tod = float(weather.get("time_of_day"))
-		if _arms.has_method("tick_watch"):
-			_arms.tick_watch(tod, depth, wet)
 		_arms.update(delta, target, engaged, walking, bool(_walker.get("swimming")))
 	_update_warmth(delta)
 

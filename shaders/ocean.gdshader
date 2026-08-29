@@ -317,9 +317,9 @@ void fragment() {
 	// never draw sea inside the hull — clip water within the boat's interior
 	if (hull_mask == 1) {
 		vec3 lp = (boat_inv * vec4(v_world_pos, 1.0)).xyz;
-		// Hull interior of the 9 m boat, in its own local frame: never let the
-		// sea draw inside her.
-		if (abs(lp.x) < 1.32 && abs(lp.z) < 4.10 && lp.y > -0.90 && lp.y < 0.62) {
+		float pad = camera_under == 1 ? 0.35 : 0.0;
+		if (abs(lp.x) < 1.32 + pad && abs(lp.z) < 4.55 + pad
+				&& lp.y > -1.35 - pad && lp.y < 2.40 + pad) {
 			discard;
 		}
 	}
@@ -530,6 +530,14 @@ void fragment() {
 	// still see daylight. Only looking DOWN is the abyss. The old mix painted
 	// the TIR ring (and then the engine fog) with the same black as the basin.
 	if (camera_under == 1) {
+		float water_z = -(VIEW_MATRIX * vec4(v_world_pos, 1.0)).z;
+		float behind = scene_depth(SCREEN_UV, INV_PROJECTION_MATRIX);
+		// Keel and transom sit IN FRONT of the surface. Do not paint water
+		// over them — that is the only reason the stern survived and the rest
+		// of her vanished.
+		if (behind + 0.04 < water_z) {
+			discard;
+		}
 		vec3 d = -view_dir;
 		vec3 into_air = refract(d, -wn, 1.333);
 		float ct = clamp(dot(d, wn), 0.0, 1.0);
@@ -546,9 +554,14 @@ void fragment() {
 		}
 		col = mix(ceiling, through, win);
 		col = mix(col, foam_color * 0.55, foam * 0.45);
+		// Opaque pass already drew her. Sample it, smear it a touch, and sit
+		// it in the window so the hull is a shape in the brightness, not gone.
+		vec2 suv = clamp(SCREEN_UV + view_n.xy * 0.016, vec2(0.002), vec2(0.998));
+		vec3 scene = textureLod(screen_tex, suv, 0.0).rgb;
+		scene = mix(scene, textureLod(screen_tex, suv + vec2(0.0024, -0.0016), 0.0).rgb, 0.5);
+		scene *= vec3(0.58, 0.90, 0.94);
+		col = mix(col, scene, mix(0.28, 0.78, win));
 		diffuse_albedo = vec3(0.0);
-		// Do NOT write FOG here. A branch write on Vulkan fills the other
-		// path with black fog, and the sea as seen from the boat goes black.
 	}
 
 	ALBEDO = diffuse_albedo;

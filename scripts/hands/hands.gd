@@ -76,9 +76,6 @@ var _ladder := false
 var _ladder_y := 0.0
 var _lad_pos := {}
 var _dbg := 0
-var _watch: Node3D
-var _watch_on := false
-var _watch_blend := 0.0
 var _swim_t := 0.0
 
 
@@ -92,9 +89,6 @@ func setup(cam: Camera3D) -> void:
 	add_child(rig)
 	rig.setup(cam)
 	rig.set_visible_hands(false)
-	_watch = (load("res://scripts/dive_watch.gd") as GDScript).new()
-	add_child(_watch)
-	_watch.visible = false
 
 
 func set_active(on: bool) -> void:
@@ -186,15 +180,6 @@ func wipe_front() -> Vector2:
 	return Vector2(_wipe_x, _wipe_dir)
 
 
-func set_watch_glance(on: bool) -> void:
-	_watch_on = on
-
-
-func tick_watch(tod: float, depth_m: float, wet: bool) -> void:
-	if _watch != null and _watch.has_method("set_readout"):
-		_watch.set_readout(tod, depth_m, wet)
-
-
 func set_sea_ladder(on: bool, feet_y: float) -> void:
 	## Called from the camera with the walker's state. `feet_y` is boat-local.
 	if on and not _ladder:
@@ -216,12 +201,6 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 			_face = ""
 			_rest_t["L"] = 0.0
 			_rest_t["R"] = 0.0
-		_finish(delta)
-		return
-	_watch_blend = move_toward(_watch_blend, 1.0 if _watch_on else 0.0, delta / 0.22)
-	if _watch_blend > 0.02 and _active:
-		rig.set_visible_hands(true)
-		_drive_watch(delta, swimming)
 		_finish(delta)
 		return
 	if _ladder and _active and boat != null:
@@ -290,32 +269,6 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 
 func _finish(delta: float) -> void:
 	rig.update(delta)
-	_place_watch()
-
-
-func _place_watch() -> void:
-	if _watch == null or _cam == null:
-		return
-	if not _active:
-		_watch.visible = false
-		return
-	if rig != null and rig.has_wrist("L"):
-		_watch.visible = true
-		_watch.global_transform = rig.watch_xf("L")
-		return
-	# B held but the IK has not written a wrist yet: still put the dial in
-	# front of the eye so deck and sea do the same thing.
-	if _watch_blend > 0.04:
-		_watch.visible = true
-		var c: Transform3D = _cam.global_transform
-		var face: Vector3 = c.basis.z
-		var along: Vector3 = c.basis.x
-		var across: Vector3 = face.cross(along).normalized()
-		along = across.cross(face).normalized()
-		_watch.global_transform = Transform3D(Basis(across, face, along),
-				c * Vector3(-0.08, -0.04, -0.16))
-		return
-	_watch.visible = false
 
 
 # --- claims ------------------------------------------------------------------
@@ -400,32 +353,6 @@ func _rest_hand(side: String) -> void:
 	# Weight falls away with the travel: by the time it is home the solver has
 	# let go entirely and the arm hangs on its own.
 	rig.grip(side, contact, fingers, palm, 1.0 - u * 0.55, "open", 0.0)
-
-
-func _drive_watch(_delta: float, swimming: bool) -> void:
-	## Raise the left wrist into the mask opening and look at the dial. Close
-	## and high — the old pose sat under the rubber skirt, so you never saw it.
-	var c: Transform3D = _cam.global_transform
-	var u: float = _watch_blend
-	u = u * u * (3.0 - 2.0 * u)
-	var home := Vector3(-0.36, -0.52, 0.12)
-	var show := Vector3(-0.10, -0.03, -0.18)
-	var pt: Vector3 = c * home.lerp(show, u)
-	var f_home := Vector3(-0.12, -0.90, -0.42)
-	var f_show := Vector3(0.55, 0.18, -0.81)
-	var p_home := Vector3(1.0, -0.10, 0.0)
-	var p_show := Vector3(0.22, -0.48, -0.85)
-	var fingers: Vector3 = c.basis * f_home.lerp(f_show, u)
-	var palm: Vector3 = c.basis * p_home.lerp(p_show, u)
-	_last_grip["L"] = pt
-	_rest_t["L"] = 0.0
-	rig.grip("L", pt, fingers, palm, 1.0, "open", 0.2)
-	if swimming:
-		_swim_t += _delta
-		_drive_swim("R", _delta)
-	else:
-		_rest_t["R"] = minf(_rest_t["R"] + _delta, 1.0)
-		_rest_hand("R")
 
 
 func _drive_swim(side: String, _delta: float) -> void:
