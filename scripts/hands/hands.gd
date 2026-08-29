@@ -66,6 +66,16 @@ var _last_grip := {"L": Vector3.ZERO, "R": Vector3.ZERO}
 ## thing they touch is you — so they are driven straight in camera space.
 var _face := ""
 var _face_t := 0.0
+## The dive watch. B held raises the left arm to read it — a HELD gesture, not
+## a one-shot: the arm stays up exactly as long as the button does, which is
+## how looking at a watch actually works. It outranks every left-hand claim
+## (the wheel gets the hand back the moment B lifts) and it works in the water,
+## where the depth row is the whole point of owning the thing.
+var _watch_on := false
+var _watch_t := 0.0
+var _watch_clock := 0.0
+var _watch_tod := 12.0
+var _watch_depth := 0.0
 ## Where the wiping finger is, in the mask shader's own screen space, and which
 ## way it is travelling. The glass has to clear UNDER THE HAND — read off a
 ## timer instead and the fog cleared left-to-right while the hand went
@@ -100,6 +110,7 @@ func set_active(on: bool) -> void:
 		# them open.
 		_cam.near = 0.05 if _active else 0.10
 	if not _active:
+		_watch_on = false
 		if boat != null:
 			# Leaving first person parks whatever the powered rails hold.
 			boat.call("set_radar_pull", 0.0)
@@ -167,6 +178,19 @@ func notify_use(id: String) -> void:
 					_oneshot = 0.7
 
 
+func set_watch(held: bool, tod: float, depth: float) -> void:
+	if held and not _watch_on and _claim["L"] != "":
+		# Rising edge: whatever the left hand held, it lets go of first.
+		_release("L")
+	_watch_on = held
+	_watch_tod = tod
+	_watch_depth = depth
+
+
+func _watch_up() -> bool:
+	return _watch_on or _watch_t > 0.01
+
+
 func face_gesture(kind: String) -> void:
 	_face = kind
 	_face_t = 0.0
@@ -193,6 +217,19 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 	boat = p_boat
 	if rig == null or not rig.is_ready():
 		return
+	# The watch runs whether or not anyone is looking at it — a watch does.
+	_watch_clock += delta
+	_watch_t = move_toward(_watch_t, 1.0 if (_watch_on and _active) else 0.0,
+			delta / 0.26)
+	if rig.has_method("set_watch_display"):
+		var hh := floorf(_watch_tod)
+		var mins := floorf((_watch_tod - hh) * 60.0)
+		var night := _watch_tod < 5.5 or _watch_tod > 18.5
+		# The backlight is the sea's and the night's: underwater it is on,
+		# after dark it is on, on a grey afternoon deck it is a dead film.
+		var glw := 0.95 if _watch_depth > 0.02 else (0.65 if night else 0.06)
+		rig.set_watch_display(hh, mins, _watch_clock, _watch_depth,
+				1.013 + _watch_depth * 0.1003, glw)
 	if _face != "" and _active:
 		# Ahead of everything, including the swimming test: wiping the glass is
 		# a thing you do precisely when you are in the water.
@@ -216,7 +253,10 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		_claim = {"L": "", "R": ""}
 		_inspect = ""
 		_swim_t += delta
-		_drive_swim("L", delta)
+		if _watch_up():
+			_drive_watch(delta)
+		else:
+			_drive_swim("L", delta)
 		_drive_swim("R", delta)
 		_finish(delta)
 		return
@@ -247,7 +287,7 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 
 	# At the wheel both hands work: left steers, right rests on the telegraph.
 	if engaged == "helm":
-		if _claim["L"] == "":
+		if _claim["L"] == "" and not _watch_up():
 			_take("L", "helm")
 		if _claim["R"] == "" and _inspect == "":
 			_take("R", "telegraph")
@@ -263,7 +303,10 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 	for side: String in _claim:
 		if _claim[side] == "":
 			_rest_t[side] = minf(_rest_t[side] + delta, 1.0)
-		_drive(side, delta)
+		if side == "L" and _watch_up():
+			_drive_watch(delta)
+		else:
+			_drive(side, delta)
 	_finish(delta)
 
 
@@ -376,6 +419,54 @@ func _drive_swim(side: String, _delta: float) -> void:
 	_rest_t[side] = 0.0
 	var hold: float = clampf(0.25 + pull * 0.35, 0.12, 0.7)
 	rig.grip(side, pt, fingers, palm, 1.0, "open", hold)
+
+
+# --- the watch ----------------------------------------------------------------
+
+func _drive_watch(delta: float) -> void:
+	## The left arm comes up across the chest and the back of the wrist turns
+	## to the eye. Driven in camera space like the face gestures: the watch is
+	## read fifteen centimetres from the lens, where a solved-to-target arm
+	## wobbles and a keyframed path does not.
+	##
+	## The PALM is what grip() places and the palm is on the far side of the
+	## wrist — so the contact aims palm-DOWN-and-away, and what faces you is
+	## the strap side with the case on it.
+	var c: Transform3D = _cam.global_transform
+	var u: float = _watch_t * _watch_t * (3.0 - 2.0 * _watch_t)
+	# Up from where an idle hand hangs, along a slight arc — lifted straight
+	# in it reads as a puppet on a string. The end point stays far enough out
+	# that the forearm passes UNDER the frame instead of through the lens.
+	var lo := Vector3(-0.30, -0.62, -0.34)
+	var hi := Vector3(0.105, -0.092, -0.300)
+	var pt: Vector3 = lo.lerp(hi, u)
+	pt.x += sin(u * PI) * -0.05
+	var contact: Vector3 = c * pt
+	# The wrist angle is not tuned, it is FIXED — and that is the whole fix.
+	#
+	# Every earlier pass chose a fingers direction and a face direction by eye,
+	# and the wrist break was whatever angle happened to fall between them and
+	# the arm; it kept coming out cranked. Now the hand is built FROM the
+	# forearm: take the live shoulder-to-contact line, extend the wrist exactly
+	# seventeen degrees off it toward the eye, and derive everything else. The
+	# break cannot be sharp because the break is the one number we set.
+	#
+	# Seventeen degrees does not present the display on its own — the case's
+	# own wedged mount (see hand_rig._build_watch) contributes the rest, the
+	# way a real dive computer's inclined face does.
+	var fore: Vector3 = (contact - (rig.shoulder_global("L") as Vector3)).normalized()
+	var to_eye: Vector3 = (c.origin - contact).normalized()
+	# The dorsal direction: as much toward the eye as staying perpendicular to
+	# the forearm allows. Supination is free; extension is what we ration.
+	var dorsal: Vector3 = (to_eye - to_eye.project(fore)).normalized()
+	var ext := deg_to_rad(17.0)
+	var fingers: Vector3 = (fore * cos(ext) + dorsal * sin(ext)).normalized()
+	var face_n: Vector3 = (dorsal * cos(ext) - fore * sin(ext)).normalized()
+	var palm: Vector3 = -face_n
+	_last_grip["L"] = contact
+	_rest_t["L"] = 0.0
+	# A relaxed half-curl: an open starfish hand is nobody reading a watch.
+	rig.grip("L", contact, fingers, palm, u, "wrap", 0.50 * u)
 
 
 # --- your own face ------------------------------------------------------------

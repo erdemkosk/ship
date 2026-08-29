@@ -695,6 +695,13 @@ func _process_fps(delta: float) -> void:
 	_cam.global_basis = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) \
 			* Basis(Vector3.BACK, _roll)
 	if _arms != null:
+		if _arms.has_method("set_watch"):
+			# B is a HOLD: the arm is up while the button is, gone when it is
+			# not. No toggle to forget about with your hand across the view.
+			_arms.set_watch(
+					Input.is_action_pressed("watch") and not _panel_open(),
+					float(weather.get("time_of_day")) if weather != null else 12.0,
+					float(_walker.get("swim_depth")))
 		if _arms.has_method("set_sea_ladder"):
 			_arms.set_sea_ladder(bool(_walker.get("on_sea_ladder")), _walker.pos.y)
 		_arms.update(delta, target, engaged, walking, bool(_walker.get("swimming")))

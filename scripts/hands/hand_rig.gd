@@ -85,6 +85,9 @@ var _lean := Vector3.ZERO
 var _lean_want := Vector3.ZERO
 var _ready_ok := false
 var _measured := {}
+## The dive watch on the left wrist: its face material (the scripts feed it
+## time / depth / pressure every frame) and its mount.
+var _watch_mat: ShaderMaterial
 ## Palm-normal sign per side. The cross-product handedness of this rig's rest
 ## pose was settled empirically (see _handcal bar test), not assumed: +1 keeps
 ## the measured direction, -1 flips it.
@@ -108,6 +111,7 @@ func setup(cam: Camera3D) -> void:
 	_calibrate()
 	_measure_hand_frames()
 	_build_ik()
+	_build_watch()
 	_ready_ok = true
 	_lag.visible = false
 
@@ -247,6 +251,155 @@ func _find_skeleton(n: Node) -> Skeleton3D:
 		if s != null:
 			return s
 	return null
+
+
+func set_watch_display(h: float, m: float, t: float, depth: float,
+		press: float, glow: float) -> void:
+	if _watch_mat == null:
+		return
+	_watch_mat.set_shader_parameter("hours", h)
+	_watch_mat.set_shader_parameter("minutes", m)
+	_watch_mat.set_shader_parameter("tsec", t)
+	_watch_mat.set_shader_parameter("depth_m", depth)
+	_watch_mat.set_shader_parameter("press_bar", press)
+	_watch_mat.set_shader_parameter("glow", glow)
+
+
+func _build_watch() -> void:
+	## A digital dive watch, strapped to the LEFT wrist for good: it is part of
+	## the arm, not a viewmodel, so it rides every gesture — on the wheel, on
+	## the ladder rungs, raised to the face when B asks for it.
+	##
+	## Mounted from the MEASURED hand frame, nothing assumed: the back of the
+	## wrist is minus the palm normal, "12 o'clock" runs up the forearm, and
+	## the display's reading direction is the finger axis — hold your own arm
+	## across your chest and that is exactly how a watch face sits.
+	if skeleton == null or not _sem_inv.has("L"):
+		return
+	var ba := BoneAttachment3D.new()
+	ba.bone_name = str(CHAINS["L"]["end"])
+	skeleton.add_child(ba)
+	# Columns of the measured semantic basis, in wrist-bone local space.
+	var sem: Basis = (_sem_inv["L"] as Basis).inverse()
+	var F: Vector3 = sem.z.normalized()          # wrist -> fingers
+	var n: Vector3 = (-sem.y).normalized()       # back of the wrist
+	# The display reads ACROSS the arm, not along it. In first person the
+	# forearm always crosses the frame on a diagonal — geometry allows nothing
+	# else with the shoulder behind the lens — so digits laid along the arm
+	# are permanently tilted with it. Laid across, plus a small fixed roll
+	# trim, they sit level in the raised pose. The sign of the cross product
+	# and the trim were both settled against screenshots, like every other
+	# axis on this rig.
+	var X: Vector3 = (F.cross(n)).normalized()
+	var Y: Vector3 = n.cross(X).normalized()
+	# Bone space is not metres; _measured.scale is the factor the palm-contact
+	# maths already trusts, so the watch is authored in metres and converted
+	# through the same number.
+	var inv_s: float = 1.0 / maxf(float(_measured.get("scale", 1.0)), 1e-6)
+	var holder := Node3D.new()
+	holder.transform = Transform3D(
+			Basis(X, Y, n).orthonormalized()
+			* Basis(Vector3(0, 0, 1), 0.55)
+			* Basis.from_scale(Vector3.ONE * inv_s),
+			(n * 0.0205 - F * 0.012) * inv_s)
+	ba.add_child(holder)
+	# The case sits on a WEDGE, inclined toward the elbow — dive computers are
+	# built this way for exactly this reason: the display meets a raised
+	# forearm at an angle, so the case leans to meet the eye and the wrist
+	# does not have to crank the rest of the way. The strap stays flat on the
+	# holder; only the head tilts.
+	var head := Node3D.new()
+	head.position = Vector3(-0.002, 0.0, -0.0015)
+	head.rotation.x = -0.30
+	holder.add_child(head)
+
+	var resin := StandardMaterial3D.new()
+	resin.albedo_color = Color(0.085, 0.09, 0.095)
+	resin.roughness = 0.66
+	var worn := StandardMaterial3D.new()
+	# The bezel's paint is gone where a decade of cuffs rubbed it: dull steel.
+	worn.albedo_color = Color(0.165, 0.17, 0.175)
+	worn.roughness = 0.45
+	worn.metallic = 0.55
+	var rubber := StandardMaterial3D.new()
+	rubber.albedo_color = Color(0.045, 0.047, 0.05)
+	rubber.roughness = 0.94
+
+	# Case, worn bezel standing a little proud, and the crystal's frame.
+	var case := MeshInstance3D.new()
+	var cm := BoxMesh.new()
+	cm.size = Vector3(0.0450, 0.0500, 0.0125)
+	case.mesh = cm
+	case.material_override = resin
+	head.add_child(case)
+	var bez := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.0392, 0.0430, 0.0136)
+	bez.mesh = bm
+	bez.material_override = worn
+	head.add_child(bez)
+	var screen := MeshInstance3D.new()
+	var qm := QuadMesh.new()
+	qm.size = Vector2(0.0320, 0.0200)
+	screen.mesh = qm
+	_watch_mat = ShaderMaterial.new()
+	_watch_mat.shader = load("res://shaders/dive_watch.gdshader")
+	screen.material_override = _watch_mat
+	screen.position = Vector3(0.0, 0.0, 0.0072)
+	head.add_child(screen)
+	# Two side buttons — light on the left, mode on the right, neither of
+	# which does anything, which is also period-correct by year three.
+	for by: float in [-1.0, 1.0]:
+		var btn := MeshInstance3D.new()
+		var bc := CylinderMesh.new()
+		bc.top_radius = 0.0030
+		bc.bottom_radius = 0.0030
+		bc.height = 0.0062
+		bc.radial_segments = 8
+		btn.mesh = bc
+		btn.material_override = worn
+		btn.position = Vector3(0.0, by * 0.0262, -0.0012)
+		head.add_child(btn)
+
+	# The strap: stiff old rubber, in segments around the wrist, with a keeper.
+	for sgn: float in [-1.0, 1.0]:
+		for a_deg: float in [42.0, 74.0, 106.0]:
+			var a: float = deg_to_rad(a_deg) * sgn
+			var sm2 := MeshInstance3D.new()
+			var sb := BoxMesh.new()
+			sb.size = Vector3(0.0210, 0.0175, 0.0038)
+			sm2.mesh = sb
+			sm2.material_override = rubber
+			sm2.position = Vector3(0.0,
+					sin(a) * 0.0300, -0.0210 + cos(a) * 0.0295)
+			sm2.rotation.x = -a
+			holder.add_child(sm2)
+	var keeper := MeshInstance3D.new()
+	var km := BoxMesh.new()
+	km.size = Vector3(0.0230, 0.0075, 0.0052)
+	keeper.mesh = km
+	keeper.material_override = rubber
+	keeper.position = Vector3(0.0, 0.0330, -0.0092)
+	keeper.rotation.x = deg_to_rad(-38.0)
+	holder.add_child(keeper)
+	# NOT _shadowless(ba): that helper also repaints every MeshInstance3D with
+	# the arm's skin texture — run it here and the watch becomes a flesh watch.
+	# Only the shadow flag is wanted, so only the shadow flag is set.
+	for c in _walk_children(ba):
+		if c is GeometryInstance3D:
+			(c as GeometryInstance3D).cast_shadow = \
+					GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+func _walk_children(n: Node) -> Array:
+	var out: Array = []
+	var stack: Array[Node] = [n]
+	while not stack.is_empty():
+		var c: Node = stack.pop_back()
+		out.append(c)
+		for ch in c.get_children():
+			stack.append(ch)
+	return out
 
 
 func _shadowless(n: Node) -> void:

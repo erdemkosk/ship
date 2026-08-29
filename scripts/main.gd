@@ -21,6 +21,8 @@ func _enter_tree() -> void:
 	_add_action("toggle_fps", [KEY_QUOTEDBL, KEY_APOSTROPHE])
 	# Only ever means one thing: in the water, swim DOWN. On deck it is dead.
 	_add_action("dive", [KEY_CTRL, KEY_C])
+	# Hold to look at the dive watch on your left wrist.
+	_add_action("watch", [KEY_B])
 	# The circuits. Every one of these is also a physical switch under the fuse
 	# box lid — these are the shorthand the status panel prints beside each row,
 	# and the panel is lying if they are not bound.
@@ -71,6 +73,23 @@ func _ready() -> void:
 	_spawn_flotsam(ocean)
 	if _want_splash():
 		add_child((load("res://scripts/splash.gd") as GDScript).new())
+
+	# The menu is the default front door: it appears when the game is launched
+	# like a game — no flags — and stays out of the way of every verification
+	# probe, all of which arrive with arguments and want the world bare.
+	var uargs := OS.get_cmdline_user_args()
+	var want_menu := true
+	for a in uargs:
+		if a.begins_with("--") and a != "--no-storm" and not a.begins_with("--time=") \
+				and not a.begins_with("--menu"):
+			want_menu = false
+	if want_menu:
+		var menu: Node3D = (load("res://scripts/main_menu.gd") as GDScript).new()
+		menu.call("setup", rig, boat, ocean, weather)
+		add_child(menu)
+		for a in uargs:
+			if a.begins_with("--menu-shot="):
+				_menu_shot(menu, a.get_slice("=", 1))
 
 	var look_lh := false
 	for arg in OS.get_cmdline_user_args():
@@ -140,6 +159,8 @@ func _ready() -> void:
 			_switch_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--radio-shot="):
 			_radio_shot(rig, boat, arg.get_slice("=", 1))
+		elif arg.begins_with("--watch-shot="):
+			_watch_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--maskdive="):
 			_maskdive(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--gear-test="):
@@ -447,6 +468,76 @@ func _radio_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 		rig.set("yaw", float(rig.get("yaw")) + [0.0, 0.22, -0.30, 0.10][i])
 		await get_tree().create_timer(0.25).timeout
 		await _shot(dir, "radio%d" % i)
+	get_tree().quit()
+
+
+func _menu_shot(menu: Node3D, dir: String) -> void:
+	## The front door, photographed: the wide shot, the hand on the telegraph,
+	## and the cut into the game.
+	await get_tree().create_timer(5.0).timeout
+	await _shot(dir, "menu0_wide")
+	menu.call("debug_hover", "sail")
+	await get_tree().create_timer(0.9).timeout
+	await _shot(dir, "menu1_hand")
+	menu.call("debug_hover", "abandon")
+	await get_tree().create_timer(0.9).timeout
+	await _shot(dir, "menu2_abandon")
+	menu.call("debug_hover", "")
+	menu.call("debug_press", "sail")
+	await get_tree().create_timer(0.7).timeout
+	await _shot(dir, "menu3_push")
+	await get_tree().create_timer(2.6).timeout
+	await _shot(dir, "menu4_ingame")
+	get_tree().quit()
+
+
+func _watch_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## The watch, everywhere it matters: on deck by day, on deck after dark
+	## (backlight), and underwater with the depth row alive.
+	var w: RefCounted = rig.get("_walker")
+	var wx: Node3D = $Weather
+	rig.set_mode(1)
+	var pnl: Node = get_tree().get_first_node_in_group("ui_panel")
+	if pnl != null:
+		var pc: CanvasItem = pnl.get("_panel") as CanvasItem
+		if pc != null:
+			pc.visible = false
+	await get_tree().create_timer(2.2).timeout
+	boat.set("helm_engaged", false)
+	w.call("spawn_at", Vector3(0.0, 0.63, 3.0))
+	rig.set("pitch", -0.25)
+	await get_tree().create_timer(0.4).timeout
+	Input.action_press("watch")
+	await get_tree().create_timer(1.0).timeout
+	await _shot(dir, "watch0_day")
+	wx.set("time_of_day", 21.6)
+	await get_tree().create_timer(0.8).timeout
+	await _shot(dir, "watch1_night")
+	Input.action_release("watch")
+	wx.set("time_of_day", 12.5)
+	await get_tree().create_timer(0.8).timeout
+	await _shot(dir, "watch2_released")
+	# Over the stern and down: the depth row.
+	w.call("spawn_at", Vector3(0.72, 0.63, 5.05))
+	await get_tree().create_timer(0.3).timeout
+	w.call("grab_sea_ladder", boat)
+	await get_tree().create_timer(0.4).timeout
+	Input.action_press("boat_backward")
+	await get_tree().create_timer(3.4).timeout
+	Input.action_release("boat_backward")
+	rig.set("pitch", -1.0)
+	Input.action_press("boat_forward")
+	await get_tree().create_timer(3.2).timeout
+	# Keep swimming down WHILE reading it — stop kicking in the shallow metres
+	# and buoyancy hands you straight back to the surface, which is how the
+	# first pass of this probe photographed a depth of zero.
+	rig.set("pitch", -0.5)
+	Input.action_press("watch")
+	await get_tree().create_timer(1.0).timeout
+	print("[watch] depth=%.2f" % w.get("swim_depth"))
+	await _shot(dir, "watch3_under")
+	Input.action_release("watch")
+	Input.action_release("boat_forward")
 	get_tree().quit()
 
 
