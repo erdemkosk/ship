@@ -38,6 +38,9 @@ const SHOULDER_OFFSET := Vector3(0.0, -0.29, 0.16)
 # solver can only point the arm at it.
 const MAX_LEAN := 0.40
 const LEAN_TAU := 0.12
+## Max angle the fingers may swing off the live forearm. A real wrist is
+## about 70/80 flex-extend; past ~55 the mesh reads as broken, not cocked.
+const WRIST_CONE := 0.96  # ~55 deg
 ## Shoulders belong to a torso, not a head: they take only a fraction of the
 ## camera's pitch, or looking down swings the arms out of their sockets.
 ##
@@ -157,11 +160,18 @@ func is_ready() -> bool:
 
 ## The one entry point: put this hand's PALM on `contact`, palm facing `palm_n`,
 ## fingers along `fingers_d`, closed into `pose`.
+##
+## `anatomic` is for one-shot reaches only (a door, a key). It pulls the
+## fingers onto the forearm cone and clamps the wrist to the arm sphere.
+## Authored holds — helm rim, telegraph, radio — leave it off: those already
+## know where the palm sits, and a cone lifts it off the rim.
 func grip(side: String, contact: Vector3, fingers_d: Vector3, palm_n: Vector3,
-		weight := 1.0, pose := "wrap", pose_amt := -1.0) -> void:
+		weight := 1.0, pose := "wrap", pose_amt := -1.0, anatomic := false) -> void:
 	if not _ready_ok or not _sem_inv.has(side):
 		return
 	var F: Vector3 = fingers_d.normalized()
+	if anatomic:
+		F = _cone_to_forearm(side, contact, F)
 	var P: Vector3 = (palm_n - palm_n.project(F)).normalized()
 	if not F.is_finite() or not P.is_finite() or P.length_squared() < 0.5:
 		return
@@ -169,10 +179,80 @@ func grip(side: String, contact: Vector3, fingers_d: Vector3, palm_n: Vector3,
 	var sem_world := Basis(K, P, F)
 	var bone_basis: Basis = sem_world * _sem_inv[side]
 	var wrist_pos: Vector3 = contact - bone_basis * _palm_local[side]
-	_reach(side, Transform3D(bone_basis, wrist_pos), weight)
+	_reach(side, Transform3D(bone_basis, wrist_pos), weight, anatomic)
 	# pose_amt lets a hand stay PINNED (weight 1) while its fingers open — a
 	# re-grip is exactly that: the palm rides the arc, the hold releases.
 	set_pose(side, pose, weight if pose_amt < 0.0 else pose_amt)
+
+
+## Which hand should go: distance, leftover past lean, and how far the
+## target sits across the body. Occupancy lives in hands.gd — this is
+## only the arm's opinion.
+func evaluate(side: String, contact: Vector3) -> Dictionary:
+	if not _ready_ok or camera == null:
+		return {"distance": 1e6, "over": 1e6, "leftover": 1e6, "cross": 0.0,
+				"reachable": false, "wrist_break": PI, "comfortable": false}
+	var sh: Vector3 = _lag.global_transform * _shoulder_local.get(side, SHOULDER_OFFSET)
+	var d: float = sh.distance_to(contact)
+	var reach: float = float(_measured.get("reach_m", 0.55))
+	var over: float = maxf(d - reach, 0.0)
+	var leftover: float = maxf(over - MAX_LEAN, 0.0)
+	var out: float = 1.0 if side == "R" else -1.0
+	var lat: float = (contact - sh).dot(camera.global_basis.x) * out
+	return {
+		"distance": d,
+		"reach": reach,
+		"over": over,
+		"leftover": leftover,
+		"cross": maxf(-lat, 0.0),
+		"reachable": leftover < 0.025,
+		"wrist_break": 0.0,
+		"comfortable": leftover < 0.025 and maxf(-lat, 0.0) < 0.08,
+	}
+
+
+## Can this arm take `contact` with an authored finger/palm without the
+## wrist folding the wrong way. `wrist_break` is how far the asked fingers
+## sit off the live forearm — past WRIST_CONE the hold is a crime.
+func consider(side: String, contact: Vector3, fingers_d: Vector3 = Vector3.ZERO,
+		palm_n: Vector3 = Vector3.ZERO) -> Dictionary:
+	var ev: Dictionary = evaluate(side, contact)
+	var nat: Dictionary = natural_axes(side, contact)
+	var F_nat: Vector3 = nat["fingers"]
+	var brk: float = 0.0
+	if fingers_d.length_squared() > 0.25:
+		brk = fingers_d.normalized().angle_to(F_nat)
+	ev["wrist_break"] = brk
+	ev["comfortable"] = bool(ev["reachable"]) \
+			and float(ev["cross"]) < 0.08 \
+			and brk <= WRIST_CONE
+	ev["fingers"] = F_nat
+	ev["palm"] = nat["palm"]
+	return ev
+
+
+## A hold that does not need a per-device authored basis: fingers nearly
+## along the forearm, palm onto the target. New interactables can ship a
+## contact point and nothing else.
+func natural_axes(side: String, contact: Vector3) -> Dictionary:
+	var sh: Vector3 = _lag.global_transform * _shoulder_local.get(side, SHOULDER_OFFSET)
+	var fore: Vector3 = contact - sh
+	if fore.length_squared() < 1e-8:
+		fore = -camera.global_basis.z
+	fore = fore.normalized()
+	var ext := deg_to_rad(12.0)
+	var to_eye: Vector3 = camera.global_position - contact
+	var dorsal: Vector3 = to_eye - to_eye.project(fore)
+	if dorsal.length_squared() < 1e-6:
+		dorsal = camera.global_basis.y - camera.global_basis.y.project(fore)
+	if dorsal.length_squared() < 1e-6:
+		dorsal = Vector3.UP
+	dorsal = dorsal.normalized()
+	var F: Vector3 = (fore * cos(ext) + dorsal * sin(ext)).normalized()
+	var P: Vector3 = (-fore - (-fore).project(F)).normalized()
+	if P.length_squared() < 0.25:
+		P = -dorsal
+	return {"fingers": F, "palm": P}
 
 
 func release(side: String) -> void:
@@ -223,7 +303,40 @@ func update(delta: float) -> void:
 
 # --- internals ---------------------------------------------------------------
 
-func _reach(side: String, xf: Transform3D, weight: float) -> void:
+func _cone_to_forearm(side: String, contact: Vector3, F: Vector3) -> Vector3:
+	var sh: Vector3 = _lag.global_transform * _shoulder_local.get(side, SHOULDER_OFFSET)
+	var fore: Vector3 = contact - sh
+	if fore.length_squared() < 1e-8:
+		return F
+	fore = fore.normalized()
+	var ang: float = F.angle_to(fore)
+	if ang <= WRIST_CONE:
+		return F
+	var axis: Vector3 = fore.cross(F)
+	if axis.length_squared() < 1e-10:
+		return F
+	return fore.rotated(axis.normalized(), WRIST_CONE)
+
+
+func _reach(side: String, xf: Transform3D, weight: float, clamp_sphere := false) -> void:
+	var sh_local: Vector3 = _shoulder_local.get(side, SHOULDER_OFFSET)
+	var sh_now: Vector3 = _lag.global_transform * sh_local
+	var sh_unleaned: Vector3 = _lag.global_transform * (sh_local - _lean)
+	var to_grip: Vector3 = xf.origin - sh_unleaned
+	var reach: float = float(_measured.get("reach_m", 0.6)) - 0.015
+	var over: float = to_grip.length() - reach
+	if over > 0.0:
+		var want: Vector3 = _lag.global_transform.basis.inverse() \
+				* (to_grip.normalized() * minf(over, MAX_LEAN))
+		if want.length() > _lean_want.length():
+			_lean_want = want
+	# Only for one-shot reaches. Pinning a helm grip to the arm sphere lifts
+	# the palm off the rim the moment the wrist sits a centimetre past reach.
+	if clamp_sphere:
+		var to_now: Vector3 = xf.origin - sh_now
+		if to_now.length() > reach and to_now.length_squared() > 1e-8:
+			xf.origin = sh_now + to_now.normalized() * reach
+
 	var t: Node3D = _targets[side]
 	t.global_transform = xf
 	_want[side] = clampf(weight, 0.0, 1.0)
@@ -241,21 +354,9 @@ func _reach(side: String, xf: Transform3D, weight: float) -> void:
 	# at all — camera-down is half world-forward, so the hint landed beyond the
 	# switchboard and the solver laid the whole forearm flat across it to get
 	# there. That is the arm lying over the panel like a plank.
-	var sh_g: Vector3 = _lag.global_transform * _shoulder_local.get(side, SHOULDER_OFFSET)
-	var mid: Vector3 = (sh_g + xf.origin) * 0.5
+	var mid: Vector3 = (sh_now + xf.origin) * 0.5
 	pole.global_position = mid + Vector3.DOWN * 0.32 \
 			+ camera.global_basis.x * (out * 0.24)
-
-	# If the grip is past the arm, lean the torso for the difference.
-	var sh_local: Vector3 = _shoulder_local.get(side, SHOULDER_OFFSET)
-	var sh_world: Vector3 = _lag.global_transform * (sh_local - _lean)
-	var to_grip: Vector3 = xf.origin - sh_world
-	var over: float = to_grip.length() - (float(_measured.get("reach_m", 0.6)) - 0.015)
-	if over > 0.0:
-		var want: Vector3 = _lag.global_transform.basis.inverse() \
-				* (to_grip.normalized() * minf(over, MAX_LEAN))
-		if want.length() > _lean_want.length():
-			_lean_want = want
 
 
 func _apply_fingers(side: String) -> void:

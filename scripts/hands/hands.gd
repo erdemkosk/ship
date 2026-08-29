@@ -8,6 +8,12 @@ extends Node3D
 ## device, whose basis IS the grip semantics: origin = palm contact, +Z = finger
 ## direction, +Y = palm normal. When the device moves, its grip moves, and the
 ## hand is welded to it by parentage rather than by two animations agreeing.
+##
+## Hands do not invent a hold. `GripMap` is the object's contract: where the
+## palm lands, how long the gesture lasts. Which ARM goes is not in the
+## catalog — `_pick_hand` takes the nearer one that can hold without folding
+## its wrist. `preferred` is optional and binding when set (ignition is R).
+## Helm rim, face, watch, ladder stay special — they are not objects.
 
 const RIG := preload("res://scripts/hands/hand_rig.gd")
 
@@ -18,22 +24,6 @@ const REGRIP_TIME := 0.34
 ## How far the palm lifts off the rim while it slides to the fresh hold.
 const REGRIP_LIFT := 0.07
 const RIM := 0.29          # helm rim radius (boat.gd torus: inner .26 outer .32)
-## Everything that is a GESTURE rather than a mode: the hand goes, does the
-## thing, and hands the claim back on its own. Doors and lids are here because
-## a door that opens with no hand in shot is a door opened by a ghost.
-const GESTURES := ["ignition", "fusebox", "windlass",
-		"door_fwd", "door_aft", "door_wh", "door_eng", "locker"]
-## How the hand meets each: local offset on the device, plus finger pose.
-const GESTURE_GRIP := {
-	"fusebox": {"pos": Vector3(0.0, 0.13, 0.77), "pose": "wrap"},
-	"door_fwd": {"pos": Vector3(1.02, 1.58, -0.072), "pose": "pinch"},
-	"door_aft": {"pos": Vector3(1.02, 1.58, 0.072), "pose": "pinch"},
-	"door_wh": {"pos": Vector3(-0.98, 0.92, 0.072), "pose": "pinch"},
-	"door_eng": {"pos": Vector3(-0.07, -0.08, 1.10), "pose": "wrap"},
-	"locker": {"pos": Vector3(0.03, 0.10, 0.41), "pose": "wrap"},
-	"windlass": {"pos": Vector3(0.30, 0.10, 0.0), "pose": "fist"},
-}
-const KNOB_R := 0.032
 
 var boat: Node3D
 var rig: Node3D
@@ -51,6 +41,7 @@ var _inspect := ""
 ## One-shot reach timer: the hand goes to a control (the ignition key), stays
 ## on it for the gesture, and gives the claim back on its own.
 var _oneshot := 0.0
+var _oneshot_side := "R"
 ## Withdrawal. When a claim ends the hand does not vanish and does not stay
 ## planted — it travels back out of frame from wherever it was, over about a
 ## third of a second. Without this the hand simply held its last pose in the
@@ -129,57 +120,32 @@ func inspecting_id() -> String:
 
 func notify_use(id: String) -> void:
 	## Helm / telegraph / chart are modes owned by boat.gd — the engaged state
-	## drives those claims in update(). Only genuinely held things toggle here.
-	if id == "radio":
-		if _claim["R"] == "radio":
-			_release("R")
-		else:
-			_take("R", "radio")
-	elif id.begins_with("sw_"):
-		# A finger jab at the toggle — only when the fuse box is open, which is
-		# also the only time the boat will accept the throw.
-		if bool(boat.call("switch_state", "fusebox")):
-			if _claim["R"] in ["", "telegraph"]:
-				_take("R", id)
-				# Long enough to actually see the finger arrive, press, and
-				# come back. At 0.55 the hand was gone before it got there.
-				_oneshot = 1.05
-	elif id in GESTURES and id != "ignition":
-		# Reach, work it, let go. The lid or leaf is already swinging — boat.gd
-		# owns that — so the hand is timed to arrive with it, not to cause it.
-		if _claim["R"] in ["radar", "sounder"]:
-			_release("R")
-		_take("R", id)
-		_oneshot = 0.85
-	elif id == "ignition":
-		# Turning the key is a gesture, not a mode: reach, pinch, and the claim
-		# hands itself back. If an instrument is out, it goes home first — you
-		# do not start an engine with a radar in your fist.
-		if _claim["R"] in ["radar", "sounder"]:
-			_release("R")
-		_take("R", "ignition")
-		_oneshot = 1.15
-	elif id == "radar" or id == "sounder":
-		# The rail is powered: E sends the carrier gliding out toward the eye,
-		# E again (or walking away) sends it home. The hand does not drag it —
-		# from the helm the case is beyond a real arm anyway. If it IS within
-		# reach, the hand gives it a brief touch as it starts to move, and
-		# that is all.
-		var setter := "set_radar_pull" if id == "radar" else "set_sounder_pull"
-		var other_setter := "set_sounder_pull" if id == "radar" else "set_radar_pull"
-		var was_out: bool = _num(boat, id + "_pull") > 0.5
-		if was_out:
+	## drives those claims in update(). Everything else is a GripMap spec.
+	var spec: Dictionary = GripMap.spec_for(id)
+	if spec.is_empty():
+		return
+	var gate: String = str(spec.get("gate", ""))
+	if gate != "" and not bool(boat.call("switch_state", gate)):
+		return
+	if bool(spec.get("toggle", false)):
+		var held := _owner_of(id)
+		if held != "":
+			_release(held)
+			return
+	var rail: String = str(spec.get("rail", ""))
+	if rail != "":
+		var setter := "set_%s_pull" % rail
+		var other := "sounder" if rail == "radar" else "radar"
+		if _num(boat, rail + "_pull") > 0.5:
+			# Home as well as out: the hand pushes the case off, it does not
+			# vanish while the rail retracts on its own.
 			boat.call(setter, 0.0)
 		else:
-			boat.call(other_setter, 0.0)
+			boat.call("set_%s_pull" % other, 0.0)
 			boat.call(setter, 1.0)
-			var g := _grip_node(id, "R")
-			if g != null and _claim["R"] in ["", "telegraph"]:
-				var limit: float = float(rig.measurements().get("reach_m", 0.55)) \
-						+ rig.MAX_LEAN
-				if rig.shoulder_global("R").distance_to(g.global_position) < limit:
-					_take("R", id)
-					_oneshot = 0.7
+	if bool(spec.get("drops_instruments", false)):
+		_drop_instruments()
+	_begin(id, spec)
 
 
 func set_watch(held: bool, tod: float, depth: float) -> void:
@@ -285,17 +251,19 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 
 	if _oneshot > 0.0:
 		_oneshot -= delta
-		if _oneshot <= 0.0 and (_claim["R"] in GESTURES or _claim["R"] in ["radar", "sounder"]
-				or _claim["R"].begins_with("sw_")):
-			_release("R")
-
+		if _oneshot <= 0.0:
+			var oid: String = str(_claim.get(_oneshot_side, ""))
+			if float(GripMap.spec_for(oid).get("oneshot", 0.0)) > 0.0:
+				_release(_oneshot_side)
 
 	# Radio state belongs to boat.gd; mirror it.
 	if _on(boat, "radio_held"):
-		if _claim["R"] != "radio":
-			_take("R", "radio")
-	elif _claim["R"] == "radio":
-		_release("R")
+		if _owner_of("radio") == "":
+			_begin("radio", GripMap.spec_for("radio"))
+	else:
+		var radio_side := _owner_of("radio")
+		if radio_side != "":
+			_release(radio_side)
 
 	# At the wheel both hands work: left steers, right rests on the telegraph.
 	if engaged == "helm":
@@ -342,6 +310,123 @@ func _release(side: String) -> void:
 	rig.release(side)
 
 
+func _owner_of(id: String) -> String:
+	for s: String in ["L", "R"]:
+		if _claim[s] == id:
+			return s
+	return ""
+
+
+func _drop_instruments() -> void:
+	for s: String in ["L", "R"]:
+		if _claim[s] in ["radar", "sounder"]:
+			_release(s)
+
+
+## Soft claims (helm, telegraph) can be stolen for a gesture and come back
+## on their own. Hard ones (radio, a held watch) cannot — the other hand goes.
+func _locked(side: String) -> bool:
+	if side == "L" and _watch_up():
+		return true
+	var id: String = _claim[side]
+	return id == "radio"
+
+
+func _begin(id: String, spec: Dictionary = {}) -> void:
+	if spec.is_empty():
+		spec = GripMap.spec_for(id)
+	if spec.is_empty() or rig == null or not rig.is_ready():
+		return
+	var side := _pick_hand(id, str(spec.get("preferred", "")))
+	if side == "":
+		return
+	if bool(spec.get("must_reach", false)):
+		var ev: Dictionary = rig.evaluate(side, _side_contact(id, side))
+		if not bool(ev.get("reachable", false)):
+			return
+	_take(side, id)
+	var t: float = float(spec.get("oneshot", 0.0))
+	if t > 0.0:
+		_oneshot = t
+		_oneshot_side = side
+
+
+func _pick_hand(id: String, preferred := "") -> String:
+	## Organic unless the object named a hand. Ignition is right — that is
+	## not a suggestion. Empty preferred: nearer arm that can hold it.
+	if preferred == "L" or preferred == "R":
+		if not _locked(preferred):
+			return preferred
+	var cl: Vector3 = _side_contact(id, "L")
+	var cr: Vector3 = _side_contact(id, "R")
+	var fl: Dictionary = _asked_axes(id, "L")
+	var fr: Dictionary = _asked_axes(id, "R")
+	var el: Dictionary = rig.consider("L", cl, fl["fingers"], fl["palm"])
+	var er: Dictionary = rig.consider("R", cr, fr["fingers"], fr["palm"])
+	var sl: float = _hand_score("L", el, preferred)
+	var sr: float = _hand_score("R", er, preferred)
+	if sl >= 80.0 and sr >= 80.0:
+		return ""
+	if not _locked("L") and not _locked("R"):
+		var ok_l: bool = bool(el.get("comfortable", false))
+		var ok_r: bool = bool(er.get("comfortable", false))
+		if ok_l and not ok_r:
+			return "L"
+		if ok_r and not ok_l:
+			return "R"
+		if ok_l and ok_r:
+			var dl: float = float(el.get("distance", 1e6))
+			var dr: float = float(er.get("distance", 1e6))
+			if absf(dl - dr) > 0.04:
+				return "L" if dl < dr else "R"
+	return "L" if sl < sr else "R"
+
+
+func _hand_score(side: String, ev: Dictionary, preferred := "") -> float:
+	if _locked(side) or rig == null or not rig.is_ready():
+		return 100.0
+	# Distance first. A wrist crime is worse than a few extra centimetres.
+	# Crossing the chest is almost a refusal. Preferred is a whisper.
+	var s: float = float(ev.get("distance", 0.0)) \
+			+ float(ev.get("leftover", 0.0)) * 6.0 \
+			+ float(ev.get("cross", 0.0)) * 5.0 \
+			+ float(ev.get("wrist_break", 0.0)) * 0.55
+	if not bool(ev.get("comfortable", false)):
+		s += 1.4
+	if _claim[side] in ["helm", "telegraph"]:
+		s += 0.15
+	if preferred == side:
+		s -= 0.04
+	return s
+
+
+func _asked_axes(id: String, side: String) -> Dictionary:
+	var spec: Dictionary = GripMap.sided(GripMap.spec_for(id), side)
+	return {
+		"fingers": spec.get("fingers", Vector3.ZERO),
+		"palm": spec.get("palm", Vector3.ZERO),
+	}
+
+
+func _side_contact(id: String, side: String) -> Vector3:
+	var device := _device_of(id)
+	if device == null:
+		if _cam == null:
+			return Vector3.ZERO
+		return _cam.global_position - _cam.global_basis.z * 0.40
+	var spec: Dictionary = GripMap.sided(GripMap.spec_for(id), side)
+	var local: Transform3D = GripMap.local_frame(spec, GripMap.contact_of(spec, boat, id))
+	var p: Vector3 = device.global_transform * local.origin
+	if boat != null:
+		p = (boat as Node3D).get_global_transform_interpolated() \
+				* (boat.global_transform.affine_inverse() * p)
+	return p
+
+
+func _peek_contact(id: String) -> Vector3:
+	return _side_contact(id, "R")
+
+
 func _drive(side: String, delta: float) -> void:
 	var id: String = _claim[side]
 	if id == "":
@@ -371,19 +456,26 @@ func _drive(side: String, delta: float) -> void:
 	# hand held a door handle it re-took its own claim and pushed the one-shot
 	# timer back to full. The timer never expired, the claim never came back,
 	# and the arm stayed welded to whatever it had last touched.
-	var pose := "wrap"
-	if id == "telegraph":
-		pose = "fist"
-	elif id == "ignition":
-		pose = "pinch"
-	elif id.begins_with("sw_"):
-		pose = "point"
-	elif GESTURE_GRIP.has(id):
-		pose = str(GESTURE_GRIP[id].get("pose", "wrap"))
+	var spec: Dictionary = GripMap.spec_for(id)
+	var pose := str(spec.get("pose", "wrap"))
 	# The arm stays pinned (weight 1); `hold` only opens and closes the
 	# fingers, which is what a re-grip looks like from inside the hand.
 	_last_grip[side] = xf.origin
-	rig.grip(side, xf.origin, xf.basis.z, xf.basis.y, 1.0, pose, hold)
+	var fingers: Vector3 = xf.basis.z
+	var palm: Vector3 = xf.basis.y
+	var welded := GripMap.welded(spec)
+	# A catalog pose written for one approach will snap the other wrist.
+	# If the asked fingers sit outside the forearm cone, hold it the way
+	# the arm actually arrives — palm on the thing, wrist not broken.
+	if not welded:
+		var asked: Dictionary = _asked_axes(id, side)
+		var ev: Dictionary = rig.consider(side, xf.origin,
+				asked["fingers"], asked["palm"])
+		if float(ev.get("wrist_break", 0.0)) > rig.WRIST_CONE * 0.85 \
+				or bool(g.get_meta("natural", false)):
+			fingers = ev["fingers"]
+			palm = ev["palm"]
+	rig.grip(side, xf.origin, fingers, palm, 1.0, pose, hold, not welded)
 
 
 func _rest_hand(side: String) -> void:
@@ -522,7 +614,7 @@ func _drive_face(delta: float) -> bool:
 			var palm: Vector3 = c.basis * Vector3(-o, -0.15, 0.0)
 			_last_grip[side] = c * pt
 			rig.grip(side, c * pt, fingers, palm, 1.0, "wrap",
-					clampf(1.0 - absf(e - 0.58) * 2.2, 0.15, 1.0))
+					clampf(1.0 - absf(e - 0.58) * 2.2, 0.15, 1.0), false)
 		return _face_t >= dur
 	# wipe: one finger, across the glass, and back down.
 	var dur2 := 0.95
@@ -550,7 +642,7 @@ func _drive_face(delta: float) -> bool:
 	_wipe_x = pt2.x / maxf(-pt2.z * half * 2.0, 1e-3)
 	_wipe_dir = -1.0
 	_last_grip["R"] = c * pt2
-	rig.grip("R", c * pt2, f2, p2, 1.0, "point", 1.0)
+	rig.grip("R", c * pt2, f2, p2, 1.0, "point", 1.0, false)
 	_rest_hand("L")
 	return _face_t >= dur2
 
@@ -694,6 +786,8 @@ func _write_rim_grip(g: Node3D, angle: float, lift: float) -> void:
 	# rim, so the palm clears the spokes rather than scraping across them.
 	var out := radial * (RIM + lift) + Vector3(0.0, 0.0, lift * 0.8)
 	g.transform = Transform3D(Basis(P.cross(F), P, F), out)
+	if g.has_meta("natural"):
+		g.remove_meta("natural")
 
 
 func _seat_on_rim(side: String) -> void:
@@ -706,114 +800,31 @@ func _seat_on_rim(side: String) -> void:
 	_write_rim_grip(g, _rim_angle[side], 0.0)
 
 
+func _device_of(id: String) -> Node3D:
+	return GripMap.device_of(boat, id)
+
+
 func _grip_node(id: String, side: String) -> Node3D:
 	var key := id + ":" + side
 	if _grips.has(key) and is_instance_valid(_grips[key]):
 		return _grips[key]
-	var device: Node3D = null
-	if id.begins_with("sw_"):
-		device = boat.call("switch_lever", id) as Node3D
-	elif id.begins_with("door_") and id != "door_eng":
-		device = boat.call("door_node", id) as Node3D
-	elif id == "door_eng":
-		device = boat.call("engine_door") as Node3D
-	elif id == "locker":
-		device = boat.call("locker_door") as Node3D
-	elif id == "fusebox":
-		device = boat.call("fuse_lid") as Node3D
-	elif id == "windlass":
-		device = boat.call("windlass_node") as Node3D
-	else:
-		var accessor: String = {"helm": "helm_wheel", "telegraph": "throttle_lever",
-				"radio": "radio_handset", "radar": "radar_housing",
-				"sounder": "sounder_housing", "ignition": "ignition_key"}.get(id, "")
-		if accessor == "" or not boat.has_method(accessor):
-			return null
-		device = boat.call(accessor) as Node3D
+	var device: Node3D = _device_of(id)
 	if device == null:
 		return null
+	var spec: Dictionary = GripMap.spec_for(id)
 	var g := Node3D.new()
 	g.name = "Grip_" + side
 	device.add_child(g)
-	match id:
-		"telegraph":
-			# Fist over the knob at the top of the lever, approached from aft
-			# and above; contact on the knob's surface where the palm lands.
-			# The reference point is 2 cm ABOVE the knob centre: the palm's
-			# contact patch is the heel of the hand, and anchoring at the centre
-			# seated the fist visibly low on the shaft with the knob peeking out
-			# under the fingers instead of nesting against the palm.
-			var F := Vector3(0.0, -0.35, -0.94).normalized()
-			var P := Vector3(0.0, -0.94, 0.35).normalized()
-			g.transform = Transform3D(Basis(P.cross(F), P, F),
-					Vector3(0.0, 0.33, 0.0) - P * KNOB_R)
-		"radio":
-			# The handset's long axis is Z: earpiece cap at -Z, mouthpiece +Z,
-			# the PTT bar on -X "where your thumb lands" (boat.gd). So the palm
-			# takes the +X flank — palm normal -X — fingers wrapping down across
-			# the grip, knuckle line along +Z, which puts the thumb exactly on
-			# the bar. Contact ON the +X surface, not at the centre; a palm at
-			# the centre means fingers through the mesh.
-			var F := Vector3(0.15, -0.99, 0.0).normalized()
-			var P := Vector3(-1.0, 0.0, 0.0)
-			g.transform = Transform3D(Basis(P.cross(F), P, F),
-					Vector3(0.026, -0.004, 0.012))
-		"radar":
-			# Right-hand hold on the case's starboard edge: palm faces the box,
-			# fingers hooking over toward its back. The node is a child of the
-			# case, so as the hinge swings the hand swings welded to it.
-			var F := Vector3(0.0, 0.05, -1.0).normalized()
-			var P := Vector3(-1.0, 0.0, 0.0)
-			g.transform = Transform3D(Basis(P.cross(F), P, F),
-					Vector3(0.205, -0.05, 0.06))
-		"ignition":
-			# Pinch on the key's bow from above and aft. The grip is a child of
-			# the KEY node, which rotates as the engine cranks — so the fingers
-			# turn with the key instead of hovering while it moves.
-			#
-			# The wrist is deliberately COCKED: fingers drop nearly straight
-			# down while the arm arrives from high aft, so the hand breaks at
-			# the wrist the way a hand actually does over a key — straight-on it
-			# read as a rod with fingers.
-			var F := Vector3(0.05, -0.96, -0.27).normalized()
-			var P := Vector3(-0.52, -0.20, 0.83).normalized()
-			g.transform = Transform3D(Basis(P.cross(F), P, F),
-					Vector3(0.0, 0.020, 0.052))
-		_ when GESTURE_GRIP.has(id):
-			# Palm onto the handle on the face you are standing on.
-			var spec: Dictionary = GESTURE_GRIP[id]
-			var hp: Vector3 = spec["pos"]
-			if boat != null and boat.has_method("door_latch_local") \
-					and id.begins_with("door_") and id != "door_eng":
-				hp = boat.call("door_latch_local", id)
-			var F := Vector3(0.0, -0.35, -0.94).normalized()
-			var P := Vector3(-0.94, -0.20, 0.0).normalized()
-			g.transform = Transform3D(Basis(P.cross(F), P, F), hp)
-		_ when id.begins_with("sw_"):
-			# Fingertip on the lever knob: index leads, everything else curls
-			# away — the "point" pose does the talking.
-			# A toggle is pressed with a FINGERTIP, and grip() places the
-			# PALM. So the anchor has to sit back along the finger axis by the
-			# length of the finger — otherwise the palm lands on the knob and
-			# the fingers go through the panel, which is what it was doing.
-			#
-			# Fingers nearly straight down and the palm turned toward the
-			# player: that presents the narrow back of the hand to the eye and
-			# puts the index on top of the ball, instead of laying the flat of
-			# the hand across the board.
-			var F := Vector3(0.0, -0.92, -0.39).normalized()
-			var P := Vector3(0.0, -0.39, 0.92).normalized()
-			# ball top 0.064 above the pivot, palm centre to fingertip 0.095.
-			g.transform = Transform3D(Basis(P.cross(F), P, F),
-					Vector3(0.0, 0.064, 0.0) - F * 0.095)
-		"sounder":
-			# Same hold, smaller case: edge at half of 0.34 plus a finger.
-			var F := Vector3(0.0, 0.05, -1.0).normalized()
-			var P := Vector3(-1.0, 0.0, 0.0)
-			g.transform = Transform3D(Basis(P.cross(F), P, F),
-					Vector3(0.185, -0.03, 0.05))
-		_:
-			g.transform = Transform3D.IDENTITY
+	# Prefer a grip the object already carries. Otherwise stamp the catalog
+	# frame. Rim holds stay identity — _write_rim_grip owns those every frame.
+	var stock := device.get_node_or_null("Grip") as Node3D
+	if stock != null and stock != g:
+		g.transform = stock.transform
+	elif bool(spec.get("on_rim", false)) or spec.is_empty():
+		g.transform = Transform3D.IDENTITY
+	else:
+		var sided: Dictionary = GripMap.sided(spec, side)
+		g.transform = GripMap.local_frame(sided, GripMap.contact_of(sided, boat, id))
 	_grips[key] = g
 	return g
 

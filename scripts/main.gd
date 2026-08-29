@@ -152,6 +152,8 @@ func _ready() -> void:
 			_look_boat = boat
 		elif arg == "--probe-hands":
 			_probe_hands(rig, boat)
+		elif arg.begins_with("--grip-test="):
+			_grip_test(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--pull-radar":
 			_pull_radar(rig)
 		elif arg == "--pull-sounder":
@@ -272,6 +274,87 @@ func _spawn_flotsam(ocean: Node3D) -> void:
 		debris.spawn_yaw = rng.randf() * TAU
 		add_child(debris)
 		debris.global_position = pos
+
+
+func _grip_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Stand at the helm and E every instrument a hand should meet. Prints
+	## which arm took it and how far the wrist missed the grip, then a frame.
+	if not dir.is_absolute_path():
+		dir = ProjectSettings.globalize_path("res://" + dir.trim_prefix("res://"))
+	DirAccess.make_dir_recursive_absolute(dir)
+	var w: RefCounted = rig.get("_walker")
+	rig.set_mode(1)
+	var pnl: Node = get_tree().get_first_node_in_group("ui_panel")
+	if pnl != null:
+		var pc: CanvasItem = pnl.get("_panel") as CanvasItem
+		if pc != null:
+			pc.visible = false
+	await get_tree().create_timer(2.2).timeout
+	boat.set("helm_engaged", false)
+	boat.set("light_helm", true)
+	w.call("spawn_at", boat.HELM_STAND)
+	var cam: Camera3D = rig.get("_cam")
+	var arms: Node = rig.get("_arms")
+	arms.set("boat", boat)
+	var hr: Node = arms.get("rig")
+	var cases: Array = [
+		["radar", "radar_housing"],
+		["sounder", "sounder_housing"],
+		["ignition", "ignition_key"],
+		["radio", "radio_handset"],
+	]
+	for c: Array in cases:
+		var id: String = c[0]
+		var device: Node3D = boat.call(c[1]) as Node3D
+		if device == null:
+			print("[grip] %s  CIHAZ YOK" % id)
+			continue
+		for _i in 5:
+			var d: Vector3 = device.global_position - cam.global_position
+			if d.length_squared() > 1e-6:
+				d = d.normalized()
+				rig.set("yaw", atan2(-d.x, -d.z))
+				rig.set("pitch", asin(clampf(d.y, -1.0, 1.0)))
+			await get_tree().create_timer(0.08).timeout
+		if id == "radio":
+			boat.set("radio_held", true)
+		arms.call("notify_use", id)
+		arms.set("_oneshot", 8.0)
+		await get_tree().create_timer(0.50).timeout
+		var claim: Dictionary = arms.get("_claim")
+		var side := ""
+		if str(claim.get("L", "")) == id:
+			side = "L"
+		elif str(claim.get("R", "")) == id:
+			side = "R"
+		var g: Node3D = device.get_node_or_null("Grip_" + (side if side != "" else "R"))
+		var look: Vector3 = g.global_position if g != null else device.global_position
+		for _j in 4:
+			var aim: Vector3 = look - cam.global_position
+			if aim.length_squared() > 1e-6:
+				aim = aim.normalized()
+				rig.set("yaw", atan2(-aim.x, -aim.z))
+				# Hands live in the lower third; look a little under the grip
+				# or the shot is the horizon and a mast.
+				rig.set("pitch", asin(clampf(aim.y, -1.0, 1.0)) - 0.22)
+			await get_tree().create_timer(0.08).timeout
+		var ev: Dictionary = hr.call("evaluate", side if side != "" else "R",
+				device.global_position)
+		var err := -1.0
+		if side != "" and g != null:
+			err = (hr.call("wrist_global", side) as Transform3D).origin.distance_to(
+					g.global_position)
+		print("[grip] %-8s side=%-2s leftover=%.3f reachable=%s wrist_err=%.3f claim=%s" % [
+				id, side if side != "" else "-",
+				float(ev.get("leftover", -1.0)), ev.get("reachable", false),
+				err, claim])
+		await _shot(dir, "grip_%s" % id)
+		if side != "":
+			arms.call("_release", side)
+		if id == "radar" or id == "sounder":
+			boat.call("set_%s_pull" % id, 0.0)
+		await get_tree().create_timer(0.35).timeout
+	get_tree().quit()
 
 
 func _pull_radar(rig: Node3D) -> void:
