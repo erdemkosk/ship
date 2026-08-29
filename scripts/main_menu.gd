@@ -27,7 +27,6 @@ var _leaving := ""           # "", "sail", "quit"
 var _leave_t := 0.0
 var _fade: ColorRect
 var _title: TextureRect
-var _title_mat: ShaderMaterial
 var _sub: Label
 var _buttons := {}
 var _done := false
@@ -40,12 +39,25 @@ func setup(p_rig: Node3D, p_boat: RigidBody3D, p_ocean: Node3D, p_weather: Node3
 	weather = p_weather
 
 
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		_choose("quit")
+		get_viewport().set_input_as_handled()
+
+
 func _ready() -> void:
+	add_to_group("main_menu")
 	_cam = rig.get("_cam")
 	# The menu owns the camera. boat_camera's own process would put it right
 	# back on the boat, so it sleeps until SET SAIL.
 	rig.set_process(false)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	var ret: CanvasItem = rig.get("_reticle") as CanvasItem
+	if ret != null:
+		ret.visible = false
+	var pr: CanvasItem = rig.get("_prompt") as CanvasItem
+	if pr != null:
+		pr.visible = false
 	# The weather panel and the fps counter belong to the game, not the shot.
 	var pnl: Node = get_tree().get_first_node_in_group("ui_panel")
 	if pnl != null:
@@ -99,9 +111,8 @@ func _build_overlay() -> void:
 	vig.material = vm
 	layer.add_child(vig)
 
-	# The game's own mark, not a font: the same DEEP TRAUMA card the boot
-	# splash burns in, hung over the storm with a slow trace of its glitch —
-	# alive, but not shouting.
+	# The game's own mark. No boot card, no glitch burn-in — the menu is
+	# already the first picture.
 	_title = TextureRect.new()
 	_title.texture = load("res://assets/ui/deep_trauma_logo.png")
 	_title.set_anchors_preset(Control.PRESET_CENTER_TOP)
@@ -112,10 +123,7 @@ func _build_overlay() -> void:
 	_title.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	_title.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_title_mat = ShaderMaterial.new()
-	_title_mat.shader = load("res://shaders/logo_glitch.gdshader")
-	_title.material = _title_mat
-	_title.modulate.a = 0.0
+	_title.modulate.a = 0.95
 	layer.add_child(_title)
 
 	_sub = Label.new()
@@ -126,7 +134,7 @@ func _build_overlay() -> void:
 	_sub.offset_right = 640.0
 	_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_sub.add_theme_font_size_override("font_size", 21)
-	_sub.add_theme_color_override("font_color", Color(0.62, 0.63, 0.60, 0.0))
+	_sub.add_theme_color_override("font_color", Color(0.62, 0.63, 0.60, 0.62))
 	layer.add_child(_sub)
 
 	# The exits, down the left edge, out of her way.
@@ -148,17 +156,18 @@ func _build_overlay() -> void:
 	_fade = ColorRect.new()
 	_fade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_fade.color = Color(0, 0, 0, 1)
+	_fade.color = Color(0, 0, 0, 0)
 	fl.add_child(_fade)
 
 
 func _choose(id: String) -> void:
-	if _leaving != "":
+	if _leaving != "" or _done:
 		return
 	match id:
 		"sail":
-			_leaving = "sail"
-			_leave_t = 0.0
+			# Straight into the man. A fade-to-black and back read as the
+			# menu opening and shutting again.
+			_enter_game()
 		"quit":
 			_leaving = "quit"
 			_leave_t = 0.0
@@ -210,28 +219,17 @@ func _place_camera(delta: float) -> void:
 
 func _run_fades(delta: float) -> void:
 	if _leaving == "":
-		_fade.color.a = maxf(_fade.color.a - delta * 0.55, 0.0)
-		var ta := clampf((_t - 1.2) / 2.6, 0.0, 1.0)
-		_title.modulate.a = ta * 0.95
-		_sub.add_theme_color_override("font_color",
-				Color(0.62, 0.63, 0.60, ta * 0.62))
-		if _title_mat != null:
-			# A nervous flicker every few seconds, mostly nothing between.
-			var g: float = maxf(sin(_t * 0.9) - 0.92, 0.0) * 3.2 \
-					+ maxf(sin(_t * 2.31 + 4.0) - 0.985, 0.0) * 9.0
-			_title_mat.set_shader_parameter("amount", clampf(g, 0.0, 0.4))
-			_title_mat.set_shader_parameter("time", _t)
+		_fade.color.a = 0.0
 		return
 	_leave_t += delta
 	_fade.color.a = minf(_fade.color.a + delta * 1.1, 1.0)
-	if _leaving == "sail" and _leave_t > 1.15:
-		_enter_game()
-	elif _leaving == "quit" and _leave_t > 1.6:
+	if _leaving == "quit" and _leave_t > 1.6:
 		get_tree().quit()
 
 
 func _enter_game() -> void:
 	_done = true
+	set_process(false)
 	var pnl: Node = get_tree().get_first_node_in_group("ui_panel")
 	if pnl != null:
 		var fl: CanvasItem = pnl.get("_fps_label") as CanvasItem
@@ -241,14 +239,10 @@ func _enter_game() -> void:
 			var pc: CanvasItem = pnl.get("_panel") as CanvasItem
 			if pc != null:
 				pc.visible = false
-	rig.set_process(true)
-	rig.call("set_mode", 1)
-	# The fade rect outlives the menu by a second so the cut is covered.
-	var fr := _fade
-	var tw := create_tween()
-	tw.tween_interval(0.25)
-	tw.tween_property(fr, "color:a", 0.0, 0.9)
-	tw.tween_callback(queue_free)
+	if is_instance_valid(rig):
+		rig.set_process(true)
+		rig.call("set_mode", 1)
+	queue_free()
 
 
 # --- probes ------------------------------------------------------------------

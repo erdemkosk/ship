@@ -34,6 +34,19 @@ func _enter_tree() -> void:
 	_add_action("wiper", [KEY_5])
 
 
+func _open_menu() -> void:
+	if get_tree().get_first_node_in_group("main_menu") != null:
+		return
+	var menu: Node3D = (load("res://scripts/main_menu.gd") as GDScript).new()
+	menu.call("setup", $CameraRig, $Boat, $Ocean, $Weather)
+	add_child(menu)
+
+
+func return_to_menu() -> void:
+	## ESC from play. The world stays; the shot and the words come back.
+	_open_menu()
+
+
 func _add_action(action: String, keys: Array) -> void:
 	if InputMap.has_action(action):
 		return
@@ -71,8 +84,6 @@ func _ready() -> void:
 	boat.tackle = tackle
 	ui.setup(ocean, weather)
 	_spawn_flotsam(ocean)
-	if _want_splash():
-		add_child((load("res://scripts/splash.gd") as GDScript).new())
 
 	# The menu needs NOTHING to appear: double-click, editor play, exported
 	# build — every ordinary launch opens on it. The only thing that skips it
@@ -86,12 +97,10 @@ func _ready() -> void:
 				and not a.begins_with("--menu"):
 			want_menu = false
 	if want_menu:
-		var menu: Node3D = (load("res://scripts/main_menu.gd") as GDScript).new()
-		menu.call("setup", rig, boat, ocean, weather)
-		add_child(menu)
+		_open_menu()
 		for a in uargs:
 			if a.begins_with("--menu-shot="):
-				_menu_shot(menu, a.get_slice("=", 1))
+				_menu_shot(get_tree().get_first_node_in_group("main_menu"), a.get_slice("=", 1))
 
 	var look_lh := false
 	for arg in OS.get_cmdline_user_args():
@@ -197,16 +206,6 @@ func _ready() -> void:
 				rig.set("dist", 8.2)
 				rig.set("yaw", 0.48)
 			_take_test_screenshot()
-
-
-func _want_splash() -> bool:
-	## Command-line probes and screenshots need the sea on frame one, not a
-	## title card sitting on top of them.
-	for arg in OS.get_cmdline_user_args():
-		if arg.begins_with("--time=") or arg == "--no-storm":
-			continue
-		return false
-	return true
 
 
 func _place_boat(boat: RigidBody3D, ocean: Node3D) -> void:

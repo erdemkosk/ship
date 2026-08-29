@@ -26,9 +26,9 @@ const GESTURES := ["ignition", "fusebox", "windlass",
 ## How the hand meets each: local offset on the device, plus finger pose.
 const GESTURE_GRIP := {
 	"fusebox": {"pos": Vector3(0.0, 0.13, 0.77), "pose": "wrap"},
-	"door_fwd": {"pos": Vector3(0.86, 1.62, 0.05), "pose": "wrap"},
-	"door_aft": {"pos": Vector3(0.86, 1.62, 0.05), "pose": "wrap"},
-	"door_wh": {"pos": Vector3(-0.86, 0.94, -0.05), "pose": "wrap"},
+	"door_fwd": {"pos": Vector3(1.02, 1.58, -0.072), "pose": "pinch"},
+	"door_aft": {"pos": Vector3(1.02, 1.58, 0.072), "pose": "pinch"},
+	"door_wh": {"pos": Vector3(-0.98, 0.92, 0.072), "pose": "pinch"},
 	"door_eng": {"pos": Vector3(-0.07, -0.08, 1.10), "pose": "wrap"},
 	"locker": {"pos": Vector3(0.03, 0.10, 0.41), "pose": "wrap"},
 	"windlass": {"pos": Vector3(0.30, 0.10, 0.0), "pose": "fist"},
@@ -766,11 +766,15 @@ func _grip_node(id: String, side: String) -> Node3D:
 			g.transform = Transform3D(Basis(P.cross(F), P, F),
 					Vector3(0.0, 0.020, 0.052))
 		_ when GESTURE_GRIP.has(id):
-			# Palm onto the handle from inboard, fingers curling round it.
+			# Palm onto the handle on the face you are standing on.
 			var spec: Dictionary = GESTURE_GRIP[id]
+			var hp: Vector3 = spec["pos"]
+			if boat != null and boat.has_method("door_latch_local") \
+					and id.begins_with("door_") and id != "door_eng":
+				hp = boat.call("door_latch_local", id)
 			var F := Vector3(0.0, -0.35, -0.94).normalized()
 			var P := Vector3(-0.94, -0.20, 0.0).normalized()
-			g.transform = Transform3D(Basis(P.cross(F), P, F), spec["pos"])
+			g.transform = Transform3D(Basis(P.cross(F), P, F), hp)
 		_ when id.begins_with("sw_"):
 			# Fingertip on the lever knob: index leads, everything else curls
 			# away — the "point" pose does the talking.

@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_opaque;
+render_mode unshaded, depth_draw_opaque;
 
 // The echo sounder's screen.
 //

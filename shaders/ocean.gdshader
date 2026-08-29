@@ -553,29 +553,31 @@ void fragment() {
 			discard;
 		}
 		vec3 d = -view_dir;
-		vec3 into_air = refract(d, -wn, 1.333);
-		float ct = clamp(dot(d, wn), 0.0, 1.0);
-		float win = smoothstep(0.48, 0.70, ct);
-		vec3 ceiling = scatter_color * (4.2 + 5.5 * sun_energy)
-				+ sky_ambient * 0.40
-				+ sun_color * sun_energy * pow(max(dot(d, sun_dir), 0.0), 6.0) * 0.55;
+		// Window is a zenith cone. Mesh normals stay out of it — they are
+		// what turned the sun into a square of quads.
+		float ct = clamp(d.y, 0.0, 1.0);
+		float win = smoothstep(0.22, 0.82, ct);
+		vec3 ceiling = scatter_color * (2.8 + 3.2 * sun_energy)
+				+ sky_ambient * 0.26;
 		vec3 through = ceiling;
-		if (dot(into_air, into_air) > 0.0001) {
-			vec3 air = normalize(into_air);
-			air.y = max(air.y, 0.08);
-			air = normalize(air);
-			through = sky_color(air, clamp(rough * 1.4, 0.0, 1.0), 1.0);
-		}
+		vec3 air = d;
+		air.y = max(air.y, 0.08);
+		air = normalize(air);
+		through = sky_color(air, 1.0, 0.0);
+		// Only a wide wash on the mesh. The lamp itself is the underwater
+		// post — a screen-space orb is a circle; a mesh disc is a facet.
+		float wash = pow(max(dot(d, sun_dir), 0.0), 2.0) * 0.18 * sun_energy;
+		through += sun_color * wash;
 		col = mix(ceiling, through, win);
-		col = mix(col, foam_color * 0.55, foam * 0.45);
-		// Opaque pass already drew her. Sample it, smear it a touch, and sit
-		// it in the window so the hull is a shape in the brightness, not gone.
-		vec2 suv = clamp(SCREEN_UV + view_n.xy * 0.016, vec2(0.002), vec2(0.998));
+		col = mix(col, foam_color * 0.45, foam * 0.22);
+		vec2 suv = clamp(SCREEN_UV + view_n.xy * 0.010, vec2(0.002), vec2(0.998));
 		vec3 scene = textureLod(screen_tex, suv, 0.0).rgb;
-		scene = mix(scene, textureLod(screen_tex, suv + vec2(0.0024, -0.0016), 0.0).rgb, 0.5);
+		float scene_l = dot(scene, vec3(0.299, 0.587, 0.114));
+		float scene_k = (1.0 - win) * 0.22 * smoothstep(0.06, 0.28, scene_l);
 		scene *= vec3(0.58, 0.90, 0.94);
-		col = mix(col, scene, mix(0.28, 0.78, win));
+		col = mix(col, scene, scene_k);
 		diffuse_albedo = vec3(0.0);
+		rough = 1.0;
 	}
 
 	ALBEDO = diffuse_albedo;
@@ -583,7 +585,7 @@ void fragment() {
 	// SPECULAR 0.5 == F0 0.04; water is 0.02.
 	SPECULAR = mix(0.25, 0.42, foam);
 	ROUGHNESS = rough;
-	NORMAL = normalize(view_n);
+	NORMAL = camera_under == 1 ? vec3(0.0, 0.0, 1.0) : normalize(view_n);
 	EMISSION = col + foam_color * shore_foam * 0.12;
 	if (lh_on > 0.02 && camera_under == 0) {
 		EMISSION += lh_glitter(v_world_pos, wn, view_dir, lh_dir_a) * lh_on;

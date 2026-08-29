@@ -45,7 +45,7 @@ var _under_rect: ColorRect
 var _under_mat: ShaderMaterial
 var _warm_rect: ColorRect
 var _warm_mat: ShaderMaterial
-var _warmth := 0.22
+var _warmth := 0.0
 var _motes: GPUParticles3D
 var _prompt: Label
 var _walker: RefCounted = (load("res://scripts/deck_walker.gd") as GDScript).new()
@@ -79,6 +79,9 @@ var _fog := 0.0
 var _wipe := 0.0
 var _inhale: AudioStreamPlayer
 var _exhale: AudioStreamPlayer
+var _stair_snd: Array[AudioStreamPlayer] = []
+var _stair_voice := 0
+var _stair_idx := -99
 ## The breath cycle, and the level of fog at which the next automatic clear
 ## happens. Both are deliberately irregular: a diver does not breathe to a
 ## metronome and does not clear their mask on a schedule either.
@@ -217,8 +220,19 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("toggle_camera"):
 		set_mode((mode + 1) % 3)
 		return
-	if mode == Mode.FPS and event.is_action_pressed("ui_cancel"):
-		set_mode(Mode.FOLLOW)
+	if get_tree().get_first_node_in_group("main_menu") != null:
+		return
+	if event.is_action_pressed("ui_cancel"):
+		if _panel_open() and _panel != null and is_instance_valid(_panel):
+			var pc: CanvasItem = _panel.get("_panel") as CanvasItem
+			if pc != null:
+				pc.visible = false
+				get_viewport().set_input_as_handled()
+				return
+		var root := get_parent()
+		if root != null and root.has_method("return_to_menu"):
+			root.call("return_to_menu")
+		get_viewport().set_input_as_handled()
 		return
 
 	if event is InputEventMouseMotion:
@@ -392,9 +406,12 @@ func _process_fps(delta: float) -> void:
 			var along := look_l.dot(to)
 			if along <= 0.02 or along > 2.2:
 				continue
-			var rr: float = float(it["r"]) * (1.0 + sway)
+			var base_r: float = float(it["r"])
+			# Small fittings grow when she rolls; a table-sized volume must
+			# not, or it swallows the door next to it.
+			var rr: float = base_r * (1.0 + sway * clampf(0.14 / maxf(base_r, 0.05), 0.0, 1.0))
 			if iid == _last_aim:
-				rr *= 1.75
+				rr *= 1.22
 			var perp: float = (to - look_l * along).length()
 			if perp > rr:
 				continue
@@ -403,17 +420,12 @@ func _process_fps(delta: float) -> void:
 			# take a handset off its hook is not a thing.
 			if _occluded(target, eye, ipos):
 				continue
-			# Score by ANGLE OFF THE CROSSHAIR, not by distance along the ray.
-			# Nearest-along handed you whichever fitting happened to be closest
-			# to your face — around the radar bracket that is four things at
-			# once, and never the one you were looking at. Perp/along is the
-			# tangent of the aim error, so the winner is simply whatever sits
-			# closest to the centre of the screen. The sticky bonus survives as
-			# a discount, so a target you have already found does not lose to a
-			# neighbour on a roll.
+			# Angle off the crosshair, then a size penalty so a fat volume
+			# behind a knob cannot win just because you clipped its edge.
 			var score: float = perp / maxf(along, 0.05)
+			score *= 1.0 + base_r * 1.8
 			if iid == _last_aim:
-				score *= 0.62
+				score *= 0.88
 			if score < nearest:
 				nearest = score
 				cand = it
@@ -600,6 +612,7 @@ func _process_fps(delta: float) -> void:
 				look_fwd, axes,
 				Input.is_action_pressed("jump") and not _panel_open(),
 				Input.is_action_pressed("dive") and not _panel_open())
+		_tick_stair_step()
 
 	# --- the eye -------------------------------------------------------------
 	var eye_l: Vector3 = _walker.eye_local()
@@ -707,6 +720,31 @@ func _process_fps(delta: float) -> void:
 			_arms.set_sea_ladder(_flag(_walker, "on_sea_ladder"), _walker.pos.y)
 		_arms.update(delta, target, engaged, walking, _flag(_walker, "swimming"))
 	_update_warmth(delta)
+
+
+func _tick_stair_step() -> void:
+	## One clip per tread. The companionway is ordinary floors 0.223 m apart;
+	## the boarding ladder is rungs. Crossing an index is a footfall. Landing
+	## on the flight from the sole or the roof does not click.
+	if _stair_snd.is_empty() or _walker == null:
+		return
+	if _flag(_walker, "swimming"):
+		_stair_idx = -99
+		return
+	var p: Vector3 = _walker.pos
+	var idx := -99
+	if p.x > -1.70 and p.x < -0.46 and p.z > 0.90 and p.z < 4.00 \
+			and p.y > 0.82 and p.y < 3.05 and _walker.on_floor:
+		idx = int(round((p.y - 0.903) / 0.223))
+	elif _flag(_walker, "on_sea_ladder"):
+		idx = 100 + int(round((p.y + 1.30) / 0.27))
+	if idx != -99 and _stair_idx != -99 and idx != _stair_idx:
+		var pl: AudioStreamPlayer = _stair_snd[_stair_voice]
+		_stair_voice = (_stair_voice + 1) % _stair_snd.size()
+		pl.pitch_scale = randf_range(0.94, 1.08)
+		pl.volume_db = randf_range(-11.0, -6.5)
+		pl.play()
+	_stair_idx = idx
 
 
 func _occluded(bt: Node3D, from_l: Vector3, to_l: Vector3) -> bool:
@@ -889,10 +927,19 @@ func _build_underwater() -> void:
 		_exhale.pitch_scale = 0.74
 		add_child(_exhale)
 
+	var step: AudioStream = load("res://assets/audio/stair_step.mp3")
+	if step != null:
+		for _i in 2:
+			var p := AudioStreamPlayer.new()
+			p.stream = step
+			p.volume_db = -8.0
+			add_child(p)
+			_stair_snd.append(p)
+
 
 	_motes = GPUParticles3D.new()
-	_motes.amount = 520
-	_motes.lifetime = 5.5
+	_motes.amount = 280
+	_motes.lifetime = 6.5
 	_motes.preprocess = 2.5
 	_motes.emitting = false
 	_motes.transform_align = GPUParticles3D.TRANSFORM_ALIGN_DISABLED
@@ -902,21 +949,23 @@ func _build_underwater() -> void:
 	var pm := ParticleProcessMaterial.new()
 	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
 	pm.emission_box_extents = Vector3(10.0, 6.0, 10.0)
-	pm.gravity = Vector3(0, -0.07, 0)
+	pm.gravity = Vector3(0, 0.015, 0)
 	pm.initial_velocity_min = 0.01
-	pm.initial_velocity_max = 0.08
-	pm.scale_min = 0.012
-	pm.scale_max = 0.038
-	pm.color = Color(0.52, 0.58, 0.54, 0.22)
+	pm.initial_velocity_max = 0.05
+	pm.scale_min = 0.010
+	pm.scale_max = 0.028
+	pm.color = Color(0.52, 0.58, 0.54, 0.18)
 	_motes.process_material = pm
-	var q := QuadMesh.new()
-	q.size = Vector2(0.05, 0.05)
+	var q := SphereMesh.new()
+	q.radius = 0.005
+	q.height = 0.010
+	q.radial_segments = 6
+	q.rings = 3
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	mat.disable_fog = true
-	mat.albedo_color = Color(0.55, 0.62, 0.58, 0.28)
+	mat.albedo_color = Color(0.55, 0.62, 0.58, 0.16)
 	q.material = mat
 	_motes.draw_pass_1 = q
 	add_child(_motes)
@@ -1021,7 +1070,7 @@ func _update_underwater() -> void:
 	_update_breath(under)
 	_update_mask(get_process_delta_time(), under)
 	if under and _under_mat != null and weather != null and weather.has_method("sun_direction"):
-		# Light shafts have to point at the real sun, so project it to screen.
+		# Bloom toward the real sun/moon. Night is a silver wash, not blades.
 		var sd: Vector3 = weather.sun_direction()
 		var vp := get_viewport().get_visible_rect().size
 		var ss := Vector2(0.5, -0.35)
@@ -1031,7 +1080,24 @@ func _update_underwater() -> void:
 			ss = Vector2(p2.x / maxf(vp.x, 1.0), p2.y / maxf(vp.y, 1.0))
 			ss = ss.clamp(Vector2(-1.0, -1.0), Vector2(2.0, 2.0))
 		_under_mat.set_shader_parameter("sun_screen", ss)
-		_under_mat.set_shader_parameter("shaft_energy", 1.05 if sd.y > 0.05 else 0.22)
+		var night := false
+		if weather.has_method("is_night"):
+			night = weather.is_night()
+		var stormy := false
+		if "storm" in weather:
+			stormy = weather.storm
+		var shaft := 0.62 if night else 1.05
+		if stormy:
+			shaft *= 0.50
+		if sd.y < 0.05:
+			shaft *= 0.28
+		_under_mat.set_shader_parameter("shaft_energy", shaft)
+		_under_mat.set_shader_parameter("lamp_tight", 0.48 if night else 1.15)
+		var tint := Color(0.70, 0.80, 0.96) if night else Color(1.0, 0.90, 0.62)
+		if weather.has_method("sun_tint"):
+			var st: Color = weather.sun_tint()
+			tint = tint.lerp(st, 0.45)
+		_under_mat.set_shader_parameter("shaft_color", tint)
 
 
 func _update_mask(delta: float, under: bool) -> void:
@@ -1184,21 +1250,20 @@ func _update_breath(under: bool) -> void:
 
 
 func _update_warmth(delta: float) -> void:
-	## Body heat. The stove fills the cabin over tens of seconds; the deck and
-	## the sea take it back faster. No number on a panel — you feel it the way
-	## you feel a fire, as colour on the face.
+	## The cabin when the heater is on. No slow acclimate — the colour
+	## arrives with the bars.
 	if target == null or not target.has_method("heat_at"):
 		return
 	var src := 0.0
-	var tau := 8.0
+	var tau := 1.1
 	if _walker.swimming:
 		src = 0.0
-		tau = 2.2
+		tau = 1.4
 	else:
 		src = float(target.heat_at(_walker.pos))
 		if src < 0.05 and weather != null:
 			src = maxf(src - _rain() * 0.10, 0.0)
-		tau = 9.5 if src > _warmth else 6.5
+		tau = 0.9 if src > _warmth else 1.8
 	_warmth = lerpf(_warmth, src, 1.0 - exp(-delta / tau))
 	if _warm_rect == null or _warm_mat == null:
 		return

@@ -345,14 +345,10 @@ func _world_point(id: String) -> Vector3:
 			var w: Node3D = boat.call("windlass_node") as Node3D
 			if w != null:
 				return w.global_position + w.global_basis * Vector3(0.40, 0.10, 0.0)
-		"door_fwd", "door_aft":
+		"door_fwd", "door_aft", "door_wh":
 			var d: Node3D = boat.call("door_node", id) as Node3D
-			if d != null:
-				return d.to_global(Vector3(0.94, 1.62, 0.032))
-		"door_wh":
-			var dw: Node3D = boat.call("door_node", id) as Node3D
-			if dw != null:
-				return dw.to_global(Vector3(-0.94, 0.94, -0.032))
+			if d != null and boat.has_method("door_latch_local"):
+				return d.to_global(boat.call("door_latch_local", id))
 	if id.begins_with("sw_"):
 		var sw: Node3D = boat.call("switch_lever", id) as Node3D
 		if sw != null:

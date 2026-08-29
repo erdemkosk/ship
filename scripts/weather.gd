@@ -72,7 +72,7 @@ var _cloud_glow: MeshInstance3D
 var _cloud_mat: ShaderMaterial
 var _cloud_omni: OmniLight3D
 var _thunder_pl: Array[AudioStreamPlayer3D] = []
-var _thunder_wavs: Array[AudioStreamWAV] = []
+var _thunder_clips: Array[AudioStream] = []
 var _rain: GPUParticles3D
 var _lightning_timer: Timer
 var _cloud_offset := Vector2.ZERO
@@ -251,6 +251,17 @@ func sun_direction() -> Vector3:
 	return _sun.basis.z.normalized() if _sun != null else Vector3.UP
 
 
+func is_night() -> bool:
+	var ang := (time_of_day - 6.0) / 12.0 * PI
+	return sin(ang) * 65.0 < -4.0
+
+
+func sun_tint() -> Color:
+	if _sun == null:
+		return Color(1.0, 0.92, 0.82)
+	return _sun.light_color
+
+
 func _push_sun_to_seabed() -> void:
 	if ocean != null and ocean.has_method("set_seabed_sun"):
 		ocean.set_seabed_sun(sun_direction())
@@ -261,6 +272,7 @@ func set_underwater(on: bool) -> void:
 		return
 	_underwater = on
 	_apply_atmosphere()
+	_apply_rain()
 
 
 func _set_sky(pname: String, value: Variant) -> void:
@@ -429,13 +441,14 @@ func _apply_atmosphere() -> void:
 		_env.volumetric_fog_density = 0.010
 		_env.volumetric_fog_albedo = Color(0.12, 0.32, 0.34)
 		_env.volumetric_fog_emission = Color(0.04, 0.11, 0.12)
-		_env.volumetric_fog_anisotropy = 0.55
+		_env.volumetric_fog_anisotropy = 0.32
 		_env.volumetric_fog_ambient_inject = 0.45
 		_env.volumetric_fog_sky_affect = 0.0
 		_env.ambient_light_color = Color(0.05, 0.18, 0.20)
 		_env.ambient_light_energy = 1.05
 		_sun.light_energy *= 0.70
-		_sun.light_volumetric_fog_energy = 2.8
+		# Soft column, not a hard beam. Night moon is silver wash.
+		_sun.light_volumetric_fog_energy = 0.85 if is_night() else 1.45
 
 
 func _build_rain() -> void:
@@ -500,7 +513,7 @@ func _build_rain() -> void:
 func _apply_rain() -> void:
 	if _rain == null:
 		return
-	_rain.emitting = rain_amount > 0.01
+	_rain.emitting = rain_amount > 0.01 and not _underwater
 	# Bend the slider: rain does not feel twice as heavy at 100% as at 50%, it
 	# feels a little heavier. Front-load it so a middling setting already looks
 	# like weather you would not go out in.
@@ -879,13 +892,23 @@ func _build_weather_audio() -> void:
 
 
 func _build_thunder() -> void:
-	for i in 3:
-		_thunder_wavs.append(_synth_thunder(1000 + i * 97))
+	## The recording is a close dry crack. Distance does the rest: delay,
+	## loudness, and how much of the snap survives. Three voices so a
+	## restrike does not cut the rumble that is still rolling.
+	var rec: AudioStream = load("res://assets/audio/thunder_crack.mp3")
+	if rec != null:
+		_thunder_clips.append(rec)
+	else:
+		_thunder_clips.append(_synth_thunder(1000))
+		_thunder_clips.append(_synth_thunder(1097))
+		_thunder_clips.append(_synth_thunder(1194))
+	for _i in 3:
 		var p := AudioStreamPlayer3D.new()
 		p.bus = "Weather"
-		p.unit_size = 16.0
-		p.max_distance = 520.0
-		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		p.unit_size = 48.0
+		p.max_distance = 640.0
+		p.max_db = 3.0
+		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_DISABLED
 		add_child(p)
 		_thunder_pl.append(p)
 
@@ -917,7 +940,9 @@ func _synth_thunder(seed: int) -> AudioStreamWAV:
 
 
 func _queue_thunder(dist: float, sheet: bool, at: Vector3) -> void:
-	var delay := clampf(dist / 340.0, 0.07, 1.15)
+	## Sound lags light: 340 m/s, same as the real sky. Near strikes almost
+	## sit on the flash; a cell on the horizon arrives after a breath.
+	var delay := clampf(dist / 340.0, 0.04, 1.35)
 	var token := _thunder_token
 	get_tree().create_timer(delay).timeout.connect(
 			func() -> void: _play_thunder(token, dist, sheet, at))
@@ -926,18 +951,23 @@ func _queue_thunder(dist: float, sheet: bool, at: Vector3) -> void:
 func _play_thunder(token: int, dist: float, sheet: bool, at: Vector3) -> void:
 	if token != _thunder_token or not storm or _thunder_pl.is_empty():
 		return
-	var p: AudioStreamPlayer3D = _thunder_pl[randi() % _thunder_pl.size()]
-	if _thunder_wavs.is_empty():
+	if _thunder_clips.is_empty():
 		return
-	p.stream = _thunder_wavs[randi() % _thunder_wavs.size()]
+	var p: AudioStreamPlayer3D = _thunder_pl[randi() % _thunder_pl.size()]
+	p.stream = _thunder_clips[randi() % _thunder_clips.size()]
 	p.global_position = at + Vector3(0.0, 8.0, 0.0)
-	var lin := clampf(1.2 * (48.0 / maxf(dist, 22.0)), 0.07, 1.0)
+	# 36 m is the recording. 160 m is the same crack through a lot of air:
+	# late, quieter, and only the rumble. Sheet has no bolt nearby.
+	var nearness := clampf(1.0 - (dist - 32.0) / 200.0, 0.0, 1.0)
 	if sheet:
-		lin *= 0.55
+		nearness *= 0.38
+	var lin := lerpf(0.07, 1.05, nearness * nearness)
 	if _underwater:
-		lin *= 0.12
+		lin *= 0.10
 	p.volume_db = linear_to_db(maxf(lin, 0.0001))
-	p.pitch_scale = randf_range(0.78, 1.06) * (0.72 if sheet else 1.0)
+	p.pitch_scale = lerpf(0.68, 1.03, nearness) * randf_range(0.97, 1.04)
+	p.attenuation_filter_cutoff_hz = lerpf(780.0, 12000.0, nearness)
+	p.attenuation_filter_db = lerpf(-22.0, -4.0, nearness)
 	p.play()
 
 

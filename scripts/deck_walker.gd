@@ -355,6 +355,7 @@ func _swim(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
 		if ocean.has_method("get_seafloor_height"):
 			wpos.y = maxf(wpos.y, float(ocean.get_seafloor_height(wpos)) + 0.05)
 
+	wpos = _keep_out_of_hull(xf, wpos)
 	_swim_pos = wpos
 	pos = xf.affine_inverse() * wpos
 	vel = Vector3.ZERO
@@ -371,6 +372,84 @@ func _swim(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
 			and pos.y > float(boat.SEA_LADDER_BOT) - 0.6
 	if can_board and want_jump:
 		grab_sea_ladder(boat)
+
+
+func _keep_out_of_hull(xf: Transform3D, wpos: Vector3) -> Vector3:
+	## The sea is outside her. Swimming up under the keel used to put the
+	## eye in the cabin; the hull is a closed volume now.
+	var inv := xf.affine_inverse()
+	var feet: Vector3 = inv * wpos
+	var push := Vector3.ZERO
+	var worst := 0.0
+	for h in [0.10, 0.55, 1.05, EYE]:
+		var p: Vector3 = feet + Vector3(0.0, h, 0.0)
+		var q := _hull_escape(p)
+		var d: Vector3 = q - p
+		var pen := d.length()
+		if pen > worst:
+			worst = pen
+			push = d
+	if worst < 1e-4:
+		return wpos
+	var out: Vector3 = feet + push
+	var wn: Vector3 = xf.basis * push
+	if wn.length_squared() > 1e-6:
+		wn = wn.normalized()
+		var into := _swim_vel.dot(wn)
+		if into < 0.0:
+			_swim_vel -= wn * into
+	return xf * out
+
+
+func _hull_half_beam(z: float) -> float:
+	if z < -3.40:
+		var t := clampf((-3.40 - z) / 1.55, 0.0, 1.0)
+		return lerpf(1.82, 0.16, t * t)
+	if z > 4.80:
+		var t2 := clampf((z - 4.80) / 0.95, 0.0, 1.0)
+		return lerpf(1.92, 1.52, t2)
+	return 1.86
+
+
+func _hull_keel(z: float) -> float:
+	if z < -3.60:
+		return lerpf(-0.70, -0.22, clampf((-3.60 - z) / 1.40, 0.0, 1.0))
+	return -0.70
+
+
+func _hull_escape(p: Vector3) -> Vector3:
+	## Ladder pocket is the way back aboard — do not shove off the rungs.
+	if absf(p.x - 0.72) < 0.58 and p.z > 5.28 and p.y < 0.85:
+		return p
+	if p.z < -4.92 or p.z > 5.62:
+		return p
+	var hb := _hull_half_beam(p.z)
+	if absf(p.x) > hb + 0.04:
+		return p
+	var y0 := _hull_keel(p.z)
+	var y1 := 3.40 if (p.z > -0.60 and p.z < 4.75) else 1.18
+	if p.y <= y0 or p.y >= y1:
+		return p
+	var sx := 1.0 if p.x >= 0.0 else -1.0
+	var d_side := hb + 0.10 - absf(p.x)
+	var d_down := p.y - y0
+	var d_fore := p.z + 4.92
+	var d_aft := 5.62 - p.z
+	var out := p
+	out.y = y0 - 0.05
+	var best := d_down
+	if d_side < best:
+		best = d_side
+		out = p
+		out.x = sx * (hb + 0.12)
+	if d_fore < best:
+		best = d_fore
+		out = p
+		out.z = -5.02
+	if d_aft < best:
+		out = p
+		out.z = 5.74
+	return out
 
 
 # --- the boarding ladder ------------------------------------------------------
