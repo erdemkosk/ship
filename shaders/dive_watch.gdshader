@@ -87,10 +87,16 @@ float dotp(vec2 uv, vec2 c, float r) {
 }
 
 // Depth marker: a little arrow pointing down. Pressure: a gauge ring.
+//
+// The half-plane test this used to be had NO LOWER BOUND — every point below
+// the apex satisfied it, so the "arrow" was an infinite wedge that filled the
+// bottom-left of the display and swallowed the pressure row. Three planes, all
+// of them closed.
 float tri_down(vec2 uv, vec2 c, float s) {
 	vec2 p = (uv - c) * vec2(ASPECT, 1.0) / s;
-	float d = max(abs(p.x) * 1.5 - (0.55 - p.y), p.y - 0.55);
-	return smoothstep(0.16, -0.16, d);
+	float d = max(max(p.y - 0.42, -0.58 - p.y),
+			abs(p.x) - (p.y + 0.58) * 0.52);
+	return smoothstep(0.14, -0.14, d);
 }
 
 float ring(vec2 uv, vec2 c, float r) {
@@ -177,9 +183,20 @@ void fragment() {
 	col = mix(col, GREEN * 0.06, seg);     // the strokes' own body colour
 	col += vec3(scr) * 0.35;
 
+	// The crystal. A broad, soft reflection that slides across the glass as
+	// you turn your wrist, riding the same scratches the display already has —
+	// which is what tells the eye there is a sheet of glass in front of the
+	// numbers rather than a screen printed on the case.
+	float fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
+	vec3 vl = (vec3(0.0, 0.0, 1.0) * mat3(VIEW_MATRIX));
+	float band = 1.0 - abs(uv.y - 0.5 - vl.y * 0.35 - vl.x * 0.10) * 3.2;
+	band = clamp(band, 0.0, 1.0);
+	col += vec3(0.13, 0.15, 0.16) * (0.20 + 0.80 * scr / 0.30) * band * band * 0.20;
+	col += vec3(0.07, 0.085, 0.09) * fres * 0.7;
+
 	ALBEDO = col;
-	ROUGHNESS = 0.30;
-	SPECULAR = 0.35;
+	ROUGHNESS = mix(0.14, 0.34, scr / 0.30);
+	SPECULAR = 0.6;
 	METALLIC = 0.0;
 	// The strokes carry their own light; glow only turns them up and lets a
 	// faint wash bleed into the glass behind them.

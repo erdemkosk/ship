@@ -74,9 +74,11 @@ func _ready() -> void:
 	if _want_splash():
 		add_child((load("res://scripts/splash.gd") as GDScript).new())
 
-	# The menu is the default front door: it appears when the game is launched
-	# like a game — no flags — and stays out of the way of every verification
-	# probe, all of which arrive with arguments and want the world bare.
+	# The menu needs NOTHING to appear: double-click, editor play, exported
+	# build — every ordinary launch opens on it. The only thing that skips it
+	# is a command-line verification probe (--probe-*, --dive-test, ...),
+	# because those need the bare world on frame one; a player never passes
+	# arguments, so a player never sees anything but the menu.
 	var uargs := OS.get_cmdline_user_args()
 	var want_menu := true
 	for a in uargs:
@@ -159,6 +161,8 @@ func _ready() -> void:
 			_switch_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--radio-shot="):
 			_radio_shot(rig, boat, arg.get_slice("=", 1))
+		elif arg.begins_with("--watch-sweep="):
+			_watch_sweep(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--watch-shot="):
 			_watch_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--maskdive="):
@@ -488,6 +492,43 @@ func _menu_shot(menu: Node3D, dir: String) -> void:
 	await _shot(dir, "menu3_push")
 	await get_tree().create_timer(2.6).timeout
 	await _shot(dir, "menu4_ingame")
+	get_tree().quit()
+
+
+func _watch_sweep(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## The strap, swept on the LIT DECK with the parts colour-coded.
+	##
+	## Underwater was tried and is useless for this: the diver keeps sinking,
+	## so every frame of the sweep is darker than the last and the final one is
+	## black. On deck the light is constant, and with the band flat red the
+	## question answers itself — a link inside the arm is not drawn at all, a
+	## link outside it breaks the silhouette.
+	var w: RefCounted = rig.get("_walker")
+	rig.set_mode(1)
+	var pnl: Node = get_tree().get_first_node_in_group("ui_panel")
+	if pnl != null:
+		var pc: CanvasItem = pnl.get("_panel") as CanvasItem
+		if pc != null:
+			pc.visible = false
+	await get_tree().create_timer(2.2).timeout
+	boat.set("helm_engaged", false)
+	w.call("spawn_at", Vector3(0.0, 0.63, 3.0))
+	rig.set("pitch", -0.25)
+	await get_tree().create_timer(0.4).timeout
+	Input.action_press("watch")
+	await get_tree().create_timer(1.0).timeout
+	var hr: Node = (rig.get("_arms") as Node).get("rig")
+	for k in [0, 3, 5, 7, 9, 11]:
+		hr.call("set_strap_tight", float(k) * 0.001)
+		await get_tree().create_timer(0.25).timeout
+		await _shot(dir, "pen_%03d_skin" % k)
+		hr.call("set_arm_visible", false)
+		await get_tree().create_timer(0.20).timeout
+		await _shot(dir, "pen_%03d_bare" % k)
+		hr.call("set_arm_visible", true)
+		await get_tree().create_timer(0.15).timeout
+		print("[sweep] palm off %d mm" % k)
+	Input.action_release("watch")
 	get_tree().quit()
 
 

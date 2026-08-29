@@ -76,7 +76,7 @@ func _build() -> void:
 	_panel.add_child(vbox)
 
 	var title := Label.new()
-	title.text = "DARK SEA"
+	title.text = "DEEP TRAUMA"
 	title.add_theme_font_size_override("font_size", 18)
 	title.add_theme_color_override("font_color", Color(0.75, 0.8, 0.75))
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

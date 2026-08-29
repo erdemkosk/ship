@@ -438,28 +438,32 @@ func _drive_watch(delta: float) -> void:
 	# in it reads as a puppet on a string. The end point stays far enough out
 	# that the forearm passes UNDER the frame instead of through the lens.
 	var lo := Vector3(-0.30, -0.62, -0.34)
-	var hi := Vector3(0.105, -0.092, -0.300)
+	# Higher than it used to sit, because the wrist is straighter now. With a
+	# real break in the wrist the watch could hang low and still face you; held
+	# in line with the arm it only comes into view if the whole arm comes up —
+	# which is exactly what a person does.
+	var hi := Vector3(0.055, -0.062, -0.268)
 	var pt: Vector3 = lo.lerp(hi, u)
 	pt.x += sin(u * PI) * -0.05
 	var contact: Vector3 = c * pt
-	# The wrist angle is not tuned, it is FIXED — and that is the whole fix.
+	# The POSE is what presents the watch, because nothing else is allowed to:
+	# the case is strapped flat to the wrist and does not turn toward anyone.
 	#
-	# Every earlier pass chose a fingers direction and a face direction by eye,
-	# and the wrist break was whatever angle happened to fall between them and
-	# the arm; it kept coming out cranked. Now the hand is built FROM the
-	# forearm: take the live shoulder-to-contact line, extend the wrist exactly
-	# seventeen degrees off it toward the eye, and derive everything else. The
-	# break cannot be sharp because the break is the one number we set.
+	# The gesture is the one everybody actually makes — the forearm swung up
+	# across the chest, and the hand very nearly IN LINE with it. That last
+	# part is the whole of looking natural: a wrist held out to read a watch
+	# barely breaks at all. So the hand is built FROM the live forearm line
+	# with a small, fixed extension, rather than from a direction picked by
+	# eye — pick it by eye and the break is whatever falls out, which is how
+	# it kept coming back cranked.
 	#
-	# Seventeen degrees does not present the display on its own — the case's
-	# own wedged mount (see hand_rig._build_watch) contributes the rest, the
-	# way a real dive computer's inclined face does.
+	# Supination is free and extension is rationed: the face is turned toward
+	# the eye by rolling the forearm, which costs nothing anatomically, and
+	# never by bending the wrist further.
 	var fore: Vector3 = (contact - (rig.shoulder_global("L") as Vector3)).normalized()
 	var to_eye: Vector3 = (c.origin - contact).normalized()
-	# The dorsal direction: as much toward the eye as staying perpendicular to
-	# the forearm allows. Supination is free; extension is what we ration.
 	var dorsal: Vector3 = (to_eye - to_eye.project(fore)).normalized()
-	var ext := deg_to_rad(17.0)
+	var ext := deg_to_rad(12.0)
 	var fingers: Vector3 = (fore * cos(ext) + dorsal * sin(ext)).normalized()
 	var face_n: Vector3 = (dorsal * cos(ext) - fore * sin(ext)).normalized()
 	var palm: Vector3 = -face_n

@@ -88,6 +88,31 @@ var _measured := {}
 ## The dive watch on the left wrist: its face material (the scripts feed it
 ## time / depth / pressure every frame) and its mount.
 var _watch_mat: ShaderMaterial
+## Kept so the standoff can be swept at runtime and CHOSEN off screenshots,
+## which is the only thing that has actually worked on this arm.
+var _watch_holder: Node3D
+var _watch_head: Node3D
+## Strap links, kept with their angles so the band's radius can be swept and
+## CHOSEN off screenshots — the same way the standoff and the tilt were.
+var _strap: Array = []
+var _strap_geom := {}
+## 13 degrees, chosen off a six-frame sweep from 0 to 25: at 0 the arm still
+## cuts the bottom-left of the display, past 20 the case starts lifting off
+## the wrist. Re-choose it with --watch-sweep if the arm or the pose changes.
+var _watch_tilt := 0.227
+## Across-arm radius as a fraction of the dorsal one.
+const STRAP_RATIO := 1.18
+## What the band has closed to by the time it is under the wrist, and what it
+## leaves the case at. The front is over 1.0 — the caseback plane is where the
+## case sits, and the case is stood off far enough to clear a wrist that
+## bulges when the pose bends it; the links either side of it have to clear the
+## same bulge or they bury themselves in the skin beside the watch.
+var strap_tight := 0.66
+const STRAP_FRONT := 1.12
+@export var watch_axes_debug := false
+var _watch_n := Vector3.UP
+var _watch_ax := Vector3.FORWARD
+var _watch_invs := 1.0
 ## Palm-normal sign per side. The cross-product handedness of this rig's rest
 ## pose was settled empirically (see _handcal bar test), not assumed: +1 keeps
 ## the measured direction, -1 flips it.
@@ -253,6 +278,90 @@ func _find_skeleton(n: Node) -> Skeleton3D:
 	return null
 
 
+func _strap_close(a: float) -> float:
+	## How much the band has tightened by the time it has wrapped `a` radians
+	## from the case. 1.0 where it leaves the lugs, STRAP_TIGHT under the arm.
+	var t: float = clampf((a - 0.70) / 2.35, 0.0, 1.0)
+	return lerpf(STRAP_FRONT, strap_tight, t * t * (3.0 - 2.0 * t))
+
+
+func set_arm_visible(on: bool) -> void:
+	## Hide the SKIN but keep the watch. Shooting the same frame twice, once
+	## each way, is a penetration test: anything that shows only when the arm
+	## is gone is inside the arm. Nothing else has settled this reliably —
+	## every judgement made from a single view was wrong about something.
+	if _watch_holder == null:
+		return
+	for node in _walk_children(_model):
+		if not (node is MeshInstance3D):
+			continue
+		# Walk UP to see whether this belongs to the watch. Checking only the
+		# immediate parent's name hid the watch along with the arm, because
+		# every one of its parts hangs off an unnamed Node3D.
+		var anc: Node = node
+		var mine := false
+		while anc != null:
+			if anc == _watch_holder:
+				mine = true
+				break
+			anc = anc.get_parent()
+		if not mine:
+			(node as MeshInstance3D).visible = on
+
+
+func set_strap_tight(v: float) -> void:
+	## Now sweeps the PALM OFFSET, which is the parameter that actually
+	## decides whether the band clears the arm.
+	if _watch_holder == null:
+		return
+	var rn: float = float(_strap_geom.get("rn0", 0.024)) + v
+	_strap_geom["rn"] = rn
+	_strap_geom["axis"] = float(_strap_geom.get("axis0", -0.030)) - v
+	set_strap_scale(1.0)
+
+
+func set_strap_scale(k: float) -> void:
+	var rn: float = float(_strap_geom.get("rn", 0.024)) * k
+	var ra: float = rn * float(_strap_geom.get("ratio", 0.86))
+	var az: float = float(_strap_geom.get("axis", -0.030))
+	for e in _strap:
+		var a: float = e[1]
+		var r: float = rn * ra / sqrt(pow(ra * cos(a), 2.0) + pow(rn * sin(a), 2.0))
+		(e[0] as Node3D).position = Vector3(0.0, sin(a) * r, az + cos(a) * r)
+
+
+func _flat(c: Color) -> ShaderMaterial:
+	## Flat, unmistakable colour on the same shader, so the debug material can
+	## stand in for a real one without changing any types.
+	var m := _watch_mtl(c, c, Vector3(1, 1, 1), 1.0, 0.0, 0.0, 0.0)
+	return m
+
+
+func _watch_mtl(base: Color, worn_c: Color, half: Vector3, rough: float,
+		metal: float, wear: float, rib: float) -> ShaderMaterial:
+	var m := ShaderMaterial.new()
+	m.shader = load("res://shaders/watch_body.gdshader")
+	m.set_shader_parameter("base_color", base)
+	m.set_shader_parameter("worn_color", worn_c)
+	m.set_shader_parameter("half_size", half)
+	m.set_shader_parameter("rough_base", rough)
+	m.set_shader_parameter("metal_base", metal)
+	m.set_shader_parameter("wear", wear)
+	m.set_shader_parameter("rib", rib)
+	return m
+
+
+func set_watch_tilt(v: float) -> void:
+	_watch_tilt = v
+	if _watch_head != null:
+		_watch_head.rotation.y = v
+
+
+func set_watch_standoff(v: float) -> void:
+	if _watch_holder != null:
+		_watch_holder.position = (_watch_n * v - _watch_ax * 0.032) * _watch_invs
+
+
 func set_watch_display(h: float, m: float, t: float, depth: float,
 		press: float, glow: float) -> void:
 	if _watch_mat == null:
@@ -283,69 +392,163 @@ func _build_watch() -> void:
 	var sem: Basis = (_sem_inv["L"] as Basis).inverse()
 	var F: Vector3 = sem.z.normalized()          # wrist -> fingers
 	var n: Vector3 = (-sem.y).normalized()       # back of the wrist
-	# The display reads ACROSS the arm, not along it. In first person the
-	# forearm always crosses the frame on a diagonal — geometry allows nothing
-	# else with the shoulder behind the lens — so digits laid along the arm
-	# are permanently tilted with it. Laid across, plus a small fixed roll
-	# trim, they sit level in the raised pose. The sign of the cross product
-	# and the trim were both settled against screenshots, like every other
-	# axis on this rig.
-	var X: Vector3 = (F.cross(n)).normalized()
+	# The display reads ALONG the arm, elbow toward hand. The proof is the
+	# gesture everyone makes: forearm horizontal across the chest — and the
+	# text on a real watch sits level, reading with the arm. (This axis went
+	# across-arm for one revision, "fixed" against a pose that held the arm
+	# vertically; the pose was the thing that was wrong.)
+	#
+	# And that is ALL the orientation there is. An earlier pass added a roll
+	# trim and a wedge so the face met the raised eye squarely — and it read
+	# instantly as wrong, because a watch does not look at you. It is strapped
+	# flat to the wrist and goes where the wrist goes; whatever angle your
+	# forearm presents is the angle you read it at.
+	# Along the arm, in the plane of the wrist's own back.
+	#
+	# An attempt to use the true elbow-to-wrist axis instead was reverted, and
+	# the sweep is why: deriving `arm_ax` from the forearm bone and then
+	# squaring the dorsal normal against it rotated the mount round the wrist,
+	# so the case sat on the FLANK. Photographed at six standoffs from 22 to
+	# 32 mm, the arm cut the same diagonal across the display in every one —
+	# distance cannot fix a direction. The finger axis, projected into the
+	# dorsal plane, is what puts it on the back of the wrist where it belongs.
+	var X: Vector3 = (F - F.project(n)).normalized()
+	var arm_ax: Vector3 = X
 	var Y: Vector3 = n.cross(X).normalized()
 	# Bone space is not metres; _measured.scale is the factor the palm-contact
 	# maths already trusts, so the watch is authored in metres and converted
 	# through the same number.
 	var inv_s: float = 1.0 / maxf(float(_measured.get("scale", 1.0)), 1e-6)
+	# How far out to stand it off the bone — MEASURED off the arm mesh, not
+	# guessed. A fixed 2.05 cm was right for exactly one wrist rotation; the
+	# moment the reading pose changed, the case was sitting inside the
+	# forearm. Nothing else in this rig assumes a dimension it could measure,
+	# and the thickness of an arm is no different: find the skin, and put the
+	# caseback on it.
+	# Measured on this rig: skin about 21 mm out from the wrist bone, so the
+	# caseback sits a millimetre and a half proud of the arm. The old fixed
+	# 20.5 put the caseback SEVEN MILLIMETRES inside it — invisible in the
+	# pose it was tuned against, and buried the moment the wrist turned.
+	var across: Vector3 = arm_ax.cross(n).normalized()
+	# Part identification: every piece of the watch in its own flat colour, so
+	# a bad-looking fragment can be NAMED off a screenshot instead of guessed
+	# at. case=blue  bezel=yellow  screen=grey  strap=red  keeper=green
+	if watch_axes_debug:
+		pass
+	# How far off the bone the case stands. A CONSTANT, verified against
+	# screenshots, and that is a deliberate retreat from measuring it.
+	#
+	# Measuring was tried properly: gather the arm vertices in the wrist bone's
+	# rest frame, take the support function of the cross-section, stand the
+	# caseback on it. It cannot work on this asset. There are 55 vertices in
+	# the whole strip of forearm the watch covers, so the rest-pose hull is a
+	# crude polygon; and the pose the watch is read in extends the wrist far
+	# enough that the skinned silhouette leaves that hull anyway. Three
+	# successive "measured" answers — 21.4, then 14.6 mm — each buried the case
+	# somewhere different. A number that has been looked at beats a number that
+	# has been derived from the wrong data.
+	# 30 mm, chosen off a six-frame sweep from 22 to 32: below 28 the wrist
+	# cuts into the bottom of the display, above 30 the case starts to lift
+	# off the arm. The sweep lives on as --watch-sweep if it ever needs
+	# re-choosing (a different arm asset, a different reading pose).
+	const WRIST_STANDOFF := 0.0300
+	var back_off: float = WRIST_STANDOFF
+	_watch_n = n
+	_watch_ax = arm_ax
+	_watch_invs = inv_s
 	var holder := Node3D.new()
+	holder.name = "WatchHolder"
+	_watch_holder = holder
 	holder.transform = Transform3D(
-			Basis(X, Y, n).orthonormalized()
-			* Basis(Vector3(0, 0, 1), 0.55)
-			* Basis.from_scale(Vector3.ONE * inv_s),
-			(n * 0.0205 - F * 0.012) * inv_s)
+			Basis(X, Y, n).orthonormalized() * Basis.from_scale(Vector3.ONE * inv_s),
+			(n * back_off - arm_ax * 0.032) * inv_s)
 	ba.add_child(holder)
-	# The case sits on a WEDGE, inclined toward the elbow — dive computers are
-	# built this way for exactly this reason: the display meets a raised
-	# forearm at an angle, so the case leans to meet the eye and the wrist
-	# does not have to crank the rest of the way. The strap stays flat on the
-	# holder; only the head tilts.
+	# Flat on the wrist, full stop. (A wedge lived here once, leaning the case
+	# toward the eye — it made the watch follow the viewer like a screen, and
+	# a thing strapped to a wrist must do exactly the opposite.)
 	var head := Node3D.new()
 	head.position = Vector3(-0.002, 0.0, -0.0015)
-	head.rotation.x = -0.30
+	# Tilted to follow the TAPER of the forearm. The arm is fatter toward the
+	# elbow, so a flat case lying parallel to the bone buries its elbow-side
+	# edge and floats its wrist-side one — which is why every intrusion so far
+	# has been at the same corner of the display. Lifting that edge is what
+	# lets a rigid plate sit on a cone.
+	head.rotation.y = _watch_tilt
+	_watch_head = head
 	holder.add_child(head)
 
-	var resin := StandardMaterial3D.new()
-	resin.albedo_color = Color(0.085, 0.09, 0.095)
-	resin.roughness = 0.66
-	var worn := StandardMaterial3D.new()
-	# The bezel's paint is gone where a decade of cuffs rubbed it: dull steel.
-	worn.albedo_color = Color(0.165, 0.17, 0.175)
-	worn.roughness = 0.45
-	worn.metallic = 0.55
-	var rubber := StandardMaterial3D.new()
-	rubber.albedo_color = Color(0.045, 0.047, 0.05)
-	rubber.roughness = 0.94
+	# Axis markers, for when the frame has to be SEEN rather than reasoned
+	# about: red = local X, green = local Y, blue = local Z. Two revisions of
+	# the strap wrapped the wrong plane because the answer was inferred.
+	if watch_axes_debug:
+		for ax in [[Vector3(0.05, 0, 0), Color(1, 0, 0)],
+				[Vector3(0, 0.05, 0), Color(0, 1, 0)],
+				[Vector3(0, 0, 0.05), Color(0.2, 0.4, 1)]]:
+			var rod := MeshInstance3D.new()
+			var rm := BoxMesh.new()
+			rm.size = Vector3(0.004, 0.004, 0.004) + (ax[0] as Vector3).abs() * 2.0
+			rod.mesh = rm
+			var em := StandardMaterial3D.new()
+			em.albedo_color = ax[1]
+			em.emission_enabled = true
+			em.emission = ax[1]
+			em.emission_energy_multiplier = 3.0
+			rod.material_override = em
+			rod.position = (ax[0] as Vector3)
+			rod.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			holder.add_child(rod)
+
+	# All four parts share one shader; the numbers are the story. See
+	# shaders/watch_body.gdshader — the wear is derived from where the geometry
+	# is, so every corner this thing has ever been knocked on is already worn.
+	var resin := _watch_mtl(Color(0.075, 0.080, 0.086), Color(0.30, 0.31, 0.33),
+			Vector3(0.0180, 0.0155, 0.0058), 0.70, 0.0, 0.85, 0.0)
+	var worn := _watch_mtl(Color(0.140, 0.145, 0.152), Color(0.62, 0.63, 0.64),
+			Vector3(0.0155, 0.0131, 0.0063), 0.44, 0.55, 1.45, 0.0)
+	var rubber := _watch_mtl(Color(0.036, 0.038, 0.041), Color(0.20, 0.20, 0.21),
+			Vector3(0.0100, 0.0083, 0.0021), 0.93, 0.0, 0.75, 1.0)
+	# Fine moulded ribs — six or seven across each link. At the first frequency
+	# a link spanned barely one cycle, so every bakla came out as one light
+	# band and one dark one and the strap read as a tank track.
+	rubber.set_shader_parameter("rib_freq", 2350.0)
+	rubber.set_shader_parameter("metal_gain", 0.0)
+	if watch_axes_debug:
+		resin = _flat(Color(0.10, 0.30, 1.00))    # case
+		worn = _flat(Color(1.00, 0.85, 0.10))     # bezel / metal
+		rubber = _flat(Color(1.00, 0.10, 0.10))   # strap
 
 	# Case, worn bezel standing a little proud, and the crystal's frame.
+	#
+	# 36 x 31, and the width is the part that matters. A FLAT plate cannot sit
+	# on a round arm if it is as wide as the arm: this forearm measures about
+	# 21 mm from bone to skin, so a 42 mm case spans the full diameter and its
+	# two edges are forced down to the level of the bone axis — buried, however
+	# far you stand the centre off. It has to sit on the CROWN of the wrist,
+	# which means clearly narrower than the wrist. (45 x 50 first, then 40 x 42,
+	# both photographed with the arm cutting across the display.)
 	var case := MeshInstance3D.new()
 	var cm := BoxMesh.new()
-	cm.size = Vector3(0.0450, 0.0500, 0.0125)
+	cm.size = Vector3(0.0360, 0.0310, 0.0115)
 	case.mesh = cm
 	case.material_override = resin
 	head.add_child(case)
 	var bez := MeshInstance3D.new()
 	var bm := BoxMesh.new()
-	bm.size = Vector3(0.0392, 0.0430, 0.0136)
+	bm.size = Vector3(0.0310, 0.0262, 0.0126)
 	bez.mesh = bm
 	bez.material_override = worn
 	head.add_child(bez)
+	# No lugs. The band runs straight out of the case sides — see the angle
+	# list below, which starts where the case's own edge ends, so the first
+	# link emerges from under it with nothing bridging and nothing to notice.
 	var screen := MeshInstance3D.new()
 	var qm := QuadMesh.new()
-	qm.size = Vector2(0.0320, 0.0200)
+	qm.size = Vector2(0.0248, 0.0155)
 	screen.mesh = qm
 	_watch_mat = ShaderMaterial.new()
 	_watch_mat.shader = load("res://shaders/dive_watch.gdshader")
 	screen.material_override = _watch_mat
-	screen.position = Vector3(0.0, 0.0, 0.0072)
+	screen.position = Vector3(0.0, 0.0, 0.0067)
 	head.add_child(screen)
 	# Two side buttons — light on the left, mode on the right, neither of
 	# which does anything, which is also period-correct by year three.
@@ -358,29 +561,97 @@ func _build_watch() -> void:
 		bc.radial_segments = 8
 		btn.mesh = bc
 		btn.material_override = worn
-		btn.position = Vector3(0.0, by * 0.0262, -0.0012)
+		btn.position = Vector3(0.0, by * 0.0178, -0.0014)
 		head.add_child(btn)
 
 	# The strap: stiff old rubber, in segments around the wrist, with a keeper.
+	# The strap wraps the arm, so its radius comes off the same measurement:
+	# the band rides just outside the skin instead of a hardcoded circle that
+	# happened to fit one rotation.
+	# Enough links, close enough together, to read as one continuous band all
+	# the way round — and each one measures the arm IN ITS OWN DIRECTION. A
+	# single radius drew a circle round an elliptical forearm: it bit into the
+	# skin at the sides and stood clear of the silhouette at the top, which is
+	# the tab that was sticking out past the arm.
+	# The band is centred ON THE BONE. It was centred 5.8 mm off it, because
+	# the holder's origin is the case FACE and that offset was never taken
+	# back out: at twelve o'clock the ring then came out above the caseback,
+	# inside the case, and round the sides it stood clear of the skin. That is
+	# the band floating off the wrist.
+	# The band circles in the HOLDER's frame, square to the forearm — a strap
+	# is a ring round a limb. (It was moved into the case's tilted frame once,
+	# to make the joint symmetrical; tilting the ring walks one side of it
+	# toward the elbow, where the arm is thicker, and drove it into the flesh.)
+	#
+	# And the ring is NOT centred on the wrist bone. The bone runs close under
+	# the back of the wrist — there is almost no flesh there and a good deal on
+	# the palm side — so a ring centred on it is off-centre in the arm: correct
+	# at the top, buried at the bottom. Every attempt to fix that with radius
+	# alone failed, in both directions, because it is not a radius problem.
+	#
+	# Measured, not guessed: the watch was rendered twice per setting, once
+	# with the arm and once with it hidden, and the strap's pixels counted in
+	# each. Anything visible only in the bare frame is inside the arm. Centred
+	# on the bone the band never got above 83 per cent visible however it was
+	# sized; offset toward the palm it clears completely.
+	# 6 mm. The pixel test is noisier than it looks — part of the band is
+	# legitimately hidden BEHIND THE HAND from the reading angle, so anything
+	# short of 100 per cent does not necessarily mean penetration, and only a
+	# band big enough to be wrong reaches 100. 6 mm is where the ring stops
+	# reading as buried without starting to read as a hoop.
+	var palm_off := 0.0060
+	var axis_z: float = -back_off - palm_off
+	var rad_n: float = back_off - 0.0058 + palm_off
+	var rad_a: float = rad_n * STRAP_RATIO
+	_strap_geom = {"rn": rad_n, "ratio": STRAP_RATIO, "axis": axis_z,
+			"rn0": back_off - 0.0058, "axis0": -back_off}
 	for sgn: float in [-1.0, 1.0]:
-		for a_deg: float in [42.0, 74.0, 106.0]:
+		# Starting at the LUGS: below about fifty degrees the ring runs under
+		# the case, so links there are buried inside it and the strap appeared
+		# to begin in mid-air beside the watch rather than at its ends. Close
+		# enough together, and wide enough, that the band has no gaps in it.
+		# From 36 degrees — where the ellipse clears the side of the case, so
+		# the strap appears to come out of it — round to 176, which meets its
+		# opposite number under the wrist. The wrap is complete: there is no
+		# arc of bare arm left anywhere except under the case itself.
+		for a_deg: float in [40.0, 55.0, 70.0, 85.0, 100.0, 115.0, 130.0,
+				145.0, 160.0, 175.0]:
 			var a: float = deg_to_rad(a_deg) * sgn
+			var r: float = rad_n * rad_a / sqrt(
+					pow(rad_a * cos(a), 2.0) + pow(rad_n * sin(a), 2.0))
+
 			var sm2 := MeshInstance3D.new()
 			var sb := BoxMesh.new()
-			sb.size = Vector3(0.0210, 0.0175, 0.0038)
+			# Long along the arm, narrow across it: that is a strap link.
+			sb.size = Vector3(0.0200, 0.0165, 0.0042)
 			sm2.mesh = sb
 			sm2.material_override = rubber
-			sm2.position = Vector3(0.0,
-					sin(a) * 0.0300, -0.0210 + cos(a) * 0.0295)
+			# Placed on the measured surface, then referred back to the holder,
+			# whose origin is the case face rather than the bone.
+			# AROUND the arm, in the across x dorsal plane.
+			#
+			# Which plane that is was finally settled by DRAWING the frame —
+			# three coloured rods along the holder's own axes (watch_axes_debug)
+			# — after two revisions had guessed it from the case's proportions
+			# and from a sweep, and guessed wrong in both directions. Local X
+			# runs along the arm, Y across it, Z out of the wrist.
+			sm2.position = Vector3(0.0, sin(a) * r, axis_z + cos(a) * r)
 			sm2.rotation.x = -a
 			holder.add_child(sm2)
+			_strap.append([sm2, a])
+	# The buckle keeper, on the underside where the tail doubles back.
 	var keeper := MeshInstance3D.new()
 	var km := BoxMesh.new()
-	km.size = Vector3(0.0230, 0.0075, 0.0052)
+	km.size = Vector3(0.0105, 0.0135, 0.0068)
 	keeper.mesh = km
-	keeper.material_override = rubber
-	keeper.position = Vector3(0.0, 0.0330, -0.0092)
-	keeper.rotation.x = deg_to_rad(-38.0)
+	keeper.material_override = (_flat(Color(0.1, 1.0, 0.2)) if watch_axes_debug
+			else rubber)
+	var ka := deg_to_rad(152.0)
+	var kr: float = rad_n * rad_a / sqrt(
+			pow(rad_a * cos(ka), 2.0) + pow(rad_n * sin(ka), 2.0))
+	kr += 0.0026
+	keeper.position = Vector3(0.0, sin(ka) * kr, axis_z + cos(ka) * kr)
+	keeper.rotation.x = -ka
 	holder.add_child(keeper)
 	# NOT _shadowless(ba): that helper also repaints every MeshInstance3D with
 	# the arm's skin texture — run it here and the watch becomes a flesh watch.
@@ -389,6 +660,52 @@ func _build_watch() -> void:
 		if c is GeometryInstance3D:
 			(c as GeometryInstance3D).cast_shadow = \
 					GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+func _probe_arm(ax: Vector3, n: Vector3, across: Vector3) -> void:
+	## The arm's actual radius under the watch, in metres, direction by
+	## direction. Banded along the axis the debug rods proved is the arm's —
+	## the earlier attempt at this banded along the FINGER axis and sliced the
+	## limb diagonally, which is why it returned nonsense and was abandoned.
+	var wb: int = _end_bone.get("L", -1)
+	var s_m: float = float(_measured.get("scale", 1.0))
+	if wb < 0 or s_m <= 1e-6:
+		return
+	var rest_inv: Transform3D = skeleton.get_bone_global_rest(wb).affine_inverse()
+	var sk_inv: Transform3D = skeleton.global_transform.affine_inverse()
+	var pts := PackedVector3Array()
+	for node in _walk_children(_model):
+		if not (node is MeshInstance3D):
+			continue
+		var mi := node as MeshInstance3D
+		if mi.mesh == null:
+			continue
+		var to_bone: Transform3D = rest_inv * sk_inv * mi.global_transform
+		for si in mi.mesh.get_surface_count():
+			var arr: Array = mi.mesh.surface_get_arrays(si)
+			if arr.is_empty():
+				continue
+			for v: Vector3 in (arr[Mesh.ARRAY_VERTEX] as PackedVector3Array):
+				var p: Vector3 = (to_bone * v) * s_m
+				var al: float = p.dot(ax)
+				if al > 0.005 or al < -0.070:
+					continue
+				if (p - ax * al).length() > 0.060:
+					continue
+				pts.append(p)
+	for lbl in [["dorsal", n], ["lateral+", across], ["lateral-", -across],
+			["palmar", -n]]:
+		var d: Vector3 = lbl[1]
+		var best := -1e9
+		for p: Vector3 in pts:
+			var al: float = p.dot(ax)
+			if absf(al + 0.032) > 0.014:
+				continue
+			var r: float = (p - ax * al).dot(d)
+			if r > best:
+				best = r
+		print("[arm] %-9s %.4f m" % [lbl[0], best])
+	print("[arm] verts in strip = %d" % pts.size())
 
 
 func _walk_children(n: Node) -> Array:
