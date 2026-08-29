@@ -115,9 +115,7 @@ func _ready() -> void:
 	_cam.current = true
 	_cam.top_level = true  # free of rig transform; we place it explicitly
 	_cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
-	# New hand system: measured IK rig + per-hand grip claims (scripts/hands/).
-	# The old fps_arms.gd is left on disk untouched — swap this one line back to
-	# fall straight over to it.
+	# Measured IK rig + per-hand grip claims (scripts/hands/).
 	_arms = (load("res://scripts/hands/hands.gd") as GDScript).new()
 	add_child(_arms)
 	_arms.setup(_cam)
