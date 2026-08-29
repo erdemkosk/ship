@@ -1,7 +1,7 @@
 shader_type canvas_item;
 render_mode unshaded, blend_mix;
 
-uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D screen_texture : hint_screen_texture, filter_linear;
 uniform float amount : hint_range(0.0, 1.0) = 0.0;
 uniform float wave_time = 0.0;
 uniform vec4 tint : source_color = vec4(0.02, 0.08, 0.10, 1.0);

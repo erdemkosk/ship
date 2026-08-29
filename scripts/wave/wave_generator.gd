@@ -410,17 +410,24 @@ func _dispatch_cascade(cl: int, i: int) -> void:
 				alpha, omega, p.wind_speed, deg_to_rad(p.wind_direction), DEPTH,
 				p.swell, p.detail, p.spread, p.k_min, p.k_max, i, 0]))
 		p.should_generate_spectrum = false
+		# Spectrum writes the image; modulate reads it. Metal often lets this
+		# race; Vulkan/NVIDIA does not — garbage spectrum = folded waves.
+		context.compute_list_add_barrier(cl)
 	pipelines["modulate"].call(context, cl, RenderingContext.create_push_constant(
 			[p.tile_length, p.tile_length, DEPTH, p.time, i, 0, 0, 0]))
+	context.compute_list_add_barrier(cl)
 
 	var fft_pc := RenderingContext.create_push_constant([i, 0, 0, 0])
 	# No second transpose: rotating the field by PI/2 is invisible on an ocean.
 	pipelines["fft"].call(context, cl, fft_pc)
+	context.compute_list_add_barrier(cl)
 	pipelines["transpose"].call(context, cl, fft_pc)
 	context.compute_list_add_barrier(cl)
 	pipelines["fft"].call(context, cl, fft_pc)
+	context.compute_list_add_barrier(cl)
 	pipelines["unpack"].call(context, cl, RenderingContext.create_push_constant(
 			[i, p.whitecap, p.foam_grow_rate, p.foam_decay_rate]))
+	context.compute_list_add_barrier(cl)
 
 
 func _on_readback(bytes: PackedByteArray) -> void:

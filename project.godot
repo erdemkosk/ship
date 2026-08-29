@@ -19,6 +19,7 @@ config/features=PackedStringArray("4.7", "Forward Plus")
 window/size/viewport_width=1600
 window/size/viewport_height=900
 window/dpi/allow_hidpi=false
+window/vsync/vsync_mode=1
 
 [physics]
 
