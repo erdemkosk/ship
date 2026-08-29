@@ -54,6 +54,15 @@ float sky_fbm(vec2 p, int octaves) {
 	return v;
 }
 
+// Coverage 0 is a clear sky. The old thresholds still spawned a deck at 0
+// because FBM sits around 0.5 and the floor was 0.52.
+float sky_cloud_mask(float n, float coverage, float lo0, float hi0, float lo1, float hi1) {
+	float c = clamp(coverage, 0.0, 1.0);
+	float lo = mix(lo0, lo1, c);
+	float hi = mix(hi0, hi1, c);
+	return smoothstep(lo, hi, n) * smoothstep(0.0, 0.06, c);
+}
+
 // blur: 0 = mirror (sky dome / calm water), 1 = fully diffuse (rough water).
 // Rough reflections lose cloud detail and the sun disk long before they lose
 // the overall luminance — that's what the blur term models.
@@ -76,21 +85,17 @@ vec3 sky_color_n(vec3 dir, float blur, float disk_mul, int layers) {
 	vec2 uv = dir.xz / max(dir.y, 0.06) * 0.32 + cloud_offset;
 	float warp = sky_fbm(uv * 2.3 + vec2(cloud_time * 0.015, 0.0), oct);
 	float n = sky_fbm(uv * 1.15 + warp * 0.4, oct);
-	float cover_lo = 0.52 - cloud_coverage * 0.47;
-	float cover_hi = 0.78 - cloud_coverage * 0.22;
-	float m = smoothstep(cover_lo, cover_hi, n);
+	float m = sky_cloud_mask(n, cloud_coverage, 1.08, 1.18, 0.06, 0.52);
 	m *= smoothstep(0.015, 0.14, dir.y);
-	// A blurred reflection sees the cloud deck as an average, not as shapes.
 	m = mix(m, cloud_coverage * 0.8 * smoothstep(0.015, 0.22, dir.y), blur * 0.75);
 
-	// --- lower cloud deck (parallax) ---
 	float m_low = 0.0;
 	vec3 low_col = vec3(0.0);
 	if (layers > 1) {
 		vec2 uvl = dir.xz / max(dir.y, 0.06) * 0.72 + cloud_offset * 2.1;
 		float wl = sky_fbm(uvl * 1.9 + vec2(cloud_time * 0.026, 0.0), 3);
 		float nl = sky_fbm(uvl * 0.85 + wl * 0.5, 4);
-		m_low = smoothstep(0.60 - cloud_coverage * 0.40, 0.86 - cloud_coverage * 0.20, nl);
+		m_low = sky_cloud_mask(nl, cloud_coverage, 1.06, 1.16, 0.18, 0.68);
 		m_low *= smoothstep(0.02, 0.22, dir.y) * 0.75;
 		low_col = mix(cloud_lit_color, cloud_dark_color, clamp(nl * cloud_density, 0.0, 1.0)) * 0.85;
 		low_col += vec3(0.72, 0.78, 1.0) * flash_energy * 0.12;
@@ -144,7 +149,7 @@ vec3 sky_color(vec3 dir, float blur, float disk_mul) {
 
 	vec2 uv = dir.xz / max(dir.y, 0.06) * 0.32 + cloud_offset;
 	float n = sky_fbm(uv * 1.15, 3);
-	float m = smoothstep(0.52 - cloud_coverage * 0.47, 0.78 - cloud_coverage * 0.22, n);
+	float m = sky_cloud_mask(n, cloud_coverage, 1.08, 1.18, 0.06, 0.52);
 	m *= smoothstep(0.015, 0.14, dir.y);
 	m = mix(m, cloud_coverage * 0.8 * smoothstep(0.015, 0.22, dir.y), blur * 0.75);
 

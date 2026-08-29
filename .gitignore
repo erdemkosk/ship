@@ -1,5 +1,12 @@
-# Godot editor data — never commit
+# Godot 4 generated cache — never commit
 .godot/
+
+# Sidecar *.import files stay tracked (import settings). Windows may rewrite
+# them to S3TC locally; do not commit that churn.
+
+# Godot 3 leftover / translation dumps
+.import/
+*.translation
 
 # Export artifacts
 *.apk
@@ -10,9 +17,18 @@
 *.pck
 *.zip
 export/
+export_credentials.cfg
 
-# IDE and OS files
+# Mono
+.mono/
+data_*/
+mono_crash.*.json
+
+# IDE and OS
 .vscode/settings.json
 .idea/
 *.swp
 .DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini

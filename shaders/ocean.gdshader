@@ -526,31 +526,29 @@ void fragment() {
 
 	// --- underwater ----------------------------------------------------------
 	// Seen from below, the whole sky is squeezed into a 97 deg cone (Snell's
-	// window); outside it the surface is a mirror onto the murk.
+	// window). That ceiling is the actual sky — looking up a black ocean you
+	// still see daylight. Only looking DOWN is the abyss. The old mix painted
+	// the TIR ring (and then the engine fog) with the same black as the basin.
 	if (camera_under == 1) {
 		vec3 d = -view_dir;
 		vec3 into_air = refract(d, -wn, 1.333);
-		// Snell's window shuts at 48.6 degrees off the vertical — cos 0.661.
-		// Inside it you see the sky, squeezed; outside it the surface is a
-		// mirror onto the murk and it is DARK. The old version had the whole
-		// underside at sky brightness with only a soft edge, which is why it
-		// read as a sheet of white overhead instead of a ceiling of water.
-		float ct = clamp(dot(-d, -wn), 0.0, 1.0);
-		float win = smoothstep(0.585, 0.735, ct);
-		vec3 murky = scatter_color * 0.58;
-		vec3 through = murky;
+		float ct = clamp(dot(d, wn), 0.0, 1.0);
+		float win = smoothstep(0.48, 0.70, ct);
+		vec3 ceiling = scatter_color * (4.2 + 5.5 * sun_energy)
+				+ sky_ambient * 0.40
+				+ sun_color * sun_energy * pow(max(dot(d, sun_dir), 0.0), 6.0) * 0.55;
+		vec3 through = ceiling;
 		if (dot(into_air, into_air) > 0.0001) {
-			through = sky_color(normalize(into_air), clamp(rough * 2.0, 0.0, 1.0), 0.35)
-					* 0.44;
-			through = mix(through, murky, 0.22);
+			vec3 air = normalize(into_air);
+			air.y = max(air.y, 0.08);
+			air = normalize(air);
+			through = sky_color(air, clamp(rough * 1.4, 0.0, 1.0), 1.0);
 		}
-		col = mix(murky, through, win);
-		col = mix(col, foam_color * 0.22, foam * 0.30);
-		// And nothing down here is lit by the sun directly. Whatever light got
-		// through the surface is already in `col`; leaving the albedo up meant
-		// the lighting pass put a second, full-brightness copy of the sky on
-		// top of it.
+		col = mix(ceiling, through, win);
+		col = mix(col, foam_color * 0.55, foam * 0.45);
 		diffuse_albedo = vec3(0.0);
+		// Do NOT write FOG here. A branch write on Vulkan fills the other
+		// path with black fog, and the sea as seen from the boat goes black.
 	}
 
 	ALBEDO = diffuse_albedo;

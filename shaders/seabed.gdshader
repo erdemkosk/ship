@@ -6,11 +6,8 @@ uniform sampler2D detail_noise : filter_linear_mipmap, repeat_enable;
 uniform float terrain_size = 2048.0;
 uniform float wave_time = 0.0;
 uniform int camera_under = 0;
-// Sun elevation, pushed from weather.gd. The seabed needs it for the same
-// reason the sea does: how much light gets down there is the whole question.
 uniform vec3 sun_dir = vec3(0.0, 1.0, 0.0);
 uniform vec3 caustic_color : source_color = vec3(0.30, 0.52, 0.42);
-// Wind drives how fast and how fine the caustic net moves.
 uniform float caustic_scale : hint_range(0.2, 3.0) = 1.0;
 uniform float caustic_energy : hint_range(0.0, 4.0) = 1.0;
 
@@ -19,7 +16,6 @@ uniform vec3 wet_sand_color : source_color = vec3(0.38, 0.34, 0.24);
 uniform vec3 deep_sand_color : source_color = vec3(0.16, 0.15, 0.12);
 uniform vec3 moss_color : source_color = vec3(0.10, 0.22, 0.09);
 uniform vec3 rock_color : source_color = vec3(0.22, 0.21, 0.19);
-uniform vec3 murk_color : source_color = vec3(0.012, 0.035, 0.040);
 
 varying vec3 v_world_pos;
 varying vec3 v_normal;
@@ -50,40 +46,40 @@ void fragment() {
 	float n1 = texture(detail_noise, uv * 0.035).r;
 	float n2 = texture(detail_noise, uv * 0.09 + vec2(0.2, 0.1)).r;
 	float n3 = texture(detail_noise, uv * 0.22).r;
+	float n4 = texture(detail_noise, uv * 0.55 + vec2(0.7, 0.3)).r;
 	float slope = 1.0 - clamp(v_normal.y, 0.0, 1.0);
 
-	vec3 col = mix(deep_sand_color, wet_sand_color, smoothstep(-28.0, -6.0, v_height));
+	// Silt of the basin — not beach sand. Close, it is mud and grit. Far, it
+	// is not there.
+	vec3 silt = mix(vec3(0.028, 0.032, 0.028), vec3(0.050, 0.044, 0.034), n1);
+	silt = mix(silt, vec3(0.016, 0.018, 0.016), smoothstep(0.52, 0.88, n2));
+	silt *= 0.82 + 0.22 * n4;
+
+	vec3 col = mix(silt, deep_sand_color, smoothstep(-40.0, -18.0, v_height) * 0.55);
+	col = mix(col, wet_sand_color, smoothstep(-14.0, -5.0, v_height));
 	col = mix(col, sand_color, smoothstep(-1.2, 0.35, v_height));
-	// dryer patch on island tops
 	col = mix(col, sand_color * 1.08, smoothstep(0.2, 1.4, v_height) * 0.7);
 
-	float moss = smoothstep(0.42, 0.72, n1) * smoothstep(-9.0, -1.5, v_height)
+	float moss = smoothstep(0.42, 0.72, n1) * smoothstep(-12.0, -1.5, v_height)
 			* (1.0 - smoothstep(-0.4, 0.6, v_height));
-	col = mix(col, moss_color, moss * 0.85);
-	// darker weed streaks
+	col = mix(col, moss_color * 0.55, moss * 0.85);
 	float weed = smoothstep(0.58, 0.82, n2) * moss;
-	col = mix(col, moss_color * 0.55, weed * 0.6);
+	col = mix(col, moss_color * 0.32, weed * 0.6);
 
-	float rocky = smoothstep(0.28, 0.55, slope) + smoothstep(0.7, 0.9, n3) * 0.35;
-	rocky *= mix(0.25, 1.0, smoothstep(-3.0, 0.8, v_height));
-	col = mix(col, rock_color, clamp(rocky, 0.0, 0.85));
+	float rocky = smoothstep(0.22, 0.52, slope) + smoothstep(0.7, 0.9, n3) * 0.35;
+	rocky *= mix(0.45, 1.0, smoothstep(-22.0, 0.8, v_height));
+	col = mix(col, rock_color * 0.55, clamp(rocky, 0.0, 0.85));
 
-	// grain + ripple in the sand
-	col *= 0.90 + 0.14 * n3;
-	vec3 n_detail = normalize(v_normal + vec3((n2 - 0.5) * 0.35, 0.0, (n3 - 0.5) * 0.35));
+	col *= 0.88 + 0.16 * n3;
+	vec3 n_detail = normalize(v_normal
+			+ vec3((n2 - 0.5) * 0.40, 0.0, (n3 - 0.5) * 0.40)
+			+ vec3((n4 - 0.5) * 0.18, 0.0, (n1 - 0.5) * 0.12));
 
 	ALBEDO = col;
 	METALLIC = 0.0;
-	ROUGHNESS = mix(0.92, 0.55, smoothstep(-0.2, 1.5, v_height));
+	ROUGHNESS = mix(0.97, 0.55, smoothstep(-0.2, 1.5, v_height));
 	NORMAL = normalize((VIEW_MATRIX * vec4(n_detail, 0.0)).xyz);
 
-	// Caustics in the photic zone (visible shallows, gone in trenches / on land).
-	//
-	// This is a noise approximation, not a real refraction solve. The physical
-	// version — projecting the wave field's curvature down through the water and
-	// reading its Jacobian — was implemented and measured at roughly half the
-	// frame budget, for a pattern this scene barely shows. The wind at least
-	// drives its scale and speed, so it moves with the sea it belongs to.
 	float photic = smoothstep(-16.0, -6.0, v_height) * (1.0 - smoothstep(-0.4, 1.2, v_height));
 	float cs = 0.07 * caustic_scale;
 	float c1 = texture(detail_noise, uv * cs + vec2(wave_time * 0.022 * caustic_scale, 0.0)).r;
@@ -95,30 +91,19 @@ void fragment() {
 	}
 	EMISSION = cau_col * (0.35 + 0.65 * clamp(v_normal.y, 0.0, 1.0));
 
-	// --- how much of the bottom you can actually see -----------------------
-	//
-	// Two separate things darken it, and both have to be here or the seabed
-	// reads as a lit floor that happens to be underwater:
-	//
-	//   DOWNWELLING — light has to reach the sand before it can come back.
-	//     Over a 74 m basin almost none does, and at dusk none at all: the
-	//     term is the sun's own elevation carried down through the water.
-	//   PATH LOSS   — whatever is reflected then has to cross the water to
-	//     the eye, losing again over that distance.
-	//
-	// Together they are why a deep bottom is not dim, it is ABSENT. From the
-	// surface at midday you lose it around thirty metres; at dusk, ten.
 	float dist = length(CAMERA_POSITION_WORLD - v_world_pos);
-	float depth_m = max(-v_height, 0.0);
-	// Sun near the horizon takes a far longer slant through the water, and
-	// what is left after that is little enough to matter. Never quite zero:
-	// there is always some skylight.
+	float frag_depth = max(-v_height, 0.0);
 	float sun_up = clamp(sun_dir.y, 0.0, 1.0);
-	float down_k = mix(0.155, 0.052, sun_up);
-	float lit = exp(-depth_m * down_k) * (0.10 + 0.90 * sun_up);
-	float vis = exp(-dist * (camera_under == 1 ? 0.055 : 0.030));
-	float seen = clamp(lit * vis, 0.0, 1.0);
-	ALBEDO = mix(murk_color, ALBEDO, seen);
-	EMISSION *= seen;
+	float k = mix(0.145, 0.058, sun_up);
+	float sun_left = exp(-frag_depth * k) * (0.06 + 0.94 * sun_up);
+	float vis_sun = sun_left * exp(-dist * (camera_under == 1 ? 0.048 : 0.028));
+	// In the dark the floor is not a lit plane — it is a shape that appears
+	// in the last few metres and is gone beyond that. That is the scare.
+	float close = exp(-dist * 0.30) * smoothstep(13.0, 2.0, dist);
+	float seen = camera_under == 1 ? max(vis_sun, close * 0.70) : vis_sun;
+	seen = clamp(seen, 0.0, 1.0);
+	ALBEDO = mix(vec3(0.0), ALBEDO, seen);
+	ALBEDO = mix(vec3(dot(ALBEDO, vec3(0.25, 0.50, 0.25))), ALBEDO, clamp(sun_left * 1.8, 0.0, 1.0));
+	EMISSION *= seen * photic;
 	ROUGHNESS = mix(1.0, ROUGHNESS, seen);
 }

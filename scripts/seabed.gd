@@ -25,6 +25,7 @@ var terrain_size := TERRAIN_SIZE
 var _img: Image
 var _mat: ShaderMaterial
 var _weed_mat: ShaderMaterial
+var _rock_mat: ShaderMaterial
 var _near: MeshInstance3D
 var _noise: FastNoiseLite
 var _detail: FastNoiseLite
@@ -151,6 +152,18 @@ func _place_islands() -> void:
 		Vector4(150.0, -300.0, 11.0, 3.0),
 	]:
 		_islands.append(Vector4(st.x, st.y, _min_radius(st.z), st.w))
+
+	# Submerged mounts. Radius stays under 14 so the stamp does not grow a
+	# dry plateau. You will not see these from the boat; you meet them.
+	for sm in [
+		Vector4(28.0, 62.0, 11.0, -9.0),
+		Vector4(-44.0, 38.0, 10.0, -14.0),
+		Vector4(72.0, -22.0, 12.0, -7.5),
+		Vector4(-18.0, -70.0, 11.5, -18.0),
+		Vector4(110.0, 40.0, 10.5, -11.0),
+		Vector4(-80.0, 95.0, 12.0, -8.0),
+	]:
+		_islands.append(sm)
 
 
 func _min_radius(r: float) -> float:
@@ -292,19 +305,20 @@ func _build_seaweed() -> void:
 	var xform := PackedFloat32Array()
 	var n := 0
 	for isl in _islands:
-		var blades := rng.randi_range(3, 8)
+		var blades := rng.randi_range(8, 22)
 		for i in blades:
 			var ang := rng.randf() * TAU
-			var dist := isl.z * rng.randf_range(1.15, 1.7)
+			var dist := isl.z * rng.randf_range(0.85, 2.1)
 			var p := Vector3(isl.x + cos(ang) * dist, 0.0, isl.y + sin(ang) * dist)
 			p.y = _sample_img(p.x, p.z)
-			if p.y > -1.4 or p.y < -6.5:
+			if p.y > -1.2 or p.y < -16.0:
 				continue
 			var basis := Basis.from_euler(Vector3(0.0, rng.randf() * TAU, rng.randf_range(-0.12, 0.12)))
+			var tall := clampf((-p.y - 1.2) / 8.0, 0.35, 1.0)
 			basis = basis.scaled(Vector3(
-				rng.randf_range(0.55, 0.9),
-				rng.randf_range(0.45, 0.85),
-				rng.randf_range(0.55, 0.9)))
+				rng.randf_range(0.7, 1.25),
+				rng.randf_range(0.9, 2.1) * tall,
+				rng.randf_range(0.7, 1.25)))
 			var t := Transform3D(basis, p)
 			_append_xform(xform, t)
 			n += 1
@@ -332,34 +346,46 @@ func _build_seaweed() -> void:
 
 func _weed_mesh() -> QuadMesh:
 	var q := QuadMesh.new()
-	q.size = Vector2(0.07, 0.48)
-	q.center_offset = Vector3(0.0, 0.22, 0.0)
+	q.size = Vector2(0.11, 1.15)
+	q.center_offset = Vector3(0.0, 0.52, 0.0)
 	return q
 
 
 func _build_rocks() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 77
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.20, 0.19, 0.17)
-	mat.roughness = 0.95
+	_rock_mat = ShaderMaterial.new()
+	_rock_mat.shader = load("res://shaders/seabed_rock.gdshader")
 	var box := BoxMesh.new()
 	box.size = Vector3(1, 1, 1)
-	box.material = mat
+	box.material = _rock_mat
 	var xforms: Array[Transform3D] = []
 	for isl in _islands:
-		if isl.w < 1.15:
-			continue
-		for i in rng.randi_range(1, 2):
+		var count := rng.randi_range(2, 6) if isl.w < 0.0 else rng.randi_range(1, 3)
+		for i in count:
 			var ang := rng.randf() * TAU
-			var dist := rng.randf_range(0.0, isl.z * 0.35)
+			var dist := rng.randf_range(0.0, isl.z * (1.1 if isl.w < 0.0 else 0.45))
 			var p := Vector3(isl.x + cos(ang) * dist, 0.0, isl.y + sin(ang) * dist)
-			p.y = _sample_img(p.x, p.z) + rng.randf_range(0.02, 0.08)
-			var s := rng.randf_range(0.12, 0.28)
+			p.y = _sample_img(p.x, p.z) + rng.randf_range(0.02, 0.12)
+			var s := rng.randf_range(0.35, 1.4) if isl.w < 0.0 else rng.randf_range(0.12, 0.35)
 			var b := Basis.from_euler(Vector3(
-				rng.randf_range(-0.4, 0.4), rng.randf() * TAU, rng.randf_range(-0.4, 0.4)))
-			b = b.scaled(Vector3(s * rng.randf_range(0.6, 1.3), s, s * rng.randf_range(0.6, 1.3)))
+				rng.randf_range(-0.5, 0.5), rng.randf() * TAU, rng.randf_range(-0.5, 0.5)))
+			b = b.scaled(Vector3(s * rng.randf_range(0.6, 1.4), s * rng.randf_range(0.45, 0.9),
+					s * rng.randf_range(0.6, 1.4)))
 			xforms.append(Transform3D(b, p))
+	# Loose floor stones in the basin around the boat — things that resolve
+	# out of the black when you get close.
+	for i in 55:
+		var p := Vector3(rng.randf_range(-90.0, 90.0), 0.0, rng.randf_range(-90.0, 90.0))
+		p.y = _sample_img(p.x, p.z)
+		if p.y > -6.0 or p.y < -68.0:
+			continue
+		var s := rng.randf_range(0.4, 1.8)
+		var b := Basis.from_euler(Vector3(
+			rng.randf_range(-0.6, 0.6), rng.randf() * TAU, rng.randf_range(-0.6, 0.6)))
+		b = b.scaled(Vector3(s * rng.randf_range(0.5, 1.5), s * rng.randf_range(0.35, 0.8),
+				s * rng.randf_range(0.5, 1.5)))
+		xforms.append(Transform3D(b, p + Vector3(0.0, s * 0.15, 0.0)))
 	if xforms.is_empty():
 		return
 	var mm := MultiMesh.new()
@@ -423,6 +449,8 @@ func set_underwater(on: bool, wave_time: float, wind_dir: Vector2) -> void:
 		_weed_mat.set_shader_parameter("camera_under", 1 if on else 0)
 		_weed_mat.set_shader_parameter("wave_time", wave_time)
 		_weed_mat.set_shader_parameter("wind_dir", wind_dir)
+	if _rock_mat != null:
+		_rock_mat.set_shader_parameter("camera_under", 1 if on else 0)
 
 
 func _process(_delta: float) -> void:

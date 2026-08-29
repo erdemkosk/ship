@@ -206,6 +206,14 @@ func _apply_atmosphere() -> void:
 	var is_night := elev < -4.0
 	var storm_mul := 0.35 if storm else 1.0
 
+	# High sun + empty sky. Clouds already draw on the dome; this is the light
+	# they were not blocking — noon with the slider at 0 should actually glare.
+	var noon_k := clampf(elev / 58.0, 0.0, 1.0)
+	noon_k = noon_k * noon_k * (3.0 - 2.0 * noon_k)
+	var open := clampf(1.0 - cloud_cover, 0.0, 1.0) * (0.12 if storm else 1.0)
+	open *= 1.0 - rain_amount * 0.40
+	var bright := noon_k * open
+
 	if is_night:
 		# dim bluish moon
 		_sun.rotation_degrees = Vector3(-38.0, 160.0, 0.0)
@@ -216,7 +224,10 @@ func _apply_atmosphere() -> void:
 		_sun.rotation_degrees = Vector3(-maxf(elev, 2.0), azimuth, 0.0)
 		var warm := clampf(elev / 35.0, 0.0, 1.0)
 		_sun.light_color = Color(1.0, 0.42, 0.22).lerp(Color(1.0, 0.95, 0.88), warm)
-		_sun.light_energy = clampf(elev / 30.0, 0.05, 1.0) * 1.25 * storm_mul
+		var sun_e := clampf(elev / 30.0, 0.05, 1.0) * 1.25 * storm_mul
+		sun_e *= lerpf(0.78, 1.0, open)
+		sun_e *= 1.0 + 0.85 * bright
+		_sun.light_energy = sun_e
 
 	var dl := clampf((elev + 10.0) / 40.0, 0.0, 1.0) * storm_mul
 	var sunset_f := 0.0
@@ -224,8 +235,10 @@ func _apply_atmosphere() -> void:
 		sunset_f = clampf(1.0 - elev / 20.0, 0.0, 1.0) * clampf(dl * 3.0, 0.0, 1.0)
 
 	# --- sky shader parameters ---
-	var top := Color(0.022, 0.030, 0.052).lerp(Color(0.16, 0.24, 0.36), dl)
-	var hor := Color(0.052, 0.062, 0.086).lerp(Color(0.48, 0.44, 0.40), dl)
+	var top_day := Color(0.16, 0.24, 0.36).lerp(Color(0.30, 0.50, 0.80), bright)
+	var hor_day := Color(0.48, 0.44, 0.40).lerp(Color(0.62, 0.74, 0.84), bright)
+	var top := Color(0.022, 0.030, 0.052).lerp(top_day, dl)
+	var hor := Color(0.052, 0.062, 0.086).lerp(hor_day, dl)
 	hor = hor.lerp(Color(0.55, 0.26, 0.12), sunset_f * (0.35 if storm else 0.8))
 
 	var cloud_lit := Color(0.05, 0.06, 0.085).lerp(Color(0.68, 0.65, 0.62), dl)
@@ -242,7 +255,7 @@ func _apply_atmosphere() -> void:
 	_set_sky("sun_dir", _sun.basis.z.normalized())
 	_push_sun_to_seabed()
 	_set_sky("sun_color", _sun.light_color)
-	_set_sky("sun_energy", 0.5 if is_night else clampf(dl * 1.8, 0.2, 1.5))
+	_set_sky("sun_energy", 0.5 if is_night else clampf(dl * 1.8, 0.2, 1.5) * (1.0 + 0.9 * bright))
 	_set_sky("sun_size", 0.0008 if is_night else 0.0015)
 	_set_sky("cloud_coverage", cloud_cover)
 	_set_sky("cloud_density", 1.35 if storm else 1.0)
@@ -275,7 +288,7 @@ func _apply_atmosphere() -> void:
 	# blue stops making it more than a few metres.
 	var murk := clampf(0.55 + rain_amount * 0.5 + (0.35 if storm else 0.0), 0.4, 1.6)
 	_set_water("extinction", Color(0.95, 0.38, 0.24) * murk)
-	_set_water("sss_strength", lerpf(0.15, 1.25, dl) * (0.5 if storm else 1.0))
+	_set_water("sss_strength", lerpf(0.15, 1.25, dl) * (0.5 if storm else 1.0) * (1.0 + 0.4 * bright))
 	# Rain and storm churn the top metre into bubbles: more scatter, less clarity.
 	_set_water("refraction_strength", lerpf(0.65, 0.28, rain_amount))
 	_set_water("rain_amount", rain_amount)
@@ -290,35 +303,60 @@ func _apply_atmosphere() -> void:
 	# that, a burning sunset sky sat over a neutral grey sea: the water's rough
 	# reflection averages toward this ambient, and a neutral ambient scrubs the
 	# sunset straight back out of it.
-	var base_amb := Color(0.13, 0.17, 0.22).lerp(Color(0.5, 0.55, 0.58), dl)
+	var base_amb := Color(0.13, 0.17, 0.22).lerp(
+			Color(0.5, 0.55, 0.58).lerp(Color(0.78, 0.84, 0.90), bright), dl)
 	var sky_avg := top.lerp(hor, 0.55)
 	sky_avg = sky_avg.lerp(cloud_lit.lerp(cloud_dark, 0.4), clampf(cloud_cover * 0.85, 0.0, 1.0))
 	var lum_b := base_amb.r * 0.3 + base_amb.g * 0.6 + base_amb.b * 0.1
 	var lum_s := maxf(sky_avg.r * 0.3 + sky_avg.g * 0.6 + sky_avg.b * 0.1, 1e-4)
 	var tinted := Color(sky_avg.r, sky_avg.g, sky_avg.b) * (lum_b / lum_s)
 	_env.ambient_light_color = base_amb.lerp(tinted, 0.8)
-	_env.ambient_light_energy = lerpf(0.95, 1.0, dl)
+	_env.ambient_light_energy = lerpf(0.95, 1.0, dl) * (1.0 + 0.55 * bright)
+	_env.tonemap_exposure = lerpf(1.05, 1.20, bright)
 	_set_water("sky_ambient", _env.ambient_light_color * _env.ambient_light_energy)
 	if ocean != null and ocean.has_method("set_reflection_ambient"):
 		ocean.set_reflection_ambient(_env.ambient_light_color, _env.ambient_light_energy)
-	_env.fog_density = fog_amount * 0.014
-	var fog_day := Color(0.35, 0.36, 0.35)
+	_env.fog_mode = Environment.FOG_MODE_DEPTH
+	_env.fog_density = fog_amount * 0.014 * lerpf(1.0, 0.55, bright)
+	var fog_day := Color(0.35, 0.36, 0.35).lerp(Color(0.58, 0.62, 0.66), bright)
 	var fog_night := Color(0.055, 0.08, 0.09)
 	_env.fog_light_color = fog_night.lerp(fog_day, dl)
 	_env.fog_height = 0.0
 	_env.fog_height_density = 0.0
-	_env.volumetric_fog_enabled = not _underwater
-	_env.volumetric_fog_density = clampf(0.004 + fog_amount * 0.016 + rain_amount * 0.006, 0.0, 0.05)
+	_env.fog_sky_affect = 0.7
+	_env.fog_aerial_perspective = 0.6
+	_env.volumetric_fog_enabled = true
+	_env.volumetric_fog_length = 110.0
+	_env.volumetric_fog_density = clampf(
+			(0.004 + fog_amount * 0.016 + rain_amount * 0.006) * lerpf(1.0, 0.62, bright),
+			0.0, 0.05)
 	_env.volumetric_fog_albedo = _env.fog_light_color
 	_env.volumetric_fog_emission = Color(0.0, 0.0, 0.0)
+	_env.volumetric_fog_anisotropy = 0.3
+	_env.volumetric_fog_ambient_inject = 1.0
+	_env.volumetric_fog_sky_affect = 0.3
+	_sun.light_volumetric_fog_energy = 0.6
 	if _underwater:
-		_env.fog_density = 0.062
+		# Water stays water. The basin going black is the SEABED shader, not
+		# this fog — a black fog colour paints the whole sea, from the boat too.
+		_env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+		_env.fog_density = 0.009
 		_env.fog_light_color = Color(0.02, 0.09, 0.11)
-		_env.fog_height = 2.0
-		_env.fog_height_density = 0.42
-		_env.ambient_light_color = Color(0.03, 0.11, 0.13)
-		_env.ambient_light_energy = 0.7
-		_sun.light_energy *= 0.32
+		_env.fog_height = -10.0
+		_env.fog_height_density = 0.020
+		_env.fog_sky_affect = 0.0
+		_env.fog_aerial_perspective = 0.0
+		_env.volumetric_fog_length = 36.0
+		_env.volumetric_fog_density = 0.010
+		_env.volumetric_fog_albedo = Color(0.12, 0.32, 0.34)
+		_env.volumetric_fog_emission = Color(0.04, 0.11, 0.12)
+		_env.volumetric_fog_anisotropy = 0.55
+		_env.volumetric_fog_ambient_inject = 0.45
+		_env.volumetric_fog_sky_affect = 0.0
+		_env.ambient_light_color = Color(0.05, 0.18, 0.20)
+		_env.ambient_light_energy = 1.05
+		_sun.light_energy *= 0.70
+		_sun.light_volumetric_fog_energy = 2.8
 
 
 func _build_rain() -> void:

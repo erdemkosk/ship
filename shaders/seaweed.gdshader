@@ -4,7 +4,6 @@ render_mode cull_disabled, specular_schlick_ggx, depth_draw_opaque, shadows_disa
 uniform float wave_time = 0.0;
 uniform vec2 wind_dir = vec2(1.0, 0.0);
 uniform int camera_under = 0;
-uniform vec3 murk_color : source_color = vec3(0.012, 0.035, 0.040);
 
 varying float v_along;
 varying vec3 v_world_pos;
@@ -20,14 +19,14 @@ void vertex() {
 }
 
 void fragment() {
-	vec3 tip = vec3(0.22, 0.42, 0.14);
-	vec3 base = vec3(0.07, 0.16, 0.06);
+	vec3 tip = vec3(0.10, 0.22, 0.08);
+	vec3 base = vec3(0.03, 0.07, 0.04);
 	ALBEDO = mix(base, tip, v_along);
-	ROUGHNESS = 0.88;
+	ROUGHNESS = 0.92;
 	METALLIC = 0.0;
 	if (camera_under == 1) {
 		float dist = length(CAMERA_POSITION_WORLD - v_world_pos);
-		float vis = exp(-dist * 0.07);
-		ALBEDO = mix(murk_color, ALBEDO, vis);
+		float close = exp(-dist * 0.22) * smoothstep(16.0, 1.5, dist);
+		ALBEDO *= close;
 	}
 }

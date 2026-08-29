@@ -47,7 +47,7 @@ const HULL_DRAG := 1430.0     # linear; top speed is simply thrust / HULL_DRAG
 ## Roll and pitch damping from the water, N.m.s, and whether the wave slope is
 ## averaged over the hull's own footprint. Exported so a change to either can be
 ## MEASURED against the old behaviour rather than argued about — see --roll-test.
-@export var roll_damp := 13500.0
+@export var roll_damp := 17500.0
 @export var pitch_damp := 9000.0
 @export var hull_plane_fit := true
 @export var thrust_power := 38600.0
@@ -291,7 +291,7 @@ func _ready() -> void:
 	_build_water_fx()
 	# Roughly m(L^2+H^2)/12 about each axis: pitch, yaw, roll. Roll is left
 	# heavier than the box formula so she rolls slow and deep like timber.
-	inertia = Vector3(46000.0, 52000.0, 19000.0)
+	inertia = Vector3(46000.0, 52000.0, 23500.0)
 
 
 func _build_rain_shields() -> void:
@@ -4046,9 +4046,9 @@ func _physics_process(delta: float) -> void:
 				# cross product rectified over a beam sea into a slow,
 				# uncommanded turn — measured in the --drift-test ledger.
 				tilt_axis.y = 0.0
-				apply_torque(tilt_axis * 46000.0 * up_dot * up_dot * hydro)
+				apply_torque(tilt_axis * 34000.0 * up_dot * up_dot * hydro)
 				if drift_dbg:
-					drift_sums["align"] += tilt_axis.y * 46000.0 * up_dot * up_dot * hydro
+					drift_sums["align"] += tilt_axis.y * 34000.0 * up_dot * up_dot * hydro
 
 		# Roll and pitch damping. A hull swinging drags its bilges broadside
 		# through water and loses that energy in about a roll and a half; with
@@ -4102,7 +4102,7 @@ func _physics_process(delta: float) -> void:
 		# read +590k N·m·s of it in 24 s). So the leak is projected out, and
 		# yaw gets its own damper about true vertical, where a keel actually
 		# resists a swing.
-		var damp_rp := Vector3(local_w.x * 19000.0, 0.0, local_w.z * 5600.0)
+		var damp_rp := Vector3(local_w.x * 19000.0, 0.0, local_w.z * 8200.0)
 		var t_rp: Vector3 = -(global_basis * damp_rp)
 		t_rp.y = 0.0
 		apply_torque(t_rp * hydro)

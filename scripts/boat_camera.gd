@@ -29,6 +29,12 @@ var yaw := 0.0
 var pitch := -0.22
 var dist := 16.0
 var free_speed := 14.0
+## FPS look. Mouse writes the target; the head eases onto it so a flick is a
+## turn, not a snap. Slower than orbit — you are a person, not a turret.
+const FPS_LOOK := 0.0021
+const FPS_LOOK_TAU := 0.075
+var _look_yaw := 0.0
+var _look_pitch := 0.0
 
 
 
@@ -77,12 +83,14 @@ var _exhale: AudioStreamPlayer
 ## metronome and does not clear their mask on a schedule either.
 var _br_t := 0.0
 var _br_in := true
-var _wipe_at := 0.7
-## Seconds of wearing it before the glass is milky. Faster in the water than
-## in air, because it is the difference between your face and the sea that
-## does it, not time.
-const FOG_WET := 150.0
-const FOG_DRY := 320.0
+var _wipe_at := 0.78
+## Seconds of wearing it before the glass is milky. Same clock in air and
+## water — a dive does not ice the pane; it is still breath on cold glass.
+const FOG_DRY := 260.0
+var _drops := 0.0
+var _drop_wipe := 0.0
+var _mask_was_under := false
+var _breath_amt := 0.0
 var _arms: Node
 var _reticle: Control
 var _blink_rect: ColorRect
@@ -169,6 +177,8 @@ func set_mode(m: int) -> void:
 				target.set("helm_engaged", true)
 				target.set("telegraph_engaged", false)
 			pitch = 0.0
+			_look_yaw = yaw
+			_look_pitch = pitch
 			_blink_wait = randf_range(1.8, 4.5)
 		Mode.FREE:
 			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -217,15 +227,22 @@ func _unhandled_input(event: InputEvent) -> void:
 		if mode == Mode.FPS and _chart_t > 0.0 and _chart_t < 1.0:
 			return                      # leaning in; the camera is driving
 		if mode == Mode.FPS:
-			# direct mouse look, no button needed
-			yaw -= event.relative.x * 0.0035
-			pitch = clampf(pitch - event.relative.y * 0.0035, -1.4, 1.4)
+			_look_yaw -= event.relative.x * FPS_LOOK
+			_look_pitch = clampf(_look_pitch - event.relative.y * FPS_LOOK, -1.4, 1.4)
 		elif _orbiting:
 			yaw -= event.relative.x * 0.005
 			if mode == Mode.FREE:
 				pitch = clampf(pitch - event.relative.y * 0.005, -1.5, 1.5)
 			else:
 				pitch = clampf(pitch - event.relative.y * 0.005, -1.15, 0.45)
+		return
+
+	# Mask on: 3 is a finger across the WET glass, not the beacon. The fuse
+	# still throws that circuit from the panel; the shortcut yields while you
+	# are looking through a lens covered in sea.
+	if mode == Mode.FPS and target != null and bool(target.get("gear_worn")) \
+			and event.is_action_pressed("light_beacon"):
+		_wipe_drops()
 		return
 
 	# The circuits, by key. A physical switch under the fuse box lid is the
@@ -487,9 +504,9 @@ func _process_fps(delta: float) -> void:
 			if _walker.get("can_board"):
 				_prompt.text = "SPACE — take the ladder"
 			elif bool(_walker.get("submerged")):
-				_prompt.text = "SPACE — swim up"
+				_prompt.text = "SPACE — swim up   ·   B — watch"
 			else:
-				_prompt.text = "You are in the sea — swim to the stern ladder   ·   CTRL: dive"
+				_prompt.text = "You are in the sea — swim to the stern ladder   ·   CTRL: dive   ·   B — watch"
 			_prompt.visible = true
 		elif engaged == "helm":
 			if not cand.is_empty() and str(cand["id"]) == "ignition":
@@ -497,7 +514,7 @@ func _process_fps(delta: float) -> void:
 				_prompt.text = "E — Ignition  (%s)" % (
 						"stop" if st == 2 else ("cranking" if st == 1 else "start"))
 			else:
-				_prompt.text = "E — let go of the wheel"
+				_prompt.text = "E — let go of the wheel   ·   B — watch"
 			_prompt.visible = true
 		elif engaged == "telegraph":
 			_prompt.text = "E — let go of the throttle"
@@ -507,6 +524,10 @@ func _process_fps(delta: float) -> void:
 			_prompt.visible = true
 		elif _arms != null and _arms.inspecting_id() in ["radar", "sounder"]:
 			_prompt.text = "E — stow the screen"
+			_prompt.visible = true
+		elif cand.is_empty() and _drops >= 0.22 and _drop_wipe <= 0.0 \
+				and bool(target.get("gear_worn")):
+			_prompt.text = "3 — wipe the water off the mask"
 			_prompt.visible = true
 		elif cand.is_empty() and _fog >= 0.10 and _wipe <= 0.0 \
 				and bool(target.get("gear_worn")):
@@ -539,7 +560,8 @@ func _process_fps(delta: float) -> void:
 				_prompt.text = "E — %s" % cand["name"]
 			_prompt.visible = true
 		else:
-			_prompt.visible = false
+			_prompt.text = "B — watch"
+			_prompt.visible = true
 
 	if engaged == "helm":
 		# Locked to the wheel: the boat's controls are yours, your feet are not.
@@ -628,6 +650,12 @@ func _process_fps(delta: float) -> void:
 		var k := 1.0 - exp(-11.0 * delta)
 		yaw = lerp_angle(yaw, atan2(-dirw.x, -dirw.z), k)
 		pitch = lerpf(pitch, asin(clampf(dirw.y, -1.0, 1.0)), k)
+		_look_yaw = yaw
+		_look_pitch = pitch
+	else:
+		var lk := 1.0 - exp(-delta / FPS_LOOK_TAU)
+		yaw = lerp_angle(yaw, _look_yaw, lk)
+		pitch = lerpf(pitch, _look_pitch, lk)
 
 	# --- how far you can turn your head while you have hold of something -----
 	# Planted at a control your BODY does not turn. A helmsman with both hands
@@ -650,6 +678,7 @@ func _process_fps(delta: float) -> void:
 		st_lim = deg_to_rad(62.0)
 	if st_lim > 0.0:
 		yaw = st_base + clampf(wrapf(yaw - st_base, -PI, PI), -st_lim, st_lim)
+		_look_yaw = st_base + clampf(wrapf(_look_yaw - st_base, -PI, PI), -st_lim, st_lim)
 	# Taking hold of the boarding ladder turns you round. You were leaning over
 	# the cap looking down at it; now you are on it, facing it, with the ship in
 	# front of your nose — and no amount of head-turning does that, the whole
@@ -658,15 +687,35 @@ func _process_fps(delta: float) -> void:
 	if on_lad and not _was_ladder:
 		yaw = _yaw_of(-xf.basis.z)
 		pitch = clampf(pitch, -0.5, 0.5)
+		_look_yaw = yaw
+		_look_pitch = pitch
 	_was_ladder = on_lad
 
 	var heel := asin(clampf(xf.basis.x.y, -1.0, 1.0))
-	_roll = lerpf(_roll, clampf(heel * 0.34, -0.13, 0.13), 1.0 - exp(-6.0 * delta))
+	_roll = lerpf(_roll, clampf(heel * 0.24, -0.09, 0.09), 1.0 - exp(-6.0 * delta))
 	_cam.global_basis = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) \
 			* Basis(Vector3.BACK, _roll)
 	if _arms != null:
 		if _arms.has_method("set_sea_ladder"):
 			_arms.set_sea_ladder(bool(_walker.get("on_sea_ladder")), _walker.pos.y)
+		if _arms.has_method("set_watch_glance"):
+			var glance := Input.is_key_pressed(KEY_B)
+			if InputMap.has_action("watch"):
+				glance = glance or Input.is_action_pressed("watch")
+			_arms.set_watch_glance(mode == Mode.FPS and glance)
+		var wet := false
+		var depth := 0.0
+		if ocean != null and _cam != null:
+			var wh: float = ocean.get_height(_cam.global_position)
+			depth = maxf(wh - _cam.global_position.y, 0.0)
+			wet = _cam.global_position.y < wh - 0.05
+		if not wet:
+			depth = 0.0
+		var tod := 12.0
+		if weather != null:
+			tod = float(weather.get("time_of_day"))
+		if _arms.has_method("tick_watch"):
+			_arms.tick_watch(tod, depth, wet)
 		_arms.update(delta, target, engaged, walking, bool(_walker.get("swimming")))
 	_update_warmth(delta)
 
@@ -853,31 +902,32 @@ func _build_underwater() -> void:
 
 
 	_motes = GPUParticles3D.new()
-	_motes.amount = 90
-	_motes.lifetime = 4.5
-	_motes.preprocess = 2.0
+	_motes.amount = 520
+	_motes.lifetime = 5.5
+	_motes.preprocess = 2.5
 	_motes.emitting = false
 	_motes.transform_align = GPUParticles3D.TRANSFORM_ALIGN_DISABLED
 	_motes.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	_motes.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_motes.visibility_aabb = AABB(Vector3(-18, -12, -18), Vector3(36, 24, 36))
+	_motes.visibility_aabb = AABB(Vector3(-22, -14, -22), Vector3(44, 28, 44))
 	var pm := ParticleProcessMaterial.new()
 	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	pm.emission_box_extents = Vector3(8.0, 5.0, 8.0)
-	pm.gravity = Vector3(0, 0.12, 0)
-	pm.initial_velocity_min = 0.02
-	pm.initial_velocity_max = 0.12
-	pm.scale_min = 0.015
-	pm.scale_max = 0.045
-	pm.color = Color(0.7, 0.85, 0.82, 0.22)
+	pm.emission_box_extents = Vector3(10.0, 6.0, 10.0)
+	pm.gravity = Vector3(0, -0.07, 0)
+	pm.initial_velocity_min = 0.01
+	pm.initial_velocity_max = 0.08
+	pm.scale_min = 0.012
+	pm.scale_max = 0.038
+	pm.color = Color(0.52, 0.58, 0.54, 0.22)
 	_motes.process_material = pm
 	var q := QuadMesh.new()
-	q.size = Vector2(0.04, 0.04)
+	q.size = Vector2(0.05, 0.05)
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	mat.albedo_color = Color(0.75, 0.9, 0.88, 0.28)
+	mat.disable_fog = true
+	mat.albedo_color = Color(0.55, 0.62, 0.58, 0.28)
 	q.material = mat
 	_motes.draw_pass_1 = q
 	add_child(_motes)
@@ -886,9 +936,9 @@ func _build_underwater() -> void:
 	# Bubbles. Suspended motes tell you the water is dirty; bubbles tell you
 	# which way is up, which is the thing you actually lose underwater.
 	_bubbles = GPUParticles3D.new()
-	_bubbles.amount = 70
-	_bubbles.lifetime = 3.2
-	_bubbles.preprocess = 1.5
+	_bubbles.amount = 140
+	_bubbles.lifetime = 3.6
+	_bubbles.preprocess = 1.8
 	_bubbles.emitting = false
 	_bubbles.transform_align = GPUParticles3D.TRANSFORM_ALIGN_DISABLED
 	_bubbles.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
@@ -914,9 +964,10 @@ func _build_underwater() -> void:
 	bq.rings = 3
 	var bmat := StandardMaterial3D.new()
 	bmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	bmat.albedo_color = Color(0.72, 0.88, 0.92, 0.30)
+	bmat.albedo_color = Color(0.78, 0.92, 0.95, 0.42)
 	bmat.roughness = 0.05
 	bmat.metallic = 0.0
+	bmat.disable_fog = true
 	bmat.rim_enabled = true
 	bmat.rim = 0.9
 	bq.material = bmat
@@ -968,6 +1019,8 @@ func _update_underwater() -> void:
 		_under_mat.set_shader_parameter("amount", 1.0)
 		_under_mat.set_shader_parameter("wave_time", ocean.wave_time)
 		_under_mat.set_shader_parameter("depth_m", depth)
+		_under_mat.set_shader_parameter("look_down",
+				clampf(-_cam.global_basis.z.y, 0.0, 1.0))
 	if _motes != null:
 		_motes.emitting = under
 		if under:
@@ -989,7 +1042,7 @@ func _update_underwater() -> void:
 			ss = Vector2(p2.x / maxf(vp.x, 1.0), p2.y / maxf(vp.y, 1.0))
 			ss = ss.clamp(Vector2(-1.0, -1.0), Vector2(2.0, 2.0))
 		_under_mat.set_shader_parameter("sun_screen", ss)
-		_under_mat.set_shader_parameter("shaft_energy", 0.7 if sd.y > 0.05 else 0.15)
+		_under_mat.set_shader_parameter("shaft_energy", 1.05 if sd.y > 0.05 else 0.22)
 
 
 func _update_mask(delta: float, under: bool) -> void:
@@ -1006,31 +1059,53 @@ func _update_mask(delta: float, under: bool) -> void:
 	if not worn:
 		_fog = 0.0
 		_wipe = 0.0
+		_drops = 0.0
+		_drop_wipe = 0.0
 		_br_t = 0.0
 		_br_in = true
+		_breath_amt = 0.0
+		_mask_was_under = false
 		return
 	_breathe(delta, under)
+	if under and not _mask_was_under:
+		_drops = 1.0
+	_mask_was_under = under
+	if under:
+		_drops = minf(_drops + delta * 1.6, 1.0)
+	else:
+		var rain_now := 0.0
+		if weather != null:
+			rain_now = clampf(float(weather.get("rain_amount")), 0.0, 1.0)
+		_drops = minf(_drops + rain_now * delta * 0.40, 0.92)
+		_drops = maxf(_drops - delta * 0.018 * (1.0 - rain_now), 0.0)
+	if _drop_wipe > 0.0:
+		_drop_wipe = maxf(_drop_wipe - delta / 0.9, 0.0)
+		if _drop_wipe <= 0.0:
+			# A wipe takes the middle. Corners and the skirt keep their beads.
+			_drops = maxf(_drops * 0.20, 0.14)
 	# Condensation. It only really builds once the glass is cold, which is to
 	# say in the water; in air it creeps.
 	if _wipe > 0.0:
 		_wipe = maxf(_wipe - delta / 0.9, 0.0)
 		if _wipe <= 0.0:
-			# A wipe never quite clears it. What is left in the corners is
-			# where it starts again, which is why the second one comes sooner.
-			_fog = 0.06
+			# Fog wipe does not touch the water on the glass. What is left of
+			# the vapour is a film in the corners, which is where it starts again.
+			_fog = 0.08
 	elif wear > 0.98:
-		_fog = minf(_fog + delta / (FOG_WET if under else FOG_DRY), 1.0)
-		# You clear your own mask. Not at some fixed level and not only when
-		# you are blind — you do it when it starts to bother you, which is a
-		# different moment every time.
-		if _fog >= _wipe_at:
-			_wipe_mask()
+		# Same clock in air and water: the front crawls from the skirt over
+		# minutes. A dive does not ice the glass; it is still your breath.
+		_fog = minf(_fog + delta / FOG_DRY, 1.0)
+		if not _br_in:
+			_fog = minf(_fog + delta * 0.006, 1.0)
 	var vp: Vector2 = get_viewport().get_visible_rect().size
 	_mask_mat.set_shader_parameter("wear", wear)
 	_mask_mat.set_shader_parameter("fog", _fog)
 	_mask_mat.set_shader_parameter("wipe", _wipe)
+	_mask_mat.set_shader_parameter("drops", _drops)
+	_mask_mat.set_shader_parameter("drop_wipe", _drop_wipe)
 	# The clear front is the FINGER, not a timer. Ask the hand where it is.
-	if _wipe > 0.0 and _arms != null and _arms.has_method("wipe_front"):
+	if (_wipe > 0.0 or _drop_wipe > 0.0) and _arms != null \
+			and _arms.has_method("wipe_front"):
 		var wf: Vector2 = _arms.wipe_front()
 		_mask_mat.set_shader_parameter("wipe_x", wf.x)
 		_mask_mat.set_shader_parameter("wipe_dir", wf.y)
@@ -1038,40 +1113,57 @@ func _update_mask(delta: float, under: bool) -> void:
 	_mask_mat.set_shader_parameter("aspect", maxf(vp.x, 1.0) / maxf(vp.y, 1.0))
 	if ocean != null:
 		_mask_mat.set_shader_parameter("wave_time", ocean.wave_time)
+	var rain_amt := 0.0
+	if weather != null:
+		rain_amt = clampf(float(weather.get("rain_amount")), 0.0, 1.0)
+	_mask_mat.set_shader_parameter("rain", rain_amt)
+	_breath_amt = lerpf(_breath_amt, 1.0 if not _br_in else 0.0,
+			1.0 - exp(-delta * (3.2 if under else 1.6)))
+	_mask_mat.set_shader_parameter("breath", _breath_amt)
 
 
 func _breathe(delta: float, under: bool) -> void:
-	## In, pause, out, longer pause. Only under the water — with your head out
-	## you are breathing air and nobody hears it.
-	if _inhale == null or not under:
-		_br_t = 0.0
-		_br_in = true
-		return
+	## In, pause, out, longer pause. Underwater you hear it through the
+	## regulator. On deck you still breathe — the glass fogs from that, silently.
 	_br_t -= delta
 	if _br_t > 0.0:
 		return
 	if _br_in:
-		_inhale.pitch_scale = randf_range(0.94, 1.07)
-		_inhale.volume_db = randf_range(-8.0, -5.0)
-		_inhale.play()
-		_br_t = randf_range(1.30, 1.75)
+		if under and _inhale != null:
+			_inhale.pitch_scale = randf_range(0.94, 1.07)
+			_inhale.volume_db = randf_range(-8.0, -5.0)
+			_inhale.play()
+		_br_t = randf_range(1.30, 1.75) if under else randf_range(2.8, 4.2)
 	else:
-		_exhale.pitch_scale = randf_range(0.70, 0.80)
-		_exhale.volume_db = randf_range(-15.0, -11.5)
-		_exhale.play()
-		_br_t = randf_range(2.10, 2.95)
+		if under and _exhale != null:
+			_exhale.pitch_scale = randf_range(0.70, 0.80)
+			_exhale.volume_db = randf_range(-15.0, -11.5)
+			_exhale.play()
+		_br_t = randf_range(2.10, 2.95) if under else randf_range(3.4, 5.0)
 	_br_in = not _br_in
 
 
 func _wipe_mask() -> void:
 	## A finger across the inside of the glass. Only worth doing if there is
 	## something on it.
-	if _fog < 0.09 or _wipe > 0.0:
+	if _fog < 0.09 or _wipe > 0.0 or _drop_wipe > 0.0:
 		return
 	_wipe = 1.0
 	# Where the NEXT one happens. Somewhere between a lens that is just going
 	# hazy and one you cannot see out of at all.
-	_wipe_at = randf_range(0.42, 0.94)
+	_wipe_at = randf_range(0.72, 0.96)
+	if _arms != null and _arms.has_method("face_gesture"):
+		_arms.face_gesture("wipe")
+
+
+func _wipe_drops() -> void:
+	## Water on the glass is not fog. A fog wipe leaves it; this is the pass
+	## that takes the beads, and even then the skirt keeps a few.
+	if not bool(target.get("gear_worn")) or _drops < 0.12:
+		return
+	if _wipe > 0.0 or _drop_wipe > 0.0:
+		return
+	_drop_wipe = 1.0
 	if _arms != null and _arms.has_method("face_gesture"):
 		_arms.face_gesture("wipe")
 
