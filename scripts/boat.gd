@@ -4734,7 +4734,11 @@ func _physics_process(delta: float) -> void:
 			if PROBES[i].y < 0.0 and rel_vy < -4.2 and depth < 0.28 and _slam_cd <= 0.0:
 				_slam_cd = 1.15
 				slammed = true
-				ocean.splash(wp, clampf(absf(rel_vy) * 0.18, 0.4, 1.1))
+				# A hull panel entering the sea is an extended contact. The generic
+				# point splash emits a 360-degree ring and left round craters along a
+				# fast track; pass the exact probe so the ocean can stamp the strake.
+				ocean.hull_slam(wp, PROBES[i],
+						clampf(absf(rel_vy) * 0.18, 0.4, 1.1))
 	if hull_n > 0.0:
 		submerged /= hull_n
 		com_wave_vy /= hull_n

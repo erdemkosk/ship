@@ -828,6 +828,17 @@ func _shot(dir: String, name: String) -> void:
 func _ocean_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	## Repeatable water review: lay down a full-speed track, then inspect its
 	## centreline/cusps and the bow contact at the camera heights that expose them.
+	# Wake comparisons must not randomly happen at midnight in a thunderstorm.
+	# Hold a modest breeze and high daylight so consecutive speed/motion passes
+	# measure the wake rather than a different sea and exposure.
+	var wx: Node = get_node_or_null("Weather")
+	if wx != null:
+		wx.set("time_of_day", 12.5)
+		wx.set("storm", false)
+		wx.set("rain_amount", 0.0)
+		wx.set("cloud_cover", 0.28)
+		if wx.has_method("set_wind"):
+			wx.call("set_wind", 4.0, 40.0)
 	var pnl: Node = get_tree().get_first_node_in_group("ui_panel")
 	if pnl != null:
 		var pc: CanvasItem = pnl.get("_panel") as CanvasItem
@@ -849,12 +860,53 @@ func _ocean_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	rig.set("pitch", asin(clampf(reflection_dir.normalized().y, -1.0, 1.0)))
 	await get_tree().create_timer(0.55).timeout
 	await _shot(dir, "ocean2_reflection")
+	# Full-power time sequence from directly astern. These early frames expose a
+	# detached source immediately; a single mature-wake beauty shot cannot.
+	_eye_local = Vector3(0.0, 1.72, 13.5)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var build_goal := boat.to_global(Vector3(0.0, -0.08, 4.15))
+	var build_dir := build_goal - cam.global_position
+	rig.set("yaw", atan2(-build_dir.x, -build_dir.z))
+	rig.set("pitch", asin(clampf(build_dir.normalized().y, -1.0, 1.0)))
+	# The wake review says full power, so the screw and its aerated local field
+	# must be live as well as the imposed through-water speed.
+	boat.set("engine", 2) # Boat.EngineState.RUNNING
+	var review_speed := 10.5
+	var review_turn := false
+	var review_slams := false
+	var review_motion := false
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--wake-speed="):
+			review_speed = clampf(float(arg.get_slice("=", 1)), 1.0, 16.0)
+		elif arg == "--wake-turn":
+			review_turn = true
+		elif arg == "--wake-slam":
+			review_slams = true
+		elif arg == "--wake-motion":
+			review_motion = true
+	var review_load := clampf(review_speed / 10.5, 0.12, 1.0)
+	boat.set("throttle", review_load)
+	boat.set("_rpm", review_load)
 	for i in 70:
-		boat.linear_velocity = -boat.global_basis.z * 5.5
+		boat.linear_velocity = -boat.global_basis.z * review_speed
+		if review_turn:
+			boat.angular_velocity.y = 0.16
+		if review_slams and i in [12, 32, 52]:
+			# Deterministic starboard-forefoot entries: regression coverage for the
+			# old round analytic craters without depending on random sea phase.
+			var local_hit := Vector3(1.45, -0.62, -3.20)
+			var hit: Vector3 = boat.to_global(local_hit)
+			boat.ocean.hull_slam(hit, local_hit, 1.1)
 		await get_tree().create_timer(0.10).timeout
+		if review_motion and i >= 7 and i <= 39 and i % 2 == 1:
+			await _shot(dir, "ocean_motion_%02d" % i)
+		if i in [7, 19, 39, 69]:
+			await _shot(dir, "ocean_build_%02d" % i)
 	for setup in [
 		[Vector3(0.0, 2.05, 13.5), Vector3(0.0, -0.10, 2.6), "ocean0_wake"],
 		[Vector3(5.8, 0.82, -0.8), Vector3(0.0, -0.12, -3.8), "ocean1_bow"],
+		[Vector3(8.8, 8.5, 16.0), Vector3(0.0, 0.0, 3.2), "ocean3_wake_overview"],
 	]:
 		_eye_local = setup[0]
 		await get_tree().process_frame

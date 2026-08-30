@@ -145,6 +145,9 @@ varying float v_rip;
 varying float v_hull_wash;
 varying float v_bow_wash;
 varying float v_local_foam;
+// xy = track axis, z = distance aft, w = signed cross-track distance. Packed in
+// one slot: Metal's forward path has a strict varying-count ceiling.
+varying vec4 v_wake_frame;
 
 // Rain on water: each cell drops once per cycle and throws an expanding ring.
 // Two scales so it does not read as a regular grid.
@@ -394,6 +397,7 @@ void vertex() {
 	// identical to the old boat-frame version; in a turn it bends the wedge into
 	// the arc the boat actually left behind.
 	v_wake = 0.0;
+	v_wake_frame = vec4(0.0, 1.0, -1.0, 0.0);
 	float along = -1.0;
 	float lat = 0.0;
 	float spd = 0.0;
@@ -423,36 +427,98 @@ void vertex() {
 		}
 	}
 	spd = clamp(spd, 0.0, 26.0);
-	if (along >= 0.0 && along < 140.0 && spd > 0.55) {
+	if (along >= 0.0 && along < 155.0 && spd > 0.55) {
+		v_wake_frame = vec4(axis, along, lat);
 		float lam = PI2 * spd * spd / G;                // transverse wavelength
 		float kt = PI2 / max(lam, 0.9);
-		float wedge = along * 0.3536 + 0.9;             // tan(19.47 deg)
+		float high_froude = smoothstep(7.0, 15.0, spd);
+		float speed01 = smoothstep(1.5, 11.0, spd);
+		// A finite fast hull's apparent V narrows even though the stationary-phase
+		// Kelvin limit is 19.47 degrees. This keeps full-power wash energetic rather
+		// than spreading it into an implausibly wide white triangle.
+		float wedge_slope = mix(0.3536, 0.235, high_froude);
+		float wedge = along * wedge_slope + 1.05;
 		float e_lat = 1.0 - smoothstep(0.62, 1.06, abs(lat) / wedge);
 		float decay = exp(-along * 0.016) / sqrt(max(along, 1.2));
 		float age_decay = exp(-wake_age / 13.5);
-		float speed_energy = clamp(spd * spd / 16.0, 0.0, 2.35);
+		// Do not saturate at harbour speed: resistance-wave energy keeps growing,
+		// but caps before a game-speed boat can throw a several-metre wall of water.
+		float speed_energy = clamp(pow(spd / 4.2, 1.35), 0.0, 5.2);
 		// A 19 m displacement wake is perfectly resolvable on the 2 m mid ring;
 		// a one-metre dead-slow ripple is not. Reach therefore follows wavelength
 		// instead of using the old universal 13.5 m cutoff.
-		float geom_reach = mix(21.0, 76.0, smoothstep(2.1, 5.8, spd));
+		float geom_reach = mix(21.0, 122.0, smoothstep(2.1, 11.0, spd));
 		float wake_geom = 1.0 - smoothstep(geom_reach * 0.82, geom_reach, cam_dist);
-		float amp = 0.50 * boat_wave_gain * speed_energy * e_lat * decay
-				* smoothstep(0.0, 1.8, along) * wake_geom * age_decay;
-		float ph_t = kt * along;
-		float ph_d = kt * (0.76 * along + 1.32 * abs(lat));
+		// Close the transom-to-Kelvin hand-off with an AFT-MOVING turbulent train.
+		// The far Kelvin pattern is correctly steady in the vessel frame, but the
+		// prop wash and the short waves it sheds are parcels of water: they must
+		// travel down the track instead of looking bolted to the camera/boat.
+		float aft_flow = spd * mix(0.18, 0.37, speed01);
+		float shed_coord = along - wave_time * aft_flow;
+		float near_w = mix(0.68, 1.15, speed01) + along * 0.045;
+		float near_env = exp(-lat * lat / (near_w * near_w))
+				* (1.0 - smoothstep(19.0, 36.0, along)) * wake_geom * age_decay;
+		float near_k = mix(2.7, 1.35, speed01);
+		float near_phase = shed_coord * near_k + abs(lat) * 1.45;
+		float near_amp = mix(0.035, 0.22, speed01) * boat_wave_gain;
+		disp.y += (-0.08 + sin(near_phase) * 0.82) * near_amp * near_env;
+		extra_slope += axis * cos(near_phase) * near_k * 0.82 * near_amp * near_env;
+		extra_slope += vec2(-axis.y, axis.x) * sign(lat) * cos(near_phase)
+				* 1.45 * 0.82 * near_amp * near_env;
+
+		// Two broken shear shoulders flank the prop stream. They widen with speed
+		// and move aft with it, disturbing dark water as geometry rather than merely
+		// whitening a static centre strip.
+		float shear_centre = near_w * mix(0.52, 0.76, speed01);
+		float shear_width = 0.32 + along * 0.020;
+		float shear_q = (abs(lat) - shear_centre) / max(shear_width, 0.20);
+		float shear_env = exp(-shear_q * shear_q)
+				* (1.0 - smoothstep(22.0, 40.0, along)) * wake_geom * age_decay;
+		float shear_k = mix(3.2, 1.75, speed01);
+		float shear_phase = shed_coord * shear_k + abs(lat) * 2.15 + 1.7;
+		float shear_amp = near_amp * mix(0.30, 0.58, speed01);
+		disp.y += sin(shear_phase) * shear_amp * shear_env;
+		extra_slope += axis * cos(shear_phase) * shear_k * shear_amp * shear_env;
+		extra_slope += vec2(-axis.y, axis.x) * sign(lat) * cos(shear_phase)
+				* 2.15 * shear_amp * shear_env;
+
+		// The far-field system is deliberately lower than the near turbulent train.
+		// Resistance-wave energy grows with speed, but never into the multi-metre
+		// ridge produced by the first uncapped full-power pass.
+		float amp = 0.12 * boat_wave_gain * speed_energy * e_lat * decay
+				* smoothstep(0.0, 3.0, along) * wake_geom * age_decay;
+		// Source phase is explicit. Starting sin() at zero postponed the first crest
+		// by lambda/4; at full power that can be tens of metres, which looked as if
+		// the wake appeared in empty water after the boat had already passed.
+		float ph_t = kt * along + 1.18;
+		// The visible divergent family stays shorter than the very long transverse
+		// component at high Froude number, as real stern/quarter waves do.
+		float lam_d = clamp(lam * mix(0.62, 0.34, high_froude), 1.8, 46.0);
+		float kd = PI2 / lam_d;
+		float ph_d = kd * (0.76 * along + 1.32 * abs(lat)) + 0.72;
 		disp.y += amp * (sin(ph_t) * 0.45 + sin(ph_d) * 0.9);
-		extra_slope += axis * amp * kt * (cos(ph_t) * 0.45 + cos(ph_d) * 0.9 * 0.76);
-		extra_slope += vec2(-axis.y, axis.x) * sign(lat) * amp * kt * cos(ph_d) * 0.9 * 1.32;
+		extra_slope += axis * amp * (kt * cos(ph_t) * 0.45
+				+ kd * cos(ph_d) * 0.9 * 0.76);
+		extra_slope += vec2(-axis.y, axis.x) * sign(lat)
+				* amp * kd * cos(ph_d) * 0.9 * 1.32;
 		// Foam lives in two thin places, not across the whole wedge:
 		//   track — the churned water directly astern, roughly a hull's width,
 		//           spreading slowly and dying within ~20 m
 		//   cusp  — the breaking crest that runs along each edge of the wedge
-		float half_w = 0.55 + along * 0.028;
-		float track = exp(-lat * lat / (half_w * half_w)) * exp(-along * 0.13);
+		float half_w = mix(0.58, 0.92, speed01) + along * mix(0.026, 0.043, speed01);
+		float track_decay = mix(0.15, 0.052, speed01);
+		float track = exp(-lat * lat / (half_w * half_w)) * exp(-along * track_decay);
+		// Uneven aerated parcels expose their aft motion. A non-zero floor keeps
+		// prop wash connected to the transom while the bright patches move away.
+		float shed_wave = sin(shed_coord * 0.58
+				+ sin(shed_coord * 0.17 + lat * 1.25));
+		float shed_packets = mix(0.58, 1.18, 0.5 + 0.5 * shed_wave);
+		track *= mix(1.0, shed_packets, speed01);
 		float edge = abs(lat) / max(wedge, 0.7) - 0.80;
-		float cusp = exp(-edge * edge * 40.0) * exp(-along * 0.055) * 0.22;
-		v_wake = clamp((track + cusp)
-				* clamp(spd * spd * 0.065 - 0.08, 0.0, 1.35)
+		float cusp = exp(-edge * edge * 40.0) * exp(-along * mix(0.070, 0.034, speed01))
+				* mix(0.18, 0.34, speed01);
+		float foam_energy = clamp(pow(spd / 10.5, 1.25), 0.0, 1.35);
+		v_wake = clamp((track + cusp) * foam_energy
 				* mix(1.0, boat_wave_gain, 0.45) * age_decay, 0.0, 1.0);
 	}
 
@@ -547,6 +613,25 @@ void fragment() {
 	if (rain_amount > 0.01 && near_fade > 0.02) {
 		pert += rain_ripple(v_world_pos.xz, wave_time) * rain_amount * 0.30 * near_fade;
 	}
+	// Sub-grid prop turbulence: two advected noise bands become moving slopes in
+	// the holes between foam. Without this, the white texture changes but the
+	// underlying water remains a calm mirror and the whole wake reads as a decal.
+	if (v_wake > 0.012 && v_wake_frame.z >= 0.0 && dist < 72.0) {
+		float wake_speed01 = smoothstep(1.5, 11.0, boat_speed);
+		float wake_aft_flow = boat_speed * mix(0.18, 0.37, wake_speed01);
+		float wake_coord = v_wake_frame.z - wave_time * wake_aft_flow;
+		vec2 wake_axis = normalize(v_wake_frame.xy + vec2(1e-6, 0.0));
+		vec2 wake_perp = vec2(-wake_axis.y, wake_axis.x);
+		vec2 wake_uv = vec2(wake_coord, v_wake_frame.w);
+		float turb_a = texture(foam_noise, wake_uv * vec2(0.42, 0.82)).r - 0.5;
+		float turb_b = texture(foam_noise,
+				wake_uv.yx * vec2(0.91, 0.33) + vec2(17.3, 8.1)).r - 0.5;
+		float wake_near = 1.0 - smoothstep(27.0, 48.0, v_wake_frame.z);
+		float wake_dist = 1.0 - smoothstep(46.0, 72.0, dist);
+		float turb_amp = mix(0.025, 0.22, wake_speed01)
+				* sqrt(v_wake) * wake_near * wake_dist;
+		pert += (wake_axis * turb_a + wake_perp * turb_b) * turb_amp;
+	}
 
 	// Base wave normal, rebuilt per pixel rather than interpolated from the
 	// vertex. One sample per quad is fine at 0.5 m quads and a faceted mess at
@@ -606,8 +691,12 @@ void fragment() {
 		shore_foam = v_shore * foam_n * shore_pulse * 0.85;
 		// Ragged, not geometric: the noise has to bite hard enough that the wedge
 		// edge never reads as a drawn line.
-		float wake_n = foam_n * 0.5 + foam_hi * 0.75;
-		float wake_foam = smoothstep(0.22, 0.90, v_wake * (0.35 + 1.25 * wake_n)) * 0.8;
+		float wake_n = foam_n * 0.42 + foam_hi * 0.68;
+		// Aerated wash is a lace of bubbles with dark water holes, not an opaque
+		// white carpet. Speed extends v_wake upstream; it does not force every pixel
+		// in that envelope to pure foam.
+		float wake_foam = smoothstep(0.34, 0.96,
+				v_wake * (0.22 + 1.08 * wake_n)) * (0.38 + foam_hi * 0.24);
 		// Foam albedo is ~10x the water's, so even a little of it doubles the
 		// brightness. A waterline ring gets a hint, not a halo.
 		float floater_foam = v_disturb * (0.15 + 0.85 * foam_hi) * 0.035;
@@ -632,7 +721,11 @@ void fragment() {
 	float lost = 1.0 - detail_fade;
 	// A rip is rougher water: the extra short chop it stands up is far too small
 	// to draw, so it arrives as slope variance.
-	float mss_eff = (mss + v_rip * 0.04) * (1.0 - rain_amount * 0.45);
+	float wake_speed01 = smoothstep(1.5, 11.0, boat_speed);
+	float wake_break = v_wake * wake_speed01
+			* (1.0 - smoothstep(34.0, 82.0, max(v_wake_frame.z, 0.0)));
+	float mss_eff = (mss + v_rip * 0.04 + wake_break * 0.060)
+			* (1.0 - rain_amount * 0.45);
 	// Cox-Munk variance is a distribution of unresolved slopes, not a direct
 	// perceptual-roughness value. Feeding it to GGX at full strength turned the
 	// far sea into one grey average and erased the dark/bright faces that sell

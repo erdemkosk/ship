@@ -52,10 +52,13 @@ const EARTH_RADIUS := 6371000.0
 const MAX_FLOATERS := 8  # must match the shader's MAX_FLOATERS
 const MAX_TRAIL := 32    # must match the shader's MAX_TRAIL
 const MAX_IMPACTS := 12  # must match the shader's MAX_IMPACTS
-## How far the boat travels between track samples. Small enough that a hard turn
-## still reads as a curve, large enough that MAX_TRAIL covers the whole visible
-## length of the wake.
-const TRAIL_SPACING := 1.75
+## Track resolution grows with speed. A fixed 1.75 m spacing was fine at five
+## knots, but at full power all 32 samples covered less than one long Kelvin
+## wave. Slow turns still get a dense curve; fast runs retain enough history for
+## the wake to exist before its first far-field crest.
+const TRAIL_SPACING_MIN := 1.35
+const TRAIL_SPACING_MAX := 4.20
+const STERN_SOURCE_Z := 5.58
 const WAKE_LIFE := 28.0
 
 ## Tidal stream. Coastal water is not still: it runs, it reverses, and it speeds
@@ -167,10 +170,6 @@ var _cam_xz_ready := false
 var _trail: Array = []     # [[Vector2 world_xz, speed_at_birth, born]], newest first
 var _impacts: Array = []   # [{pos: Vector2, born: float, strength: float}]
 var _boat_motion_smooth := Vector3.ZERO
-var _heave_prev := 0.0
-var _heave_peak := 0.0
-var _heave_ready := false
-var _heave_wave_cd := 0.0
 
 
 func _ready() -> void:
@@ -535,17 +534,29 @@ func _process(delta: float) -> void:
 		if follow_target is RigidBody3D:
 			vel = follow_target.linear_velocity
 		var bp := Vector2(p.x, p.z)
-		var spd := Vector2(vel.x, vel.z).length()
-		var local_vel := follow_target.global_basis.inverse() * vel
+		# A wake answers speed THROUGH the water, not speed over the chart. Tidal
+		# current could previously build a full wake around a nearly stationary hull.
+		var cur := current_at(p)
+		var water_relative := vel - Vector3(cur.x, 0.0, cur.y)
+		var orbital := surface_velocity(p)
+		if orbital.is_finite():
+			# Vertical orbital motion matters too.  A hull riding a crest is not
+			# slamming into still water; only its velocity relative to that moving
+			# surface should be allowed to create a pressure impulse.
+			water_relative -= orbital
+		var local_vel := follow_target.global_basis.inverse() * water_relative
 		var raw_motion := Vector3(-local_vel.z, local_vel.x, local_vel.y)
 		_boat_motion_smooth = _boat_motion_smooth.lerp(raw_motion,
 				1.0 - exp(-3.5 * delta))
 		_update_local_hull_field(delta, p, _boat_motion_smooth)
-		_update_heave_radiation(delta, bp, _boat_motion_smooth.z)
-		_update_trail(bp, spd, delta)
+		var wake_speed := absf(_boat_motion_smooth.x)
+		# The pressure source is the actual afterbody contact, not the rigid-body
+		# origin four metres forward. Astern swaps it to the stem.
+		var source_z := STERN_SOURCE_Z if _boat_motion_smooth.x >= 0.0 else -5.00
+		var source: Vector3 = follow_target.to_global(Vector3(0.0, 0.0, source_z))
+		_update_trail(Vector2(source.x, source.z), wake_speed, delta)
 		# Foam floats on the water, so it has to ride the current as well as the
 		# wind. One sample at the boat is enough for what you can see.
-		var cur := current_at(p)
 		var wdir := Vector2(cos(deg_to_rad(wind_direction_deg)), sin(deg_to_rad(wind_direction_deg)))
 		var drift := wdir * wind_speed * 0.03 + cur
 		ShaderSet.many(mats, &"surface_drift", drift)
@@ -564,7 +575,7 @@ func _process(delta: float) -> void:
 				inside = 1
 		ShaderSet.param(_mat_close, &"interior_clip", inside)
 		ShaderSet.many(mats, &"boat_pos", bp)
-		ShaderSet.many(mats, &"boat_speed", spd)
+		ShaderSet.many(mats, &"boat_speed", wake_speed)
 	ShaderSet.many(mats, &"camera_under", 1 if camera_under else 0)
 	# From below, every clipmap hole is seen edge-on. Give the coarser level two
 	# of its own cells beneath the finer one so horizontal FFT pinch cannot expose
@@ -806,9 +817,9 @@ func set_reflection_ambient(color: Color, energy: float) -> void:
 
 func inject_local_water(world_pos: Vector3, radius_m: float, velocity_impulse: float) -> void:
 	## Small, high-frequency interaction that does not belong in the spectral sea:
-	## propeller pulses, a swimmer's kick, a dropped object.  Large slams also keep
-	## their analytic CPU-visible packet; this field supplies the torn-up surface
-	## and foam inside the first few boat lengths.
+	## propeller pulses, a swimmer's kick, a dropped object. Point-like entries
+	## also keep their analytic CPU-visible packet; extended hull slams deliberately
+	## stay in this field so they can never turn into a perfect circular crater.
 	if _local_field != null and _local_field.is_ready():
 		_local_field.inject(Vector2(world_pos.x, world_pos.z), radius_m, velocity_impulse)
 
@@ -822,11 +833,11 @@ func prop_wash(origin: Vector3, aft: Vector3, power: float, delta: float) -> voi
 		return
 	var d := Vector2(aft.x, aft.z).normalized()
 	var spin := sin(wave_time * (18.0 + load * 12.0))
-	for i in 3:
-		var q := Vector2(origin.x, origin.z) + d * (0.35 + float(i) * 0.58)
-		var alternating := spin * load * (0.42 - float(i) * 0.07)
-		var thrust_bias := signf(power) * load * 0.10
-		_local_field.inject(q, 0.34 + float(i) * 0.16,
+	for i in 4:
+		var q := Vector2(origin.x, origin.z) + d * (0.30 + float(i) * 0.62)
+		var alternating := spin * load * (0.55 - float(i) * 0.08)
+		var thrust_bias := signf(power) * load * 0.16
+		_local_field.inject(q, 0.34 + float(i) * 0.15,
 				(alternating + thrust_bias) * minf(delta, 1.0 / 30.0))
 
 
@@ -841,42 +852,60 @@ func _update_local_hull_field(delta: float, boat_world: Vector3, motion: Vector3
 		var lead_z := -4.22 if forward else 4.12
 		var shoulder_z := -3.35 if forward else 3.42
 		var trail_z := 3.82 if forward else -3.92
-		var pressure := clampf(speed * 0.035 + speed * speed * 0.020, 0.0, 0.82)
+		# Do not plateau at half throttle. The old 0.82 cap was already reached
+		# around 6 m/s, so full power displaced no more water than cruise speed.
+		var pressure := clampf(speed * 0.080 + speed * speed * 0.0045, 0.0, 1.35)
 		var lead: Vector3 = follow_target.to_global(Vector3(0.0, 0.0, lead_z))
 		_local_field.inject(Vector2(lead.x, lead.z), 0.68, pressure * dt)
 		for sx in [-1.0, 1.0]:
 			var shoulder: Vector3 = follow_target.to_global(Vector3(sx * 1.18, 0.0, shoulder_z))
 			_local_field.inject(Vector2(shoulder.x, shoulder.z), 0.52, pressure * 0.52 * dt)
+			# Flow separates from both aft quarters before it reaches the screw. These
+			# two smaller sources close the visual seam between the hull wash and the
+			# track-based Kelvin field without painting a solid foam rectangle.
+			var quarter: Vector3 = follow_target.to_global(Vector3(sx * 1.12, 0.0, trail_z - 0.18))
+			_local_field.inject(Vector2(quarter.x, quarter.z), 0.48,
+					pressure * 0.28 * dt)
 		var hollow: Vector3 = follow_target.to_global(Vector3(0.0, 0.0, trail_z))
-		_local_field.inject(Vector2(hollow.x, hollow.z), 0.95, -pressure * 0.44 * dt)
+		_local_field.inject(Vector2(hollow.x, hollow.z), 1.02, -pressure * 0.54 * dt)
 
-	# Leeway and heave write on opposite shoulders.  Keeping these below the
-	# centimetre-per-frame range makes them visible without feeding micro chop
-	# back into the four-and-a-half-tonne buoyancy solver.
+	# Leeway and heave write on the actual waterline rather than at the body
+	# origin. Keeping these below the centimetre-per-frame range makes them
+	# visible without feeding micro chop back into the buoyancy solver.
 	if absf(motion.y) > 0.08:
 		var lee_x := -signf(motion.y) * 1.38
 		var lee: Vector3 = follow_target.to_global(Vector3(lee_x, 0.0, -0.4))
 		_local_field.inject(Vector2(lee.x, lee.z), 0.62,
 				clampf(absf(motion.y) * 0.045, 0.0, 0.16) * dt)
 	if absf(motion.z) > 0.12:
-		for z in [-2.6, 2.6]:
-			var slap: Vector3 = follow_target.to_global(Vector3(0.0, 0.0, z))
-			_local_field.inject(Vector2(slap.x, slap.z), 1.05,
-					clampf(motion.z * 0.035, -0.20, 0.20) * dt)
+		# Six overlapping shoulder contacts form a hull-sized footprint. Two large
+		# centre dots produced round craters that survived behind a fast boat.
+		for section in [
+			[-3.25, 0.92, 0.78],
+			[-0.55, 1.22, 0.58],
+			[2.45, 1.12, 0.42],
+		]:
+			for sx in [-1.0, 1.0]:
+				var slap: Vector3 = follow_target.to_global(Vector3(
+						sx * float(section[1]), 0.0, float(section[0])))
+				_local_field.inject(Vector2(slap.x, slap.z), 0.62,
+						clampf(motion.z * 0.030, -0.16, 0.16)
+						* float(section[2]) * dt)
 
 	var centre := Vector2(boat_world.x, boat_world.z)
 	_local_field.update(delta, centre)
 	ShaderSet.many(_mats(), &"local_centre", _local_field.centre)
 
 
-func _update_trail(bp: Vector2, spd: float, _delta: float) -> void:
+func _update_trail(source: Vector2, spd: float, _delta: float) -> void:
 	## The boat's recent track, newest first. A new sample is laid down every
-	## TRAIL_SPACING metres of travel, so the trail resolves a turn rather than
-	## the passage of time — a boat drifting at half a knot does not fill it.
-	if not _trail.is_empty() and bp.distance_squared_to(_trail[0][0]) > 1600.0:
+	## speed-scaled distance, so the trail resolves a slow turn but retains a
+	## complete long wave at full power. Time never fills a stationary wake.
+	if not _trail.is_empty() and source.distance_squared_to(_trail[0][0]) > 1600.0:
 		_trail.clear()  # teleported (respawn); the old track is not ours
-	if _trail.is_empty() or bp.distance_to(_trail[0][0]) >= TRAIL_SPACING:
-		_trail.push_front([bp, spd, wave_time])
+	var spacing := clampf(spd * 0.40, TRAIL_SPACING_MIN, TRAIL_SPACING_MAX)
+	if _trail.is_empty() or source.distance_to(_trail[0][0]) >= spacing:
+		_trail.push_front([source, spd, wave_time])
 		if _trail.size() > MAX_TRAIL:
 			_trail.resize(MAX_TRAIL)
 
@@ -894,10 +923,10 @@ func _update_trail(bp: Vector2, spd: float, _delta: float) -> void:
 	ages.resize(MAX_TRAIL)
 	# Element 0 is the transom right now, so the wake's root never lags behind
 	# the boat even between samples.
-	arr[0] = Vector4(bp.x, bp.y, 0.0, spd)
+	arr[0] = Vector4(source.x, source.y, 0.0, spd)
 	ages[0] = 0.0
 	var n := 1
-	var prev := bp
+	var prev := source
 	var arc := 0.0
 	for e in _trail:
 		var q: Vector2 = e[0]
@@ -1034,10 +1063,51 @@ func _bake_foam_noise(sz: int) -> ImageTexture:
 func splash(world_pos: Vector3, strength := 1.0) -> void:
 	## Water flies up and out, then falls back. Never paint the sea mesh —
 	## even 0.5 m quads turn a painted crater into a dark square.
-	if _splash_fx == null:
-		_build_splash()
 	var s := clampf(strength, 0.4, 2.2)
 	_add_impact(Vector2(world_pos.x, world_pos.z), s)
+	_emit_splash_particles(world_pos, s)
+	if not _rings.is_empty():
+		var ring := _rings[_ring_next]
+		_ring_next = (_ring_next + 1) % _rings.size()
+		ring.retrigger(Vector2(world_pos.x, world_pos.z), s,
+				0.8 + 0.4 * s, 0.9 + 1.5 * s)
+
+
+func hull_slam(world_pos: Vector3, local_contact: Vector3, strength := 1.0) -> void:
+	## A hull strike is an extended moving contact, not a stone dropped at one
+	## point. Keep the directional spray, but deliberately skip `_add_impact` and
+	## the expanding foam torus: those generic effects were the round craters
+	## left at regular intervals behind the boat.
+	var s := clampf(strength, 0.35, 1.35)
+	_emit_splash_particles(world_pos, s)
+	if _local_field == null or not _local_field.is_ready() \
+			or follow_target == null or not is_instance_valid(follow_target):
+		return
+	# Stretch the pressure patch fore-and-aft along the strake and inward across
+	# the bottom from the exact probe that entered. Overlap makes one irregular
+	# hull-sized footprint; none of the kernels owns a visible circular outline.
+	var side := signf(local_contact.x)
+	if is_zero_approx(side):
+		side = 1.0
+	var kick := s * 0.105
+	for footprint in [
+		[Vector2(0.0, 0.0), 0.58, 1.00],
+		[Vector2(0.0, -0.62), 0.52, 0.72],
+		[Vector2(0.0, 0.62), 0.52, 0.72],
+		[Vector2(-side * 0.52, -0.30), 0.60, 0.58],
+		[Vector2(-side * 0.52, 0.30), 0.60, 0.58],
+	]:
+		var offset: Vector2 = footprint[0]
+		var local := local_contact + Vector3(offset.x, 0.0, offset.y)
+		var q: Vector3 = follow_target.to_global(local)
+		_local_field.inject(Vector2(q.x, q.z), float(footprint[1]),
+				kick * float(footprint[2]))
+
+
+func _emit_splash_particles(world_pos: Vector3, strength: float) -> void:
+	if _splash_fx == null:
+		_build_splash()
+	var s := strength
 	_splash_pm.initial_velocity_min = 2.4 * s
 	_splash_pm.initial_velocity_max = 5.2 * s
 	_splash_pm.radial_accel_min = 1.2 * s
@@ -1046,18 +1116,13 @@ func splash(world_pos: Vector3, strength := 1.0) -> void:
 	_splash_fx.global_position = Vector3(world_pos.x, get_height(world_pos) + 0.06, world_pos.z)
 	_splash_fx.restart()
 	_splash_fx.emitting = true
-	if not _rings.is_empty():
-		var ring := _rings[_ring_next]
-		_ring_next = (_ring_next + 1) % _rings.size()
-		ring.retrigger(Vector2(world_pos.x, world_pos.z), s,
-				0.8 + 0.4 * s, 0.9 + 1.5 * s)
 
 
 func _add_impact(pos: Vector2, strength: float,
 		speed := 3.8, width := 0.34, width_growth := 0.16, damping := 0.52) -> void:
-	## The render and physics surfaces read this same impulse list. Repeated hull
-	## slams close together reinforce one another instead of spawning a jittery
-	## oscillator permanently attached to the boat.
+	## The render and physics surfaces read this same impulse list. This radial
+	## packet is for genuinely point-like entries (person, anchor, debris, rain),
+	## never for the boat hull; hull_slam() owns that extended contact.
 	_impacts.push_front({
 		"pos": pos,
 		"born": wave_time,
@@ -1071,29 +1136,6 @@ func _add_impact(pos: Vector2, strength: float,
 		_local_field.inject(pos, maxf(width * 1.35, 0.32), strength * 0.18)
 	if _impacts.size() > MAX_IMPACTS:
 		_impacts.resize(MAX_IMPACTS)
-
-
-func _update_heave_radiation(delta: float, boat_xz: Vector2, heave_velocity: float) -> void:
-	## A heaving hull radiates once per half-cycle, at the turning point. Emitting
-	## every frame made a comb of narrow rings; a broad pulse at each reversal is
-	## both visible and stable, and its energy follows the measured heave peak.
-	_heave_wave_cd -= delta
-	_heave_peak = maxf(_heave_peak, absf(heave_velocity))
-	if not _heave_ready:
-		_heave_prev = heave_velocity
-		_heave_ready = true
-		return
-	var crossed := (_heave_prev > 0.0 and heave_velocity <= 0.0) \
-			or (_heave_prev < 0.0 and heave_velocity >= 0.0)
-	if crossed:
-		if _heave_wave_cd <= 0.0 and _heave_peak > 0.06:
-			# Deliberately strong while tuning: makes the half-cycle radiation easy
-			# to read from deck. Once its shape is approved this can be scaled back.
-			var strength := clampf(1.20 + _heave_peak * 1.60, 1.50, 4.50)
-			_add_impact(boat_xz, strength, 2.35, 1.05, 0.30, 0.42)
-			_heave_wave_cd = 1.15
-		_heave_peak = absf(heave_velocity)
-	_heave_prev = heave_velocity
 
 
 func _update_impacts(mats: Array[ShaderMaterial]) -> void:

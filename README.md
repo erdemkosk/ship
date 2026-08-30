@@ -771,15 +771,23 @@ Kıyı suyu durmaz: akar, döner ve dip yükseldiği her yerde hızlanır.
 - **Kelvin izi** — hıza bağlı olmayan 19.47° kama içinde enine + ıraksak dalga
   aileleri. Beyaz köpük kamanın tamamını değil, sadece kıçtan çıkan dar
   çalkantı izini ve kama kenarındaki kırılma çizgisini kaplar.
-  İz teknenin anlık yönüne değil, **geçtiği yola** oturur: sandalın son ~56 m'lik
-  rotası 1.75 m aralıklarla örneklenip shader'a veriliyor, `along`/`lat` bu
+  İz teknenin anlık yönüne değil, **geçtiği yola** oturur: rota hıza göre
+  1.35–4.20 m aralıklarla örneklenip shader'a veriliyor, `along`/`lat` bu
   poliçizgiye göre ölçülüyor. Yöne kilitlendiğinde dümen kırar kırmaz bütün kama
   tekneyle birlikte dönüp yana kayıyordu; artık kök hep kıçta kalıyor, arkası
   teknenin çizdiği yayı takip ediyor. Örnekler zamanla değil mesafeyle
   alınıyor (yavaş sürüklenen bir tekne izi doldurmasın diye). Her örnek doğduğu
   andaki hızı ve zamanı saklar: genlik yaşla söner ama `lambda = v²/g` ile
-  belirlenen dalga boyu sonradan küçülmez. Geometrik erişim tekne hızına göre
-  21–76 m, en eski iz 28 saniyede atılır.
+  belirlenen dalga boyu sonradan küçülmez. Kaynak rigid-body merkezinde değil
+  gerçek transom temasındadır; ilk tepeyi yüksek hızda onlarca metre geciktiren
+  sıfır fazı yerine kıçta başlayan sınırlı bir çalkantı treni kullanılır.
+  Geometrik erişim tekne hızına göre 21–122 m, en eski iz 28 saniyede atılır.
+  Uzak Kelvin geometrisi sabit hızlı teknenin referansında fiziksel olarak
+  durağandır; buna karşılık ilk 36 m'deki kısa pervane/omuz dalgaları ve köpük
+  paketleri hıza bağlı olarak kıça akar (tam güçte yaklaşık 3.9 m/s). Böylece
+  iz tekneye yapışmış bir maske gibi gelmez. Tam güç ayrıca yarım gazda doyan
+  eski basınç tavanını aşar; su yüksekliği, iki kesme omuzu, mikro eğim
+  varyansı ve köpük delikleri birlikte büyür.
 - **Pruva ve pervane** — pruva spreyi sabit bir parçacık noktası değil, her kare
   gerçek stem–dalga kesişimine oturur; temas ve ileri hız kesilince o da kesilir.
   Pervane hem yüzey çözücüsüne alternatif basınç darbeleri/kalıcı havalanma
@@ -790,10 +798,17 @@ Kıyı suyu durmaz: akar, döner ve dip yükseldiği her yerde hızlanır.
   CPU'da Jacobian taranarak gerçekten kırılan tepede sprey patlaması.
 - Sıçrama sistemi: suya düşen her şey damlacık + köpük üretir; gövde içinde su
   asla görünmez (shader maskesi).
+- **Gövde çarpması nokta darbesi değildir** — teknenin suya giren fizik probu,
+  ait olduğu strake boyunca ve omurgaya doğru uzatılmış beş örtüşen basınç
+  teması üretir. Dalganın kendi dikey orbital hızı önce tekne hızından çıkarılır;
+  yalnız suya göre gerçek iniş darbe sayılır. Gövde çarpması genel amaçlı 360°
+  Ricker/foam halkasına hiç girmez; bu yüzden hızlı rotanın arkasında düzenli
+  yuvarlak çukurlar bırakamaz. Püskürtü çarpan panelde aynı karede başlar.
 - **Islak gövde** — su hattının altında ahşap koyulaşır ve parlar; hızlı
   gidince veya deniz kabarınca üst bordalar da ıslak kalır, sonra yavaşça kurur.
 - **Sıçrama halkası** — suya düşen her şey genişleyen bir köpük halkası bırakır
-  (havuzlanmış `splash_disk`), damlacıklara ek olarak.
+  (havuzlanmış `splash_disk`), damlacıklara ek olarak. Tekne gövdesi bunun
+  dışında tutulur; halka yalnız gerçekten noktasal girişler içindir.
 
 ### Deniz tabanı
 
