@@ -160,6 +160,10 @@ func _ready() -> void:
 			_grasp_planner_test(rig, boat)
 		elif arg == "--interaction-contract-test":
 			_interaction_contract_test()
+		elif arg == "--interaction-action-test":
+			_interaction_action_test(boat)
+		elif arg == "--helm-driver-test":
+			_helm_driver_test(rig, boat)
 		elif arg == "--pull-radar":
 			_pull_radar(rig)
 		elif arg == "--pull-sounder":
@@ -588,6 +592,78 @@ func _interaction_contract_test() -> void:
 	print("[interaction-motion] hinge=%.3f linear=%.3f minimum=true release=true" % [
 			hinge_progress, linear_progress])
 	device.free()
+	get_tree().quit()
+
+
+func _interaction_action_test(boat: RigidBody3D) -> void:
+	## Gameplay dispatch is tested without a camera, hand skeleton or animation.
+	var actions := preload("res://scripts/interaction_action.gd")
+	var grips := preload("res://scripts/hands/grip_map.gd")
+	boat.set("radio_held", false)
+	if not actions.execute(boat, "radio", grips.spec_for("radio")) \
+			or not bool(boat.get("radio_held")):
+		push_error("radio interaction action failed")
+	boat.call("set_radar_pull", 0.0)
+	boat.call("set_sounder_pull", 1.0)
+	if not actions.execute(boat, "radar", grips.spec_for("radar")) \
+			or float(boat.get("radar_pull")) < 0.99 \
+			or float(boat.get("sounder_pull")) > 0.01:
+		push_error("exclusive rail interaction action failed")
+	var stove_before := bool(boat.get("stove_on"))
+	if not actions.execute(boat, "stove", grips.spec_for("stove")) \
+			or bool(boat.get("stove_on")) == stove_before:
+		push_error("toggle interaction action failed")
+	boat.set("fusebox_open", false)
+	if actions.execute(boat, "sw_cabin", grips.spec_for("sw_cabin")):
+		push_error("interaction action bypassed a closed gate")
+	var tackle: Node = boat.get("tackle")
+	var tackle_before := int(tackle.get("state")) if tackle != null else -1
+	if not actions.execute(boat, "windlass", grips.spec_for("windlass")) \
+			or tackle == null or int(tackle.get("state")) == tackle_before:
+		push_error("child interaction action failed")
+	print("[interaction-action] radio=true rail=true toggle=true gate=true child=true")
+	get_tree().quit()
+
+
+func _helm_driver_test(rig: Node3D, boat: RigidBody3D) -> void:
+	## Numeric helm contract: both hands choose their own upper sector and a
+	## hard-over wheel produces a lifted, open-finger re-grip that seats again.
+	rig.set_mode(1)
+	var walker: RefCounted = rig.get("_walker")
+	walker.call("spawn_at", boat.HELM_STAND)
+	var arms: Node = rig.get("_arms")
+	arms.set("boat", boat)
+	await get_tree().create_timer(2.0).timeout
+	var driver: RefCounted = arms.get("_helm_driver")
+	var wheel: Node3D = boat.call("helm_wheel") as Node3D
+	for side: String in ["L", "R"]:
+		var angle: float = driver.call("pick_angle", side, boat, wheel)
+		var option: Dictionary = driver.call("candidate", side, angle, boat, wheel)
+		if float(option.get("up", -1.0)) < -0.16 \
+				or float(option.get("own_side", -1.0)) < -0.12:
+			push_error("helm/%s selected an underside or cross-body grip" % side)
+	var grip: Node3D = arms.call("_grip_node", "helm", "L") as Node3D
+	driver.call("reset", "L")
+	driver.call("seat", "L", boat, wheel, grip)
+	var original_rotation := wheel.rotation.z
+	wheel.rotation.z += 1.10
+	driver.call("ride", "L", 0.001, boat, wheel, grip)
+	var minimum_hold := 1.0
+	var maximum_lift := 0.0
+	for _i in 20:
+		var hold: float = driver.call("ride", "L", 0.02, boat, wheel, grip)
+		minimum_hold = minf(minimum_hold, hold)
+		maximum_lift = maxf(maximum_lift, absf(grip.position.z))
+	wheel.rotation.z = original_rotation
+	var seated_radius := Vector2(grip.position.x, grip.position.y).length()
+	if minimum_hold > 0.25 or maximum_lift < 0.03:
+		push_error("helm regrip did not open and lift: hold=%.2f lift=%.3f" % [
+				minimum_hold, maximum_lift])
+	if absf(seated_radius - 0.29) > 0.004 or absf(grip.position.z) > 0.004:
+		push_error("helm regrip did not reseat on rim: radius=%.3f z=%.3f" % [
+				seated_radius, grip.position.z])
+	print("[helm-driver] sectors=true min_hold=%.2f lift=%.3f seated=%.3f" % [
+			minimum_hold, maximum_lift, seated_radius])
 	get_tree().quit()
 
 
@@ -1296,8 +1372,7 @@ func _turn_test(dir: String) -> void:
 	Input.action_press("boat_left")
 	for i in 3:
 		await get_tree().create_timer(0.55).timeout
-		var img := get_viewport().get_texture().get_image()
-		img.save_png("%s/turn_%d.png" % [dir, i])
+		await _shot(dir, "turn_%d" % i)
 		print("turn shot ", i)
 	get_tree().quit()
 

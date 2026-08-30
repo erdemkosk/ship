@@ -7,6 +7,62 @@ class_name GraspPlanner
 ## is every point of that approach legal, and which legal solution costs less?
 
 
+static func evaluate_frame(rig: Node, side: String, contact: Vector3,
+		fingers: Vector3, palm: Vector3, natural_frame: bool,
+		allow_fallback: bool) -> Dictionary:
+	var ev: Dictionary = rig.consider(side, contact,
+			Vector3.ZERO if natural_frame else fingers,
+			Vector3.ZERO if natural_frame else palm)
+	# Contact semantics guide the grasp, but may never authorize a snapped wrist.
+	if allow_fallback and not natural_frame and (float(ev.get("wrist_break", 0.0)) \
+			> float(rig.WRIST_CONE) * 0.85 \
+			or float(ev.get("palm_twist", 0.0)) > deg_to_rad(125.0)):
+		ev = rig.consider(side, contact)
+		ev["natural_fallback"] = true
+	return ev
+
+
+static func sample_candidate(rig: Node, side: String, contact: Vector3,
+		fingers: Vector3, palm: Vector3, approach: float, assist_cap: float,
+		natural_frame: bool, allow_fallback: bool,
+		soft_occupancy := 0.0) -> Dictionary:
+	## Build and evaluate the whole approach path for either catalog or runtime
+	## interactables. The rig's temporary assist is restored before returning.
+	var old_assist: float = rig.reach_assist(side)
+	var goal_axes: Dictionary = rig.natural_axes(side, contact) \
+			if natural_frame else {"fingers": fingers.normalized(),
+					"palm": palm.normalized()}
+	var points: Array[Vector3] = []
+	for alpha: float in [0.0, 0.34, 0.67, 1.0]:
+		points.append(contact - (goal_axes["palm"] as Vector3) \
+				* maxf(approach, 0.0) * (1.0 - alpha))
+	var worst_leftover := 0.0
+	for point: Vector3 in points:
+		var raw_ev := evaluate_frame(rig, side, point, fingers, palm,
+				natural_frame, allow_fallback)
+		worst_leftover = maxf(worst_leftover, float(raw_ev.get("leftover", 0.0)))
+	var needed := 0.0
+	if assist_cap > 0.0:
+		needed = minf(maxf(worst_leftover + 0.025, 0.025), assist_cap)
+	rig.set_reach_assist(side, needed)
+	var path: Array[Dictionary] = []
+	for point: Vector3 in points:
+		path.append(evaluate_frame(rig, side, point, fingers, palm,
+				natural_frame, allow_fallback))
+	var end: Dictionary = path.back()
+	var candidate := {
+		"side": side,
+		"end": end,
+		"path": path,
+		"required_assist": needed,
+		"soft_occupancy": soft_occupancy,
+		"fingers": end.get("fingers", goal_axes["fingers"]),
+		"palm": end.get("palm", goal_axes["palm"]),
+	}
+	rig.set_reach_assist(side, old_assist)
+	return candidate
+
+
 static func admissible(ev: Dictionary, wrist_cone: float) -> bool:
 	return float(ev.get("leftover", INF)) <= 0.025 \
 			and float(ev.get("elbow_cost", PI)) <= deg_to_rad(10.0) \

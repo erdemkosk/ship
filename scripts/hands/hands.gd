@@ -18,6 +18,12 @@ extends Node3D
 const RIG := preload("res://scripts/hands/hand_rig.gd")
 const GRASP_PLANNER := preload("res://scripts/hands/grasp_planner.gd")
 const INTERACTION_MOTION := preload("res://scripts/hands/interaction_motion.gd")
+const GESTURE_STATE := preload("res://scripts/hands/hand_gesture.gd")
+const HELM_DRIVER := preload("res://scripts/hands/helm_hand_driver.gd")
+const LADDER_DRIVER := preload("res://scripts/hands/ladder_hand_driver.gd")
+const WATCH_DRIVER := preload("res://scripts/hands/watch_hand_driver.gd")
+const FACE_DRIVER := preload("res://scripts/hands/face_hand_driver.gd")
+const SWIM_DRIVER := preload("res://scripts/hands/swim_hand_driver.gd")
 
 ## Fired at the exact contact phase of a hand-authored interaction.  The camera
 ## owns gameplay intent; the hand owns when flesh actually reaches the control.
@@ -30,37 +36,24 @@ signal action_contact(id: String)
 ## anatomical solver without granting two-metre ghost arms.
 const MAX_REACH_ASSIST := 0.38
 
-## Wheel arc a hand rides before re-gripping — a helmsman takes a fresh hold,
-## they do not wind their wrist up.
-const REGRIP_ARC := 0.9
-const REGRIP_TIME := 0.34
-## How far the palm lifts off the rim while it slides to the fresh hold.
-const REGRIP_LIFT := 0.07
-const RIM := 0.29          # helm rim radius (boat.gd torus: inner .26 outer .32)
-const RIM_SAMPLES := 72
-## A hand may pass a little below the hub while the wheel turns, but it must
-## let go before it becomes an underhand hold.  This is measured in the boat's
-## up direction, so heel does not make the hand re-grip on every wave.
-const RIM_BOTTOM_REGRIP := -0.16
-
 var boat: Node3D
 var rig: Node3D
+var _helm_driver := HELM_DRIVER.new()
+var _ladder_driver := LADDER_DRIVER.new()
+var _watch_driver := WATCH_DRIVER.new()
+var _face_driver := FACE_DRIVER.new()
+var _swim_driver := SWIM_DRIVER.new()
 
 var _cam: Camera3D
 var _active := false
 var _claim := {"L": "", "R": ""}
 var _grips := {}
-var _rim_angle := {}
-var _rim_ref := {}
-var _regrip := {"L": 0.0, "R": 0.0}
-var _rim_from := {}
-var _rim_to := {}
 var _inspect := ""
 ## Per-hand interaction phase.  A gesture moves through approach -> contact ->
 ## actuation -> release, and emits action_contact exactly once at contact.
 ## Dictionary fields: id, t, duration, contact_at, fired, hold_after,
 ## release_after, approach.
-var _gesture := {"L": {}, "R": {}}
+var _gesture: Dictionary = {"L": null, "R": null}
 ## Withdrawal. When a claim ends the hand does not vanish and does not stay
 ## planted — it travels back out of frame from wherever it was, over about a
 ## third of a second. Without this the hand simply held its last pose in the
@@ -74,29 +67,16 @@ var _last_grip := {"L": Vector3.ZERO, "R": Vector3.ZERO}
 ## Gestures at your own face rather than at the ship: pulling a mask on, and
 ## wiping the inside of its glass. They have no device to hang a grip on — the
 ## thing they touch is you — so they are driven straight in camera space.
-var _face := ""
-var _face_t := 0.0
 ## The dive watch. B held raises the left arm to read it — a HELD gesture, not
 ## a one-shot: the arm stays up exactly as long as the button does, which is
 ## how looking at a watch actually works. It outranks every left-hand claim
 ## (the wheel gets the hand back the moment B lifts) and it works in the water,
 ## where the depth row is the whole point of owning the thing.
-var _watch_on := false
-var _watch_t := 0.0
-var _watch_clock := 0.0
-var _watch_tod := 12.0
-var _watch_depth := 0.0
 ## Where the wiping finger is, in the mask shader's own screen space, and which
 ## way it is travelling. The glass has to clear UNDER THE HAND — read off a
 ## timer instead and the fog cleared left-to-right while the hand went
 ## right-to-left, which is worse than not animating it at all.
-var _wipe_x := 9.0
-var _wipe_dir := -1.0
-var _ladder := false
-var _ladder_y := 0.0
-var _lad_pos := {}
 var _dbg := 0
-var _swim_t := 0.0
 ## Walk cycle for the idle hang. `walking` arrives from the camera; we keep
 ## our own phase so the two arms stay opposite and start/stop without a snap.
 var _stride := 0.0
@@ -112,6 +92,7 @@ func setup(cam: Camera3D) -> void:
 	rig = RIG.new()
 	add_child(rig)
 	rig.setup(cam)
+	_helm_driver.setup(rig)
 	rig.set_visible_hands(false)
 
 
@@ -124,13 +105,13 @@ func set_active(on: bool) -> void:
 		# them open.
 		_cam.near = 0.05 if _active else 0.10
 	if not _active:
-		_watch_on = false
+		_watch_driver.force_lower()
 		if boat != null:
 			# Leaving first person parks whatever the powered rails hold.
 			boat.call("set_radar_pull", 0.0)
 			boat.call("set_sounder_pull", 0.0)
 		_claim = {"L": "", "R": ""}
-		_gesture = {"L": {}, "R": {}}
+		_gesture = {"L": null, "R": null}
 		_inspect = ""
 
 
@@ -146,12 +127,11 @@ func body_lean_local() -> Vector3:
 		return Vector3.ZERO
 	var phase := 0.0
 	for side: String in ["L", "R"]:
-		var gs: Dictionary = _gesture.get(side, {})
-		if gs.is_empty():
+		var gs: HandGesture = _gesture.get(side)
+		if gs == null:
 			continue
-		var u := clampf(float(gs.get("t", 0.0)) \
-				/ maxf(float(gs.get("duration", 0.01)), 0.01), 0.0, 1.0)
-		var contact := float(gs.get("contact_at", 0.38))
+		var u := clampf(gs.phase(), 0.0, 1.0)
+		var contact := gs.contact_at
 		var side_phase := 1.0
 		if u > contact:
 			side_phase = 1.0 - smoothstep(contact, 0.88, u)
@@ -212,44 +192,35 @@ func plan_world_grasp(contact: Vector3, fingers := Vector3.ZERO,
 	for side: String in ["L", "R"]:
 		var natural_frame := fingers.length_squared() < 0.25 \
 				or palm.length_squared() < 0.25
-		candidates[side] = _sample_grasp_candidate(side, contact, fingers, palm,
-				approach, assist_cap, natural_frame, true)
+		candidates[side] = GRASP_PLANNER.sample_candidate(rig, side, contact,
+				fingers, palm, approach, assist_cap, natural_frame, true,
+				0.15 if _claim.get(side, "") in ["helm", "telegraph"] else 0.0)
 	return GRASP_PLANNER.choose(candidates, rig.WRIST_CONE,
 			{"L": _locked("L"), "R": _locked("R")}, preferred)
 
 
 func set_watch(held: bool, tod: float, depth: float) -> void:
-	if held and not _watch_on and _claim["L"] != "":
+	if _watch_driver.set_state(held, tod, depth) and _claim["L"] != "":
 		# Rising edge: whatever the left hand held, it lets go of first.
 		_release("L")
-	_watch_on = held
-	_watch_tod = tod
-	_watch_depth = depth
 
 
 func _watch_up() -> bool:
-	return _watch_on or _watch_t > 0.01
+	return _watch_driver.is_up()
 
 
 func face_gesture(kind: String) -> void:
-	_face = kind
-	_face_t = 0.0
-	_wipe_x = 9.0
-	_wipe_dir = -1.0
+	_face_driver.start(kind)
 
 
 func wipe_front() -> Vector2:
 	## (x, direction) of the finger on the glass. x is in the same units the
 	## mask shader uses: screen, centred, aspect-corrected.
-	return Vector2(_wipe_x, _wipe_dir)
+	return _face_driver.wipe_front()
 
 
 func set_sea_ladder(on: bool, feet_y: float) -> void:
-	## Called from the camera with the walker's state. `feet_y` is boat-local.
-	if on and not _ladder:
-		_lad_pos.clear()
-	_ladder = on
-	_ladder_y = feet_y
+	_ladder_driver.set_state(on, feet_y)
 
 
 func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
@@ -257,47 +228,44 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 	boat = p_boat
 	if rig == null or not rig.is_ready():
 		return
-	# The watch runs whether or not anyone is looking at it — a watch does.
-	_watch_clock += delta
-	_watch_t = move_toward(_watch_t, 1.0 if (_watch_on and _active) else 0.0,
-			delta / 0.26)
-	if rig.has_method("set_watch_display"):
-		var hh := floorf(_watch_tod)
-		var mins := floorf((_watch_tod - hh) * 60.0)
-		var night := _watch_tod < 5.5 or _watch_tod > 18.5
-		# The backlight is the sea's and the night's: underwater it is on,
-		# after dark it is on, on a grey afternoon deck it is a dead film.
-		var glw := 0.95 if _watch_depth > 0.02 else (0.65 if night else 0.06)
-		rig.set_watch_display(hh, mins, _watch_clock, _watch_depth,
-				1.013 + _watch_depth * 0.1003, glw)
-	if _face != "" and _active:
+	_watch_driver.update(delta, _active, rig)
+	if _face_driver.is_active() and _active:
 		# Ahead of everything, including the swimming test: wiping the glass is
 		# a thing you do precisely when you are in the water.
 		rig.set_visible_hands(true)
-		if _drive_face(delta):
-			_face = ""
+		var face_result: Dictionary = _face_driver.drive(delta, _cam, rig)
+		for side: String in face_result.get("contacts", {}):
+			_last_grip[side] = face_result["contacts"][side]
+			_rest_t[side] = 0.0
+		if bool(face_result.get("rest_left", false)):
+			_rest_hand("L")
+		if bool(face_result.get("done", false)):
 			_rest_t["L"] = 0.0
 			_rest_t["R"] = 0.0
 		_finish(delta)
 		return
-	if _ladder and _active and boat != null:
+	if _ladder_driver.is_active() and _active and boat != null:
 		rig.set_visible_hands(true)
 		_claim = {"L": "", "R": ""}
 		_inspect = ""
-		_drive_ladder("L", delta)
-		_drive_ladder("R", delta)
+		for side: String in ["L", "R"]:
+			_last_grip[side] = _ladder_driver.drive(side, delta, boat, rig)
+			_rest_t[side] = 0.0
 		_finish(delta)
 		return
 	if swimming and _active:
 		rig.set_visible_hands(true)
 		_claim = {"L": "", "R": ""}
 		_inspect = ""
-		_swim_t += delta
+		_swim_driver.advance(delta)
 		if _watch_up():
-			_drive_watch(delta)
+			_last_grip["L"] = _watch_driver.drive(_cam, rig)
+			_rest_t["L"] = 0.0
 		else:
-			_drive_swim("L", delta)
-		_drive_swim("R", delta)
+			_last_grip["L"] = _swim_driver.drive("L", _cam, rig)
+			_rest_t["L"] = 0.0
+		_last_grip["R"] = _swim_driver.drive("R", _cam, rig)
+		_rest_t["R"] = 0.0
 		_finish(delta)
 		return
 	if not _active or boat == null:
@@ -366,7 +334,8 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		if _claim[side] == "":
 			_rest_t[side] = minf(_rest_t[side] + delta, 1.0)
 		if side == "L" and _watch_up():
-			_drive_watch(delta)
+			_last_grip["L"] = _watch_driver.drive(_cam, rig)
+			_rest_t["L"] = 0.0
 		else:
 			_drive(side, delta)
 	_finish(delta)
@@ -374,7 +343,7 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 
 func _finish(delta: float) -> void:
 	if rig.has_method("set_watch_read"):
-		rig.set_watch_read(_watch_t)
+		rig.set_watch_read(_watch_driver.amount())
 	rig.update(delta)
 
 
@@ -382,15 +351,15 @@ func _finish(delta: float) -> void:
 
 func _take(side: String, id: String) -> void:
 	_claim[side] = id
-	_gesture[side] = {}
-	_regrip[side] = 0.0
+	_gesture[side] = null
+	_helm_driver.reset(side)
 	if id == "helm":
-		_seat_on_rim(side)
+		_helm_driver.seat(side, boat, _device_of("helm"), _grip_node("helm", side))
 
 
 func _release(side: String) -> void:
 	_claim[side] = ""
-	_gesture[side] = {}
+	_gesture[side] = null
 	rig.set_reach_assist(side, 0.0)
 	rig.release(side)
 
@@ -468,95 +437,79 @@ func _admissible(ev: Dictionary, reach_slack := 0.0) -> bool:
 
 func _start_gesture(side: String, id: String, spec: Dictionary,
 		release_after: bool) -> void:
-	var duration := maxf(float(spec.get("gesture", 0.0)), 0.05)
 	var device := _device_of(id)
-	_gesture[side] = {
-		"id": id,
-		"t": 0.0,
-		"duration": duration,
-		"contact_at": clampf(float(spec.get("contact_at", 0.38)), 0.12, 0.78),
-		"fired": false,
-		"hold_after": bool(spec.get("hold_after", false)),
-		"release_after": release_after,
-		"approach": maxf(float(spec.get("approach", 0.08)), 0.0),
-		"follow_motion": spec.get("follow_motion", {}),
-		"motion_start": INTERACTION_MOTION.snapshot(device),
-	}
+	_gesture[side] = GESTURE_STATE.new(id, spec, release_after,
+			INTERACTION_MOTION.snapshot(device))
 
 
-func _motion_progress(gs: Dictionary) -> float:
-	var follow: Dictionary = gs.get("follow_motion", {})
-	var device := _device_of(str(gs.get("id", "")))
-	return INTERACTION_MOTION.progress(follow, gs.get("motion_start", {}), device)
+func _motion_progress(gs: HandGesture) -> float:
+	var device := _device_of(gs.id)
+	return INTERACTION_MOTION.progress(gs.follow_motion, gs.motion_start, device)
 
 
 func _tick_gestures(delta: float) -> void:
 	for side: String in ["L", "R"]:
-		var gs: Dictionary = _gesture[side]
-		if gs.is_empty():
+		var gs: HandGesture = _gesture[side]
+		if gs == null:
 			continue
-		gs["t"] = float(gs["t"]) + delta
-		var u: float = float(gs["t"]) / maxf(float(gs["duration"]), 1e-4)
-		if not bool(gs["fired"]) and u >= float(gs["contact_at"]):
+		gs.t += delta
+		var u := gs.phase()
+		if not gs.fired and u >= gs.contact_at:
 			# The player or the fitting may have moved during approach.  Re-solve
 			# at the instant of contact; an out-of-reach ghost hand never gets to
 			# operate gameplay merely because it started close enough.
-			if not _can_take(side, str(gs["id"]), true):
-				var keep_existing := bool(gs["hold_after"]) \
+			if not _can_take(side, gs.id, true):
+				var keep_existing := gs.hold_after \
 						and _on(boat, "radio_held")
-				_gesture[side] = {}
+				_gesture[side] = null
 				if not keep_existing:
 					_release(side)
 				continue
-			gs["fired"] = true
-			_gesture[side] = gs
-			action_contact.emit(str(gs["id"]))
+			gs.fired = true
+			action_contact.emit(gs.id)
 			# The callback is synchronous and may deliberately release this hand.
-			if _gesture[side].is_empty():
+			if _gesture[side] == null:
 				continue
 		# Hinged parts can run away from the body after contact (a powered hatch
 		# is the obvious case). Follow their real arc only while the new contact
 		# remains anatomically legal; then let the fingers peel off instead of
 		# letting parentage drag the wrist past arm length.
-		if bool(gs["fired"]) and not bool(gs["hold_after"]):
-			var after_contact := float(gs["t"]) \
-					- float(gs["duration"]) * float(gs["contact_at"])
-			var follow: Dictionary = gs.get("follow_motion", {})
+		if gs.fired and not gs.hold_after:
+			var after_contact := gs.after_contact()
+			var follow := gs.follow_motion
 			if not follow.is_empty():
 				if INTERACTION_MOTION.should_release(follow, after_contact,
 						_motion_progress(gs)):
-					_gesture[side] = {}
+					_gesture[side] = null
 					_release(side)
 					continue
-			var contact_ok := _can_take(side, str(gs["id"]), true)
+			var contact_ok := _can_take(side, gs.id, true)
 			var tracks_ok := true
-			if u > float(gs["contact_at"]) + 0.05:
-				var live_grip := _grip_node(str(gs["id"]), side)
+			if u > gs.contact_at + 0.05:
+				var live_grip := _grip_node(gs.id, side)
 				if live_grip != null:
 					var wrist: Transform3D = rig.wrist_global(side)
 					# About 8 cm is the measured palm-to-wrist offset. Eighteen
 					# allows follow-through, but not a visibly detached hand.
 					tracks_ok = wrist.origin.distance_to(live_grip.global_position) < 0.18
 			if not contact_ok or not tracks_ok:
-				_gesture[side] = {}
+				_gesture[side] = null
 				_release(side)
 				continue
 		if u >= 1.0:
-			var keep := bool(gs["hold_after"]) and not bool(gs["release_after"])
-			_gesture[side] = {}
+			var keep := gs.hold_after and not gs.release_after
+			_gesture[side] = null
 			if keep:
 				# The handset is now at the ear; the pickup lean belongs to the
 				# approach, not to the whole time it remains in the hand.
 				rig.set_reach_assist(side, 0.0)
 			else:
 				_release(side)
-		else:
-			_gesture[side] = gs
 
 
 func _gesture_is(side: String, id: String) -> bool:
-	var gs: Dictionary = _gesture.get(side, {})
-	return not gs.is_empty() and str(gs.get("id", "")) == id
+	var gs: HandGesture = _gesture.get(side)
+	return gs != null and gs.id == id
 
 
 func _grip_evaluation(side: String, id: String) -> Dictionary:
@@ -565,7 +518,9 @@ func _grip_evaluation(side: String, id: String) -> Dictionary:
 	# another 29 cm away — precisely the sort of technically-reachable lie this
 	# system is meant to reject.
 	if id == "helm":
-		var cand: Dictionary = _rim_candidate(side, _pick_rim_angle(side))
+		var wheel := _device_of("helm")
+		var cand: Dictionary = _helm_driver.candidate(side,
+				_helm_driver.pick_angle(side, boat, wheel), boat, wheel)
 		return cand.get("evaluation", {})
 	var spec: Dictionary = GripMap.spec_for(id)
 	var contact: Vector3 = _side_contact(id, side)
@@ -576,62 +531,8 @@ func _grip_evaluation(side: String, id: String) -> Dictionary:
 func _evaluate_grip_frame(side: String, id: String, contact: Vector3,
 		asked: Dictionary) -> Dictionary:
 	var spec: Dictionary = GripMap.spec_for(id)
-	return _evaluate_candidate_frame(side, contact, asked["fingers"], asked["palm"],
-			false, not GripMap.welded(spec))
-
-
-func _evaluate_candidate_frame(side: String, contact: Vector3, fingers: Vector3,
-		palm: Vector3, natural_frame: bool, allow_fallback: bool) -> Dictionary:
-	var ev: Dictionary = rig.consider(side, contact,
-			Vector3.ZERO if natural_frame else fingers,
-			Vector3.ZERO if natural_frame else palm)
-	# Contact semantics guide the grasp, but may never authorize a snapped wrist.
-	if allow_fallback and not natural_frame and (float(ev.get("wrist_break", 0.0)) \
-			> rig.WRIST_CONE * 0.85 \
-			or float(ev.get("palm_twist", 0.0)) > deg_to_rad(125.0)):
-		ev = rig.consider(side, contact)
-		ev["natural_fallback"] = true
-	return ev
-
-
-func _sample_grasp_candidate(side: String, contact: Vector3, fingers: Vector3,
-		palm: Vector3, approach: float, assist_cap: float, natural_frame: bool,
-		allow_fallback: bool) -> Dictionary:
-	## Single source of truth for catalog and runtime-created interactables.
-	var old_assist: float = rig.reach_assist(side)
-	var goal_axes: Dictionary = rig.natural_axes(side, contact) \
-			if natural_frame else {"fingers": fingers.normalized(),
-					"palm": palm.normalized()}
-	var points: Array[Vector3] = []
-	for alpha: float in [0.0, 0.34, 0.67, 1.0]:
-		points.append(contact - (goal_axes["palm"] as Vector3) \
-				* maxf(approach, 0.0) * (1.0 - alpha))
-	var worst_leftover := 0.0
-	for point: Vector3 in points:
-		var raw_ev := _evaluate_candidate_frame(side, point, fingers, palm,
-				natural_frame, allow_fallback)
-		worst_leftover = maxf(worst_leftover, float(raw_ev.get("leftover", 0.0)))
-	var needed := 0.0
-	if assist_cap > 0.0:
-		needed = minf(maxf(worst_leftover + 0.025, 0.025), assist_cap)
-	rig.set_reach_assist(side, needed)
-	var path: Array[Dictionary] = []
-	for point: Vector3 in points:
-		path.append(_evaluate_candidate_frame(side, point, fingers, palm,
-				natural_frame, allow_fallback))
-	var end: Dictionary = path.back()
-	var candidate := {
-		"side": side,
-		"end": end,
-		"path": path,
-		"required_assist": needed,
-		"soft_occupancy": 0.15 if _claim.get(side, "") in ["helm", "telegraph"]
-				else 0.0,
-		"fingers": end.get("fingers", goal_axes["fingers"]),
-		"palm": end.get("palm", goal_axes["palm"]),
-	}
-	rig.set_reach_assist(side, old_assist)
-	return candidate
+	return GRASP_PLANNER.evaluate_frame(rig, side, contact,
+			asked["fingers"], asked["palm"], false, not GripMap.welded(spec))
 
 
 func _planned_candidate(side: String, id: String, assist_cap: float) -> Dictionary:
@@ -641,8 +542,9 @@ func _planned_candidate(side: String, id: String, assist_cap: float) -> Dictiona
 	var asked: Dictionary = _asked_axes(id, side)
 	var approach := maxf(float(GripMap.spec_for(id).get("approach", 0.0)), 0.0)
 	var spec: Dictionary = GripMap.spec_for(id)
-	return _sample_grasp_candidate(side, goal, asked["fingers"], asked["palm"],
-			approach, assist_cap, false, not GripMap.welded(spec))
+	return GRASP_PLANNER.sample_candidate(rig, side, goal, asked["fingers"],
+			asked["palm"], approach, assist_cap, false, not GripMap.welded(spec),
+			0.15 if _claim.get(side, "") in ["helm", "telegraph"] else 0.0)
 
 
 func _pick_hand(id: String, preferred := "", reach_slack := 0.0) -> String:
@@ -704,7 +606,7 @@ func _drive(side: String, delta: float) -> void:
 		return
 	var hold := 1.0
 	if id == "helm":
-		hold = _ride_rim(side, delta)
+		hold = _helm_driver.ride(side, delta, boat, _device_of("helm"), g)
 		g = _grip_node(id, side)
 	_rest_t[side] = 0.0
 	var xf: Transform3D = g.global_transform
@@ -723,19 +625,18 @@ func _drive(side: String, delta: float) -> void:
 	# rail supplies the action direction; no duplicated hand animation can drift
 	# away from the object it is meant to be moving.
 	if _gesture_is(side, id):
-		var gs: Dictionary = _gesture[side]
-		var u: float = clampf(float(gs["t"]) / maxf(float(gs["duration"]), 1e-4),
-				0.0, 1.0)
-		var contact_at: float = float(gs["contact_at"])
+		var gs: HandGesture = _gesture[side]
+		var u := clampf(gs.phase(), 0.0, 1.0)
+		var contact_at := gs.contact_at
 		if u < contact_at:
 			var a: float = clampf(u / maxf(contact_at, 1e-4), 0.0, 1.0)
 			a = a * a * (3.0 - 2.0 * a)
-			xf.origin -= xf.basis.y * float(gs["approach"]) * (1.0 - a)
+			xf.origin -= xf.basis.y * gs.approach * (1.0 - a)
 			hold *= lerpf(0.16, 1.0, a)
-		elif (not bool(gs["hold_after"])) or bool(gs["release_after"]):
+		elif (not gs.hold_after) or gs.release_after:
 			# Keep the grasp through the object's first movement, then open before
 			# withdrawal.  Releasing at the same instant as contact reads as a tap.
-			var follow: Dictionary = gs.get("follow_motion", {})
+			var follow := gs.follow_motion
 			var let_go := smoothstep(0.72, 1.0, u)
 			if not follow.is_empty():
 				# Peel the fingers as the fitting moves, irrespective of its speed.
@@ -778,7 +679,8 @@ func _rest_hand(side: String) -> void:
 	var ph: float = _gait + (0.0 if side == "R" else PI)
 	var s := sin(ph)
 	var w: float = smoothstep(0.02, 0.38, _stride)
-	var idle := sin(_watch_clock * 1.15 + (0.0 if side == "R" else 1.7)) * 0.010
+	var idle := sin(_watch_driver.clock() * 1.15 \
+			+ (0.0 if side == "R" else 1.7)) * 0.010
 	# Visible in the lower third, a real step, but the wrist does not roll —
 	# that is what walked the watch off the left arm.
 	var home: Vector3 = c * Vector3(
@@ -793,361 +695,6 @@ func _rest_hand(side: String) -> void:
 	var palm: Vector3 = c.basis * Vector3(-out * 0.95, -0.12, 0.16)
 	_last_grip[side] = contact
 	rig.grip(side, contact, fingers, palm, 1.0, "open", 0.18)
-
-
-func _drive_swim(side: String, _delta: float) -> void:
-	## Front crawl as seen from inside the head: each arm pulls through the
-	## lower third of the picture and recovers outboard. Idle treading is the
-	## same path, slower.
-	var c: Transform3D = _cam.global_transform
-	var o: float = 1.0 if side == "R" else -1.0
-	var move := Input.get_vector("boat_left", "boat_right", "boat_backward", "boat_forward")
-	var rate := lerpf(1.35, 2.55, clampf(move.length(), 0.0, 1.0))
-	var ph: float = _swim_t * rate + (0.0 if side == "R" else PI)
-	var pull := sin(ph)
-	var rec := cos(ph)
-	var x: float = o * (0.20 + (1.0 - absf(pull)) * 0.06)
-	var y: float = -0.26 + rec * 0.09
-	var z: float = -0.30 - pull * 0.14
-	var pt: Vector3 = c * Vector3(x, y, z)
-	var fingers: Vector3 = c.basis * Vector3(o * 0.18, -0.22 - pull * 0.15, -0.96)
-	var palm: Vector3 = c.basis * Vector3(o * 0.08, -0.92, 0.18)
-	_last_grip[side] = pt
-	_rest_t[side] = 0.0
-	var hold: float = clampf(0.25 + pull * 0.35, 0.12, 0.7)
-	rig.grip(side, pt, fingers, palm, 1.0, "open", hold)
-
-
-# --- the watch ----------------------------------------------------------------
-
-func _drive_watch(delta: float) -> void:
-	## The left arm comes up across the chest and the back of the wrist turns
-	## to the eye. Driven in camera space like the face gestures: the watch is
-	## read fifteen centimetres from the lens, where a solved-to-target arm
-	## wobbles and a keyframed path does not.
-	##
-	## The PALM is what grip() places and the palm is on the far side of the
-	## wrist — so the contact aims palm-DOWN-and-away, and what faces you is
-	## the strap side with the case on it.
-	var c: Transform3D = _cam.global_transform
-	var u: float = _watch_t * _watch_t * (3.0 - 2.0 * _watch_t)
-	# Up from where an idle hand hangs, along a slight arc — lifted straight
-	# in it reads as a puppet on a string. The end point stays far enough out
-	# that the forearm passes UNDER the frame instead of through the lens.
-	var lo := Vector3(-0.30, -0.62, -0.34)
-	# Higher than it used to sit, because the wrist is straighter now. With a
-	# real break in the wrist the watch could hang low and still face you; held
-	# in line with the arm it only comes into view if the whole arm comes up —
-	# which is exactly what a person does.
-	var hi := Vector3(0.055, -0.062, -0.268)
-	var pt: Vector3 = lo.lerp(hi, u)
-	pt.x += sin(u * PI) * -0.05
-	var contact: Vector3 = c * pt
-	# The POSE is what presents the watch, because nothing else is allowed to:
-	# the case is strapped flat to the wrist and does not turn toward anyone.
-	#
-	# The gesture is the one everybody actually makes — the forearm swung up
-	# across the chest, and the hand very nearly IN LINE with it. That last
-	# part is the whole of looking natural: a wrist held out to read a watch
-	# barely breaks at all. So the hand is built FROM the live forearm line
-	# with a small, fixed extension, rather than from a direction picked by
-	# eye — pick it by eye and the break is whatever falls out, which is how
-	# it kept coming back cranked.
-	#
-	# Supination is free and extension is rationed: the face is turned toward
-	# the eye by rolling the forearm, which costs nothing anatomically, and
-	# never by bending the wrist further.
-	var fore: Vector3 = (contact - (rig.shoulder_global("L") as Vector3)).normalized()
-	var to_eye: Vector3 = (c.origin - contact).normalized()
-	var dorsal: Vector3 = (to_eye - to_eye.project(fore)).normalized()
-	var ext := deg_to_rad(12.0)
-	var fingers: Vector3 = (fore * cos(ext) + dorsal * sin(ext)).normalized()
-	var face_n: Vector3 = (dorsal * cos(ext) - fore * sin(ext)).normalized()
-	var palm: Vector3 = -face_n
-	_last_grip["L"] = contact
-	_rest_t["L"] = 0.0
-	# A relaxed half-curl: an open starfish hand is nobody reading a watch.
-	rig.grip("L", contact, fingers, palm, u, "wrap", 0.50 * u)
-
-
-# --- your own face ------------------------------------------------------------
-
-func _drive_face(delta: float) -> bool:
-	## Returns true when the movement is finished.
-	##
-	## Both of these are read from INSIDE the head, which is the awkward part:
-	## the hand is 15 cm from the lens and any error in it is enormous. So they
-	## are keyframed as a path in camera space rather than solved to a target —
-	## three points and an ease, the way an animator would do it.
-	var c: Transform3D = _cam.global_transform
-	_face_t += delta
-	if _face == "wear":
-		var dur := 1.35
-		var u: float = clampf(_face_t / dur, 0.0, 1.0)
-		var e: float = u * u * (3.0 - 2.0 * u)
-		for side: String in ["L", "R"]:
-			var o: float = 1.0 if side == "R" else -1.0
-			# Up from your side with the mask, onto the face, then the strap
-			# over your head and away.
-			var a := Vector3(o * 0.34, -0.62, -0.34)
-			var b := Vector3(o * 0.165, -0.05, -0.30)
-			var d := Vector3(o * 0.185, 0.10, -0.02)
-			var f := Vector3(o * 0.40, -0.30, 0.10)
-			var pt: Vector3
-			if e < 0.42:
-				pt = a.lerp(b, e / 0.42)
-			elif e < 0.74:
-				pt = b.lerp(d, (e - 0.42) / 0.32)
-			else:
-				pt = d.lerp(f, (e - 0.74) / 0.26)
-			# Palm turned in toward your own face, fingers along the strap.
-			var fingers: Vector3 = c.basis * Vector3(-o * 0.35, 0.15, 0.92)
-			var palm: Vector3 = c.basis * Vector3(-o, -0.15, 0.0)
-			_last_grip[side] = c * pt
-			rig.grip(side, c * pt, fingers, palm, 1.0, "wrap",
-					clampf(1.0 - absf(e - 0.58) * 2.2, 0.15, 1.0), false)
-		return _face_t >= dur
-	# wipe: one finger, across the glass, and back down.
-	var dur2 := 0.95
-	var u2: float = clampf(_face_t / dur2, 0.0, 1.0)
-	var a2 := Vector3(0.30, -0.58, -0.26)
-	var b2 := Vector3(0.24, -0.02, -0.185)
-	var c2 := Vector3(-0.24, 0.01, -0.185)
-	var d2 := Vector3(-0.34, -0.46, -0.20)
-	var pt2: Vector3
-	if u2 < 0.24:
-		pt2 = a2.lerp(b2, u2 / 0.24)
-	elif u2 < 0.72:
-		var w: float = (u2 - 0.24) / 0.48
-		pt2 = b2.lerp(c2, w * w * (3.0 - 2.0 * w))
-	else:
-		pt2 = c2.lerp(d2, (u2 - 0.72) / 0.28)
-	# The back of the finger on the glass: palm toward you, fingertip forward.
-	var f2: Vector3 = c.basis * Vector3(-0.55, 0.05, -0.84)
-	var p2: Vector3 = c.basis * Vector3(0.0, -0.25, 0.96)
-	# Project the fingertip into the shader's space. For a camera with vertical
-	# FOV f, a point at camera (x, y, z<0) lands at p.x = x / (-z * tan(f/2) * 2)
-	# — the same centred, aspect-corrected coordinate the mask is drawn in. This
-	# is the whole synchronisation: one number, taken from the hand itself.
-	var half: float = tan(deg_to_rad(_cam.fov) * 0.5)
-	_wipe_x = pt2.x / maxf(-pt2.z * half * 2.0, 1e-3)
-	_wipe_dir = -1.0
-	_last_grip["R"] = c * pt2
-	rig.grip("R", c * pt2, f2, p2, 1.0, "point", 1.0, false)
-	_rest_hand("L")
-	return _face_t >= dur2
-
-
-# --- the boarding ladder ------------------------------------------------------
-
-const RUNG_PITCH := 0.27
-## Where a hand reaches above the feet on a ladder. NOT eye height, which is
-## where a real climber's hands are — at 1.6 the rung sits 36 cm from the lens
-## and one palm fills a third of the frame. Chest height reads as a climb and
-## keeps the hands in the bottom of the picture where hands belong.
-const RUNG_REACH := 1.12
-const RUNG_SPAN := 0.13    # hands either side of the stile centreline
-
-
-func _rung_local(i: int) -> Vector3:
-	var y: float = float(boat.SEA_LADDER_TOP) - 0.10 - float(i) * RUNG_PITCH
-	# Same six-degree rake the walker climbs; see deck_walker._sea_stand.
-	var z: float = float(boat.SEA_LADDER_Z) + y * 0.1045
-	return Vector3(float(boat.SEA_LADDER_X), y, z)
-
-
-func _drive_ladder(side: String, delta: float) -> void:
-	## Two hands, alternating, on a ladder that is moving with the ship.
-	##
-	## The rung a hand wants is picked from the FEET, not from the hand: pick it
-	## from the hand and the two chase each other up the ladder. The parity of
-	## that index decides which hand is the high one, so every rung climbed
-	## swaps the lead — which is the whole of an alternating climb, for free.
-	var top: float = float(boat.SEA_LADDER_TOP)
-	var i_f: float = (top - 0.10 - (_ladder_y + RUNG_REACH)) / RUNG_PITCH
-	var i_hi: int = int(floor(i_f))
-	var lead_is_r: bool = (i_hi % 2) == 0
-	var high: bool = (side == "R") == lead_is_r
-	var i: int = clampi(i_hi if high else i_hi + 1, 0, 6)
-	var out: float = -1.0 if side == "L" else 1.0
-	var lp: Vector3 = _rung_local(i) + Vector3(out * RUNG_SPAN, 0.024, 0.0)
-	# Palm down on the iron, fingers curling over the far side of the rung.
-	var f_l := Vector3(0.0, -0.30, -1.0)
-	var p_l := Vector3(0.0, -1.0, -0.30)
-	# At the top there are no rungs left to take: the top one is level with the
-	# deck, and what your hands actually find up there are the two grab handles
-	# standing above the cap. Reaching for a rung from up here puts both hands
-	# down by your knees, which is what it looked like.
-	if i_hi < 0:
-		var hy: float = clampf(_ladder_y + RUNG_REACH, 0.70, 1.02)
-		lp = Vector3(float(boat.SEA_LADDER_X) + out * 0.16 + out * 0.024, hy,
-				float(boat.SEA_LADDER_Z) + hy * 0.1045)
-		# A vertical post: the palm faces it, the fingers wrap round toward her.
-		f_l = Vector3(0.0, -0.25, -1.0)
-		p_l = Vector3(-out, -0.10, 0.0)
-
-	var bxf: Transform3D = (boat as Node3D).get_global_transform_interpolated()
-	var tgt: Vector3 = bxf * lp
-	var cur: Vector3 = _lad_pos.get(side, tgt)
-	# Travel to the new rung instead of appearing on it, and come off the iron
-	# on the way — a hand that slides along a rung is a hand that never let go.
-	var d: float = cur.distance_to(tgt)
-	cur = cur.lerp(tgt, 1.0 - exp(-11.0 * delta))
-	_lad_pos[side] = cur
-	var lift: Vector3 = bxf.basis.z.normalized() * minf(d, 0.34) * 0.55
-	var contact: Vector3 = cur + lift
-	var fingers: Vector3 = bxf.basis * f_l
-	var palm: Vector3 = bxf.basis * p_l
-	_last_grip[side] = contact
-	_rest_t[side] = 0.0
-	# The hold opens while the hand is in transit and closes on the rung.
-	rig.grip(side, contact, fingers, palm, 1.0, "wrap",
-			clampf(1.0 - d * 3.0, 0.15, 1.0))
-
-
-# --- the wheel ---------------------------------------------------------------
-
-func _ride_rim(side: String, delta: float) -> float:
-	## Ride the wheel round; when the wrist would be wrung out, take a fresh
-	## hold. The swap is a real hand movement, not an IK fade: the fingers open,
-	## the palm lifts off the rim and slides along an arc to the new point, and
-	## the hold closes again — all with the arm still pinned to the moving grip,
-	## so nothing snaps and nothing rubbers.
-	var wheel: Node3D = boat.call("helm_wheel") as Node3D
-	var g := _grip_node("helm", side)
-	if wheel == null or g == null:
-		return 1.0
-	if _regrip[side] > 0.0:
-		_regrip[side] = maxf(_regrip[side] - delta, 0.0)
-		var u: float = 1.0 - _regrip[side] / REGRIP_TIME
-		u = u * u * (3.0 - 2.0 * u)
-		# The transit is planned in WORLD angle. Planning it in wheel-local
-		# reads the same on paper and is wrong in practice: the wheel keeps
-		# turning underneath the swap, the local lerp plus that rotation
-		# composed into an arc that swung the hand under the hub — measured on
-		# the rim's far bottom, out of frame, every single time. Fixing the
-		# path in world space and back-solving the local angle each frame makes
-		# the hand travel the short visible arc no matter what the wheel does.
-		var world_a: float = lerp_angle(float(_rim_from[side]), float(_rim_to[side]), u)
-		var a: float = world_a - wheel.rotation.z
-		# Lift peaks mid-transit; zero at both ends so the hold seats cleanly.
-		var lift: float = REGRIP_LIFT * sin(u * PI)
-		_write_rim_grip(g, a, lift)
-		if _regrip[side] <= 0.0:
-			_rim_angle[side] = a
-			_rim_ref[side] = wheel.rotation.z
-		# Fingers open through the middle of the swap, closed at both ends.
-		return clampf(1.0 - sin(u * PI) * 0.9, 0.1, 1.0)
-	var turned: float = absf(wrapf(wheel.rotation.z - float(_rim_ref.get(side, 0.0)),
-			-PI, PI))
-	var current: Dictionary = _rim_candidate(side, float(_rim_angle.get(side, 0.0)))
-	# Rotation alone is not an ergonomic test.  A point can travel less than
-	# REGRIP_ARC yet already be under the hub, across the body, or at a broken
-	# wrist angle.  Re-grip as soon as either the travelled arc OR the live pose
-	# says the hold has stopped being one a helmsman would choose.
-	var pose_bad: bool = float(current.get("up", -1.0)) < RIM_BOTTOM_REGRIP \
-			or float(current.get("wrist_break", PI)) > rig.WRIST_CONE * 1.10 \
-			or float(current.get("palm_twist", PI)) > deg_to_rad(140.0)
-	if turned > REGRIP_ARC or pose_bad:
-		_rim_from[side] = float(_rim_angle[side]) + wheel.rotation.z
-		_rim_to[side] = _pick_rim_angle(side) + wheel.rotation.z
-		_regrip[side] = REGRIP_TIME
-	return 1.0
-
-
-func _pick_rim_angle(side: String) -> float:
-	## Evaluate the whole rim and choose the least costly human pose.  Nearest
-	## point alone preferred the bottom of the wheel whenever it happened to be
-	## a few centimetres closer to the shoulder; reachability is necessary, but
-	## it is not ergonomics.
-	var best := 0.0
-	var best_score := INF
-	for i in RIM_SAMPLES:
-		var a := float(i) / float(RIM_SAMPLES) * TAU
-		var cand: Dictionary = _rim_candidate(side, a)
-		var score: float = float(cand.get("score", INF))
-		if score < best_score:
-			best_score = score
-			best = a
-	return best
-
-
-func _rim_candidate(side: String, angle: float) -> Dictionary:
-	## Biomechanical cost of one wheel-local point.  It deliberately combines
-	## independent things rather than hiding them in a magic target point:
-	## reach/lean, crossing the torso, wrist flex, forearm roll, and the familiar
-	## upper-side sector of a one-handed helm grip.
-	var wheel: Node3D = boat.call("helm_wheel") as Node3D
-	if wheel == null or rig == null or not rig.is_ready():
-		return {"score": INF, "comfortable": false, "up": -1.0}
-	var radial_l := Vector3(cos(angle), sin(angle), 0.0)
-	var contact: Vector3 = wheel.global_transform * (radial_l * RIM)
-	var fingers: Vector3 = (wheel.global_basis * Vector3(0.0, 0.0, -1.0)).normalized()
-	var palm: Vector3 = (wheel.global_basis * -radial_l).normalized()
-	var ev: Dictionary = rig.consider(side, contact, fingers, palm)
-
-	var radial_w: Vector3 = (contact - wheel.global_position).normalized()
-	var boat_up: Vector3 = (boat as Node3D).global_basis.y.normalized()
-	var boat_right: Vector3 = (boat as Node3D).global_basis.x.normalized()
-	var side_sign := 1.0 if side == "R" else -1.0
-	var up: float = radial_w.dot(boat_up)
-	var own_side: float = radial_w.dot(boat_right) * side_sign
-	# Roughly 10:30 for the left hand and 1:30 for the right.  This is a soft
-	# preference; the arm metrics can move the answer around the sector.
-	var ideal: Vector2 = Vector2(0.72, 0.69)
-	var sector_cost := Vector2(own_side, up).distance_to(ideal)
-	var score: float = float(ev.get("distance", 1e6)) \
-			+ float(ev.get("leftover", 0.0)) * 12.0 \
-			+ float(ev.get("cross", 0.0)) * 7.0 \
-			+ float(ev.get("elbow_cost", 0.0)) * 3.2 \
-			+ float(ev.get("shoulder_raise", 0.0)) * 3.5 \
-			+ float(ev.get("wrist_break", PI)) * 1.35 \
-			+ float(ev.get("palm_twist", PI)) * 0.72 \
-			+ sector_cost * 0.85
-	if not bool(ev.get("reachable", false)):
-		score += 20.0
-	# Below the hub is not impossible anatomy, but it is not the hold someone
-	# chooses while standing at this wheel.  Keep a narrow lower-side allowance
-	# for continuity, then make the true underside lose every comparison.
-	if up < -0.08:
-		score += 4.0 + (-0.08 - up) * 12.0
-	if own_side < -0.12:
-		score += 2.5 + (-0.12 - own_side) * 5.0
-	return {
-		"score": score,
-		"comfortable": bool(ev.get("comfortable", false)) and up >= RIM_BOTTOM_REGRIP,
-		"up": up,
-		"own_side": own_side,
-		"wrist_break": ev.get("wrist_break", PI),
-		"palm_twist": ev.get("palm_twist", PI),
-		"evaluation": ev,
-	}
-
-
-func _write_rim_grip(g: Node3D, angle: float, lift: float) -> void:
-	## Grip semantics in WHEEL LOCAL, so they turn with the wheel:
-	##   contact  on the rim circle (pushed outward by `lift` during a re-grip)
-	##   fingers  through the wheel plane, away from the helmsman (local -Z)
-	##   palm     onto the rim, toward the hub (-radial)
-	var radial := Vector3(cos(angle), sin(angle), 0.0)
-	var F := Vector3(0.0, 0.0, -1.0)
-	var P := -radial
-	# The lift leaves the wheel plane toward the helmsman as well as off the
-	# rim, so the palm clears the spokes rather than scraping across them.
-	var out := radial * (RIM + lift) + Vector3(0.0, 0.0, lift * 0.8)
-	g.transform = Transform3D(Basis(P.cross(F), P, F), out)
-	if g.has_meta("natural"):
-		g.remove_meta("natural")
-
-
-func _seat_on_rim(side: String) -> void:
-	var wheel: Node3D = boat.call("helm_wheel") as Node3D
-	var g := _grip_node("helm", side)
-	if wheel == null or g == null:
-		return
-	_rim_angle[side] = _pick_rim_angle(side)
-	_rim_ref[side] = wheel.rotation.z
-	_write_rim_grip(g, _rim_angle[side], 0.0)
 
 
 func _device_of(id: String) -> Node3D:
@@ -1175,7 +722,7 @@ func _grip_node(id: String, side: String) -> Node3D:
 	g.name = "Grip_" + side
 	device.add_child(g)
 	# Prefer a grip the object already carries. Otherwise stamp the catalog
-	# frame. Rim holds stay identity — _write_rim_grip owns those every frame.
+	# frame. Rim holds stay identity — HelmHandDriver owns those every frame.
 	var stock := device.get_node_or_null("Grip") as Node3D
 	if stock != null and stock != g:
 		g.transform = stock.transform

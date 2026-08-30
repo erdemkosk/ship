@@ -20,6 +20,7 @@ const SHORTCUTS := {
 }
 const WeatherScript := preload("res://scripts/weather.gd")
 const HandGripMap := preload("res://scripts/hands/grip_map.gd")
+const InteractionActions := preload("res://scripts/interaction_action.gd")
 
 var target: Node3D
 var ocean: Node3D
@@ -172,26 +173,7 @@ func _on_hand_action_contact(id: String) -> void:
 	if target == null:
 		return
 	var spec: Dictionary = HandGripMap.spec_for(id)
-	var gate := str(spec.get("gate", ""))
-	if gate != "" and (not target.has_method("switch_state")
-			or not bool(target.call("switch_state", gate))):
-		return # the lid/guard changed state during the reach
-	match str(spec.get("action", "")):
-		"radio":
-			target.set("radio_held", not _flag(target, "radio_held"))
-		"rail":
-			var rail := str(spec.get("rail", id))
-			var other := "sounder" if rail == "radar" else "radar"
-			target.call("set_%s_pull" % other, 0.0)
-			var current: float = float(target.get(rail + "_pull"))
-			target.call("set_%s_pull" % rail, 0.0 if current > 0.5 else 1.0)
-		"tackle":
-			var tk: Node = target.get("tackle")
-			if tk != null:
-				tk.toggle()
-		"toggle":
-			if target.has_method("toggle_switch"):
-				target.toggle_switch(id)
+	InteractionActions.execute(target, id, spec)
 
 
 func set_mode(m: int) -> void:
