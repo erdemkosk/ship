@@ -154,6 +154,10 @@ func _ready() -> void:
 			_probe_hands(rig, boat)
 		elif arg.begins_with("--grip-test="):
 			_grip_test(rig, boat, arg.get_slice("=", 1))
+		elif arg.begins_with("--fusebox-test="):
+			_fusebox_grip_test(rig, boat, arg.get_slice("=", 1))
+		elif arg == "--grasp-planner-test":
+			_grasp_planner_test(rig, boat)
 		elif arg == "--pull-radar":
 			_pull_radar(rig)
 		elif arg == "--pull-sounder":
@@ -300,17 +304,33 @@ func _grip_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	arms.set("boat", boat)
 	var hr: Node = arms.get("rig")
 	var cases: Array = [
-		["radar", "radar_housing"],
-		["sounder", "sounder_housing"],
-		["ignition", "ignition_key"],
-		["radio", "radio_handset"],
+		["radar", Vector3(0.76, 2.91, 0.64)],
+		["sounder", Vector3(0.76, 2.91, 0.64)],
+		["ignition", Vector3(0.12, 2.91, 0.52)],
+		["radio", Vector3(1.10, 2.91, 0.72)],
+		# User-facing assisted reach: still works from the wheelhouse centre rather
+		# than requiring the exact numerical test stance beside the panel.
+		["fusebox", Vector3(0.0, 2.91, 1.10)],
+		["sw_cabin", Vector3(0.66, 2.91, 1.54)],
+		["fu_cabin", Vector3(0.72, 2.91, 1.56)],
+		["door_wh", Vector3(-0.36, 2.91, 3.52)],
+		["door_fwd", Vector3(0.05, 0.63, -0.02)],
+		["door_aft", Vector3(0.05, 0.63, 4.28)],
+		["stove", Vector3(0.82, 0.63, 3.80)],
+		["locker", Vector3(-0.78, 0.63, 0.82)],
+		["door_eng", Vector3(-0.10, 0.63, 2.54)],
+		# Stand beside the crank, not at the outer edge of its interaction sphere;
+		# its hand contact is offset to starboard from the drum centre.
+		["windlass", Vector3(0.0, 0.58, -2.82)],
 	]
 	for c: Array in cases:
 		var id: String = c[0]
-		var device: Node3D = boat.call(c[1]) as Node3D
+		var device: Node3D = arms.call("_device_of", id) as Node3D
 		if device == null:
 			print("[grip] %s  CIHAZ YOK" % id)
 			continue
+		w.call("spawn_at", c[1])
+		await get_tree().create_timer(0.35).timeout
 		for _i in 5:
 			var d: Vector3 = device.global_position - cam.global_position
 			if d.length_squared() > 1e-6:
@@ -318,44 +338,223 @@ func _grip_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 				rig.set("yaw", atan2(-d.x, -d.z))
 				rig.set("pitch", asin(clampf(d.y, -1.0, 1.0)))
 			await get_tree().create_timer(0.08).timeout
-		if id == "radio":
-			boat.set("radio_held", true)
-		arms.call("notify_use", id)
-		arms.set("_oneshot", 8.0)
+		var offered: bool = bool(arms.call("can_offer", id))
+		var accepted: bool = bool(arms.call("notify_use", id, true))
+		if offered != accepted:
+			push_error("reach promise mismatch for %s: offered=%s accepted=%s" % [
+					id, offered, accepted])
+		var started_side := ""
+		var started_claim: Dictionary = arms.get("_claim")
+		if str(started_claim.get("L", "")) == id:
+			started_side = "L"
+		elif str(started_claim.get("R", "")) == id:
+			started_side = "R"
+		if not accepted:
+			for eval_side in ["L", "R"]:
+				var fail_ev: Dictionary = arms.call("_grip_evaluation", eval_side, id)
+				print("[grip-eval] %s/%s reach=%s left=%.3f elbow=%.1f wrist=%.1f twist=%.1f" % [
+					id, eval_side, fail_ev.get("reachable", false),
+					float(fail_ev.get("leftover", -1.0)),
+					rad_to_deg(float(fail_ev.get("elbow_angle", 0.0))),
+					rad_to_deg(float(fail_ev.get("wrist_break", 0.0))),
+					rad_to_deg(float(fail_ev.get("palm_twist", 0.0)))])
 		await get_tree().create_timer(0.50).timeout
+		var tested_body_lean: Vector3 = rig.get("_reach_body_lean")
+		if id in ["fusebox", "windlass"] and tested_body_lean.length() < 0.06:
+			push_error("%s was assisted without visible upper-body travel" % id)
+		if id == "fusebox" and not bool(boat.get("fusebox_open")):
+			push_error("fusebox gesture reached contact but did not open the lid")
+		if id == "windlass":
+			var tested_tackle: Node = boat.get("tackle")
+			if tested_tackle == null or int(tested_tackle.get("state")) == 0:
+				push_error("windlass gesture reached contact but did not start the anchor")
 		var claim: Dictionary = arms.get("_claim")
 		var side := ""
 		if str(claim.get("L", "")) == id:
 			side = "L"
 		elif str(claim.get("R", "")) == id:
 			side = "R"
-		var g: Node3D = device.get_node_or_null("Grip_" + (side if side != "" else "R"))
+		var measured_side: String = side if side != "" else started_side
+		var g: Node3D = device.get_node_or_null("Grip_" + (measured_side \
+				if measured_side != "" else "R"))
 		var look: Vector3 = g.global_position if g != null else device.global_position
-		for _j in 4:
-			var aim: Vector3 = look - cam.global_position
-			if aim.length_squared() > 1e-6:
-				aim = aim.normalized()
-				rig.set("yaw", atan2(-aim.x, -aim.z))
-				# Hands live in the lower third; look a little under the grip
-				# or the shot is the horizon and a mast.
-				rig.set("pitch", asin(clampf(aim.y, -1.0, 1.0)) - 0.22)
-			await get_tree().create_timer(0.08).timeout
-		var ev: Dictionary = hr.call("evaluate", side if side != "" else "R",
-				device.global_position)
+		if DisplayServer.get_name() != "headless":
+			for _j in 4:
+				var aim: Vector3 = look - cam.global_position
+				if aim.length_squared() > 1e-6:
+					aim = aim.normalized()
+					rig.set("yaw", atan2(-aim.x, -aim.z))
+					# Hands live in the lower third; look a little under the grip
+					# or the shot is the horizon and a mast.
+					rig.set("pitch", asin(clampf(aim.y, -1.0, 1.0)) - 0.22)
+				await get_tree().create_timer(0.08).timeout
+		var ev: Dictionary = arms.call("_grip_evaluation", measured_side \
+				if measured_side != "" else "R", id)
 		var err := -1.0
 		if side != "" and g != null:
 			err = (hr.call("wrist_global", side) as Transform3D).origin.distance_to(
 					g.global_position)
-		print("[grip] %-8s side=%-2s leftover=%.3f reachable=%s wrist_err=%.3f claim=%s" % [
-				id, side if side != "" else "-",
+		print("[grip] %-8s side=%-2s live=%s leftover=%.3f reachable=%s wrist_err=%.3f claim=%s" % [
+				id, measured_side if measured_side != "" else "-", side != "",
 				float(ev.get("leftover", -1.0)), ev.get("reachable", false),
 				err, claim])
 		await _shot(dir, "grip_%s" % id)
 		if side != "":
 			arms.call("_release", side)
+		if id == "radio":
+			boat.set("radio_held", false)
 		if id == "radar" or id == "sounder":
 			boat.call("set_%s_pull" % id, 0.0)
 		await get_tree().create_timer(0.35).timeout
+	get_tree().quit()
+
+
+func _fusebox_grip_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Serial fuse-lid contract test. Three ordinary wheelhouse stances exercise
+	## closed contact, the moving hinge, and release. The assertion is against
+	## the procedural brass latch itself, not the old duplicated coordinates.
+	if not dir.is_absolute_path():
+		dir = ProjectSettings.globalize_path("res://" + dir.trim_prefix("res://"))
+	DirAccess.make_dir_recursive_absolute(dir)
+	rig.set_mode(1)
+	var walker: RefCounted = rig.get("_walker")
+	var arms: Node = rig.get("_arms")
+	arms.set("boat", boat)
+	var hand_rig: Node = arms.get("rig")
+	var cam: Camera3D = rig.get("_cam")
+	boat.set("helm_engaged", false)
+	boat.set("telegraph_engaged", false)
+	await get_tree().create_timer(2.0).timeout
+	var stances := [
+		["centre", Vector3(0.0, 2.91, 1.10)],
+		["inboard", Vector3(0.42, 2.91, 1.36)],
+		["forward", Vector3(0.20, 2.91, 0.92)],
+	]
+	for tc: Array in stances:
+		boat.set("fusebox_open", false)
+		arms.call("_release", "L")
+		arms.call("_release", "R")
+		walker.call("spawn_at", tc[1])
+		await get_tree().create_timer(0.65).timeout
+		var lid: Node3D = boat.call("fuse_lid") as Node3D
+		var latch_local: Vector3 = boat.call("fuse_latch_local")
+		var latch_world: Vector3 = lid.to_global(latch_local)
+		for _aim in 6:
+			var aim := (latch_world - cam.global_position).normalized()
+			rig.set("yaw", atan2(-aim.x, -aim.z))
+			rig.set("pitch", asin(clampf(aim.y, -1.0, 1.0)))
+			await get_tree().create_timer(0.06).timeout
+		var offered: bool = bool(arms.call("can_offer", "fusebox"))
+		var accepted: bool = bool(arms.call("notify_use", "fusebox", true))
+		if not offered or not accepted:
+			push_error("fusebox/%s offer=%s accepted=%s" % [tc[0], offered, accepted])
+			continue
+		# notify_use records the claim; hands.update stamps the device-local Grip
+		# on the following frame, exactly as it does during normal play.
+		await get_tree().create_timer(0.03).timeout
+		var claim: Dictionary = arms.get("_claim")
+		var side := "L" if str(claim.get("L", "")) == "fusebox" else "R"
+		var grip: Node3D = lid.get_node_or_null("Grip_" + side)
+		if grip == null:
+			push_error("fusebox/%s created no grip" % tc[0])
+			continue
+		var along := float(preload("res://scripts/hands/grip_map.gd").spec_for(
+				"fusebox").get("along_fingers", 0.0))
+		var palm_local: Vector3 = lid.to_local(grip.global_position)
+		var palm_on_lid := absf(palm_local.x) <= 0.14 \
+				and palm_local.z >= -0.02 and palm_local.z <= 0.41
+		if not palm_on_lid:
+			push_error("fusebox/%s palm target outside lid: %s" % [tc[0], palm_local])
+		var max_tip_error := 0.0
+		var min_palm_error := INF
+		var max_wrist_break := 0.0
+		var max_palm_twist := 0.0
+		var max_elbow := 0.0
+		var opened_at := -1.0
+		var detached_after := -1.0
+		var detach_angle := -1.0
+		var elapsed := 0.0
+		while elapsed < 0.62:
+			await get_tree().create_timer(0.02).timeout
+			elapsed += 0.02
+			latch_world = lid.to_global(boat.call("fuse_latch_local"))
+			var fingertip: Vector3 = grip.global_transform * Vector3(0.0, 0.0, along)
+			max_tip_error = maxf(max_tip_error, fingertip.distance_to(latch_world))
+			claim = arms.get("_claim")
+			var opened := bool(boat.get("fusebox_open"))
+			if opened and opened_at < 0.0:
+				opened_at = elapsed
+			if opened and str(claim.get(side, "")) == "fusebox":
+				min_palm_error = minf(min_palm_error,
+						(hand_rig.call("palm_global", side) as Vector3).distance_to(
+								grip.global_position))
+				var live_eval: Dictionary = arms.call("_grip_evaluation", side, "fusebox")
+				max_wrist_break = maxf(max_wrist_break,
+						float(live_eval.get("wrist_break", 0.0)))
+				max_palm_twist = maxf(max_palm_twist,
+						float(live_eval.get("palm_twist", 0.0)))
+				max_elbow = maxf(max_elbow, float(live_eval.get("elbow_angle", 0.0)))
+			elif opened and detached_after < 0.0:
+				detached_after = elapsed - opened_at
+				detach_angle = absf(lid.rotation.x)
+		if max_tip_error > 0.004:
+			push_error("fusebox/%s fingertip missed latch by %.3f m" % [
+					tc[0], max_tip_error])
+		if not bool(boat.get("fusebox_open")):
+			push_error("fusebox/%s did not open" % tc[0])
+		if not is_finite(min_palm_error) or min_palm_error > 0.035:
+			push_error("fusebox/%s solved palm missed grip by %.3f m" % [
+					tc[0], min_palm_error])
+		if detached_after < 0.04 or detached_after > 0.15:
+			push_error("fusebox/%s unnatural detach time %.3f s" % [
+					tc[0], detached_after])
+		if detach_angle < deg_to_rad(18.0) or detach_angle > deg_to_rad(55.0):
+			push_error("fusebox/%s detached at unnatural lid angle %.1f deg" % [
+					tc[0], rad_to_deg(detach_angle)])
+		if max_wrist_break > deg_to_rad(58.0) or max_palm_twist > deg_to_rad(138.0) \
+				or max_elbow > deg_to_rad(165.0):
+			push_error("fusebox/%s anatomy wrist=%.1f twist=%.1f elbow=%.1f" % [
+					tc[0], rad_to_deg(max_wrist_break), rad_to_deg(max_palm_twist),
+					rad_to_deg(max_elbow)])
+		print("[fusebox] %-7s hand=%s offered=%s palm_local=%s tip_err=%.4f palm_err=%.4f detach=%.3fs@%.1fdeg wrist=%.1f twist=%.1f elbow=%.1f open=%s" % [
+				tc[0], side, offered, palm_local, max_tip_error, min_palm_error,
+				detached_after, rad_to_deg(detach_angle), rad_to_deg(max_wrist_break),
+				rad_to_deg(max_palm_twist), rad_to_deg(max_elbow), boat.get("fusebox_open")])
+		await _shot(dir, "fusebox_%s" % tc[0])
+	get_tree().quit()
+
+
+func _grasp_planner_test(rig: Node3D, boat: RigidBody3D) -> void:
+	## Bilateral contract: the object on the player's left must select the left
+	## hand even when an old preference asks for right, and vice versa. Each
+	## accepted result must contain a fully admissible sampled approach path.
+	rig.set_mode(1)
+	var arms: Node = rig.get("_arms")
+	arms.set("boat", boat)
+	boat.set("helm_engaged", false)
+	boat.set("telegraph_engaged", false)
+	await get_tree().create_timer(2.0).timeout
+	var cam: Camera3D = rig.get("_cam")
+	var cases := [
+		["player_right_of_object", Vector3(-0.30, -0.20, -0.46), "L", "R"],
+		["player_left_of_object", Vector3(0.30, -0.20, -0.46), "R", "L"],
+	]
+	for tc: Array in cases:
+		var contact: Vector3 = cam.global_transform * (tc[1] as Vector3)
+		var choice: Dictionary = arms.call("plan_world_grasp", contact,
+				Vector3.ZERO, Vector3.ZERO, 0.07, tc[3], 0.10)
+		var side := str(choice.get("side", ""))
+		if side != str(tc[2]):
+			push_error("grasp planner/%s chose %s, expected %s" % [tc[0], side, tc[2]])
+		if (choice.get("path", []) as Array).size() != 4:
+			push_error("grasp planner/%s did not validate the whole approach" % tc[0])
+		var ev: Dictionary = choice.get("end", {})
+		print("[grasp-planner] %-23s hand=%s preferred=%s score=%.3f cross=%.3f elbow=%.1f wrist=%.1f twist=%.1f samples=%d" % [
+				tc[0], side, tc[3], float(choice.get("score", INF)),
+				float(ev.get("cross", INF)), rad_to_deg(float(ev.get("elbow_angle", 0.0))),
+				rad_to_deg(float(ev.get("wrist_break", 0.0))),
+				rad_to_deg(float(ev.get("palm_twist", 0.0))),
+				(choice.get("path", []) as Array).size()])
 	get_tree().quit()
 
 
@@ -364,16 +563,25 @@ func _pull_radar(rig: Node3D) -> void:
 
 
 func _use_later(boat: RigidBody3D, ids: String) -> void:
-	# Mirrors the in-game E flow: the boat acts AND the hands hear about it.
-	# Comma-separated ids fire in sequence, 0.6 s apart — enough to open a lid
-	# and then jab what it was hiding.
+	# Mirrors the in-game E flow: input starts the reach; the hand commits the
+	# boat action at contact. Comma-separated ids wait for the full gesture so a
+	# lid is open before the next finger enters its well.
 	await get_tree().create_timer(2.0).timeout
 	var arms: Node = $CameraRig.get("_arms")
 	arms.set("boat", boat)
 	for id in ids.split(","):
-		boat.call("toggle_switch", id)
-		arms.call("notify_use", id)
-		await get_tree().create_timer(0.6).timeout
+		var accepted: bool = bool(arms.call("notify_use", id))
+		print("[use] %s accepted=%s" % [id, accepted])
+		if not accepted:
+			for side in ["L", "R"]:
+				var ev: Dictionary = arms.call("_grip_evaluation", side, id)
+				print("  %s reach=%s left=%.3f elbow=%.1f raise=%.2f wrist=%.1f twist=%.1f" % [
+					side, ev.get("reachable", false), float(ev.get("leftover", -1.0)),
+					rad_to_deg(float(ev.get("elbow_angle", 0.0))),
+					float(ev.get("shoulder_raise", 0.0)),
+					rad_to_deg(float(ev.get("wrist_break", 0.0))),
+					rad_to_deg(float(ev.get("palm_twist", 0.0)))])
+		await get_tree().create_timer(1.0).timeout
 
 
 func _pull_device(rig: Node3D, id: String) -> void:
@@ -513,19 +721,42 @@ func _switch_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	arms.set("boat", boat)
 	var hr: Node = arms.get("rig")
 	for sid in ["sw_cabin", "sw_helm", "sw_beacon", "sw_flood", "sw_wiper", "sw_anchor"]:
+		# The dash pair is on the opposite side of the wheelhouse from the fuse
+		# well. Test each from the stance a player would actually take, rather
+		# than asking a metre-long ghost arm to cover both consoles without feet.
+		if sid in ["sw_flood", "sw_wiper"]:
+			w.call("spawn_at", Vector3(-0.50, 2.91, 0.48))
+		else:
+			w.call("spawn_at", Vector3(0.66, 2.91, 1.54))
+		await get_tree().create_timer(0.30).timeout
 		var lev: Node3D = boat.call("switch_lever", sid)
 		for i in 5:
 			var d: Vector3 = lev.global_position - cam.global_position
 			rig.set("yaw", atan2(-d.x, -d.z))
 			rig.set("pitch", asin(clampf(d.normalized().y, -1.0, 1.0)))
 			await get_tree().create_timer(0.1).timeout
-		arms.call("notify_use", sid)
-		await get_tree().create_timer(0.80).timeout
-		var g: Node3D = lev.get_node_or_null("Grip_R")
-		var wr: Transform3D = hr.call("wrist_global", "R")
-		var sh: Vector3 = hr.call("shoulder_global", "R")
-		print("[sw] %-10s reach=%.3f  grip=%.2v  wrist=%.2v  err=%.3f" % [
-				sid, sh.distance_to(g.global_position) if g != null else -1.0,
+		var accepted: bool = bool(arms.call("notify_use", sid))
+		if not accepted:
+			for side in ["L", "R"]:
+				var ev: Dictionary = arms.call("_grip_evaluation", side, sid)
+				print("[sw-eval] %s/%s reach=%s left=%.3f elbow=%.1f wrist=%.1f twist=%.1f" % [
+					sid, side, ev.get("reachable", false),
+					float(ev.get("leftover", -1.0)),
+					rad_to_deg(float(ev.get("elbow_angle", 0.0))),
+					rad_to_deg(float(ev.get("wrist_break", 0.0))),
+					rad_to_deg(float(ev.get("palm_twist", 0.0)))])
+		# Past contact, before release: measure the wrist while it is still on
+		# the moving lever rather than after it has already returned to rest.
+		await get_tree().create_timer(0.48).timeout
+		var claim: Dictionary = arms.get("_claim")
+		var side := "L" if str(claim.get("L", "")) == sid else (
+				"R" if str(claim.get("R", "")) == sid else "")
+		var g: Node3D = lev.get_node_or_null("Grip_" + (side if side != "" else "R"))
+		var wr: Transform3D = hr.call("wrist_global", side if side != "" else "R")
+		var sh: Vector3 = hr.call("shoulder_global", side if side != "" else "R")
+		print("[sw] %-10s side=%-2s reach=%.3f  grip=%.2v  wrist=%.2v  err=%.3f" % [
+				sid, side if side != "" else "-",
+				sh.distance_to(g.global_position) if g != null else -1.0,
 				boat.to_local(g.global_position) if g != null else Vector3.ZERO,
 				boat.to_local(wr.origin),
 				wr.origin.distance_to(g.global_position) if g != null else -1.0])
@@ -546,7 +777,6 @@ func _radio_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	boat.set("helm_engaged", true)
 	boat.set("light_helm", true)
 	await get_tree().create_timer(0.6).timeout
-	boat.set("radio_held", true)
 	var arms: Node = rig.get("_arms")
 	arms.set("boat", boat)
 	arms.call("notify_use", "radio")
@@ -821,6 +1051,10 @@ func _ladder_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 
 
 func _shot(dir: String, name: String) -> void:
+	# The headless display driver never emits frame_post_draw; numeric probes
+	# must keep running instead of hanging forever at their optional screenshot.
+	if DisplayServer.get_name() == "headless":
+		return
 	await RenderingServer.frame_post_draw
 	get_viewport().get_texture().get_image().save_png("%s/%s.png" % [dir, name])
 

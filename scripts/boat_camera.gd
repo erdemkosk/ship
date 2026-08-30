@@ -19,6 +19,7 @@ const SHORTCUTS := {
 	"light_beacon": "sw_beacon", "light_flood": "sw_flood", "wiper": "sw_wiper",
 }
 const WeatherScript := preload("res://scripts/weather.gd")
+const HandGripMap := preload("res://scripts/hands/grip_map.gd")
 
 var target: Node3D
 var ocean: Node3D
@@ -57,6 +58,9 @@ var _walker: RefCounted = (load("res://scripts/deck_walker.gd") as GDScript).new
 var _eye_y := 0.0
 var _eye_ready := false
 var _bob := 0.0
+## Boat-local eye offset produced by a deliberate hand reach. Feet remain on
+## deck; this is head/torso travel from bending at the waist.
+var _reach_body_lean := Vector3.ZERO
 var _roll := 0.0
 var _panel: Node = null
 # 0 while you are not at the chart, running to 1 as you lean over it. The lean
@@ -119,6 +123,7 @@ func _ready() -> void:
 	_arms = (load("res://scripts/hands/hands.gd") as GDScript).new()
 	add_child(_arms)
 	_arms.setup(_cam)
+	_arms.connect("action_contact", _on_hand_action_contact)
 	_build_underwater()
 	# Interaction prompt: one line at the bottom of the view, only in FPS mode.
 	var pl := CanvasLayer.new()
@@ -158,6 +163,35 @@ func _ready() -> void:
 	_blink_rect.material = _blink_mat
 	_blink_rect.visible = false
 	pl.add_child(_blink_rect)
+
+
+func _on_hand_action_contact(id: String) -> void:
+	## Gameplay mutation happens when the authored fingers reach the fitting,
+	## never when E is pressed.  From this frame onward the grip node is parented
+	## to the moving part, so the hand follows the real hinge/lever/rail path.
+	if target == null:
+		return
+	var spec: Dictionary = HandGripMap.spec_for(id)
+	var gate := str(spec.get("gate", ""))
+	if gate != "" and (not target.has_method("switch_state")
+			or not bool(target.call("switch_state", gate))):
+		return # the lid/guard changed state during the reach
+	match str(spec.get("action", "")):
+		"radio":
+			target.set("radio_held", not _flag(target, "radio_held"))
+		"rail":
+			var rail := str(spec.get("rail", id))
+			var other := "sounder" if rail == "radar" else "radar"
+			target.call("set_%s_pull" % other, 0.0)
+			var current: float = float(target.get(rail + "_pull"))
+			target.call("set_%s_pull" % rail, 0.0 if current > 0.5 else 1.0)
+		"tackle":
+			var tk: Node = target.get("tackle")
+			if tk != null:
+				tk.toggle()
+		"toggle":
+			if target.has_method("toggle_switch"):
+				target.toggle_switch(id)
 
 
 func set_mode(m: int) -> void:
@@ -419,6 +453,13 @@ func _process_fps(delta: float) -> void:
 					and target.switch_in_well(iid)) \
 					and _occluded(target, eye, ipos):
 				continue
+			# A prompt is a promise. Hand-authored fittings are offered only when
+			# one arm can complete the reach, including the small deliberate torso
+			# lean used after E. This prevents a visible prompt that does nothing.
+			if _arms != null and not HandGripMap.spec_for(iid).is_empty():
+				_arms.boat = target
+				if not bool(_arms.can_offer(iid)):
+					continue
 			# Angle off the crosshair, then a size penalty so a fat volume
 			# behind a knob cannot win just because you clipped its edge.
 			var score: float = perp / maxf(along, 0.05)
@@ -438,7 +479,6 @@ func _process_fps(delta: float) -> void:
 			# Holding the handset with nothing else under the crosshair: E puts
 			# it back on its hook. You should not have to hunt for the cradle
 			# with your nose to hang up a radio.
-			target.set("radio_held", false)
 			if _arms != null:
 				_arms.boat = target
 				_arms.notify_use("radio")
@@ -452,7 +492,6 @@ func _process_fps(delta: float) -> void:
 			_arms.notify_use(_arms.inspecting_id())
 		elif not cand.is_empty() and str(cand["id"]) == "ignition" \
 				and target.has_method("toggle_switch"):
-			target.toggle_switch("ignition")
 			if _arms != null:
 				_arms.boat = target
 				_arms.notify_use("ignition")
@@ -467,17 +506,17 @@ func _process_fps(delta: float) -> void:
 			_walker.spawn_at(target.CHART_STAND)
 		elif not cand.is_empty():
 			var iid := str(cand["id"])
+			var hand_accepted := false
 			if _arms != null:
 				_arms.boat = target
-				if iid == "radio":
-					# One key, both ways: off the hook and back onto it.
-					target.set("radio_held", not _flag(target, "radio_held"))
-				_arms.notify_use(iid)
+				hand_accepted = bool(_arms.notify_use(iid, true))
 			match iid:
 				"helm":
-					target.set("helm_engaged", true)
+					if hand_accepted:
+						target.set("helm_engaged", true)
 				"telegraph":
-					target.set("telegraph_engaged", true)
+					if hand_accepted:
+						target.set("telegraph_engaged", true)
 				"chart":
 					target.set("chart_engaged", true)
 				"radio", "radar", "sounder":
@@ -485,26 +524,23 @@ func _process_fps(delta: float) -> void:
 				"sea_ladder":
 					_walker.grab_sea_ladder(target)
 				"locker":
-					target.toggle_switch("locker")
+					pass # committed by the hand at contact
 				"divegear":
 					target.toggle_switch("divegear")
 					if _arms != null and _arms.has_method("face_gesture"):
 						_arms.face_gesture("wear")
 				"windlass":
-					var tk: Node = target.get("tackle")
-					if tk != null:
-						tk.toggle()
+					pass # committed by the hand at contact
 				"lights":
 					if target.has_method("toggle_lights"):
 						target.toggle_lights()
 				_:
-					# Brass toggles and doors: E throws the circuit.
+					# Authored fittings commit from action_contact, after the fingers land.
 					var cid := str(cand["id"])
 					if (cid.begins_with("sw_") or cid.begins_with("door_")
 							or cid.begins_with("fu_")
-							or cid == "fusebox" or cid == "stove") \
-							and target.has_method("toggle_switch"):
-						target.toggle_switch(str(cand["id"]))
+							or cid == "fusebox" or cid == "stove"):
+						pass # committed by the hand at contact
 		engaged = "helm" if target.get("helm_engaged") \
 				else ("telegraph" if target.get("telegraph_engaged") \
 				else ("chart" if target.get("chart_engaged") else ""))
@@ -644,6 +680,23 @@ func _process_fps(delta: float) -> void:
 	var amp := walking * 0.022
 	eye_l.y += sin(_bob * 2.0) * amp
 	eye_l.x += sin(_bob) * amp * 0.9
+
+	# A long hand reach moves the person, not only the arm. hands.gd publishes
+	# the camera-local share of the same lean used by IK; convert it into the
+	# boat frame, ease it in faster than it returns, and add it to the eye.
+	var body_goal := Vector3.ZERO
+	if _arms != null and _arms.has_method("body_lean_local"):
+		var lean_cam: Vector3 = _arms.body_lean_local()
+		body_goal = xf.basis.inverse() * (_cam.global_basis * lean_cam)
+	var body_tau := 0.10 if body_goal.length_squared() > _reach_body_lean.length_squared() \
+			else 0.24
+	_reach_body_lean = _reach_body_lean.lerp(body_goal,
+			1.0 - exp(-delta / body_tau))
+	if engaged == "chart" or _flag(_walker, "swimming") \
+			or _flag(_walker, "on_sea_ladder"):
+		_reach_body_lean = _reach_body_lean.lerp(Vector3.ZERO,
+				1.0 - exp(-delta / 0.08))
+	eye_l += _reach_body_lean
 
 	var cam_pos: Vector3 = xf * eye_l
 	# The eye is normally held clear of the water — you are aboard, and a wave

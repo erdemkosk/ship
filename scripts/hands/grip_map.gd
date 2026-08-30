@@ -26,10 +26,14 @@ const SWITCH := {
 	"node": "switch_lever",
 	"kind": Kind.GESTURE,
 	"pose": "point",
-	"oneshot": 1.05,
+	"action": "toggle",
+	"handed": true,
+	"gesture": 0.64,
+	"contact_at": 0.40,
+	"approach": 0.085,
 	"pos": Vector3(0.0, 0.064, 0.0),
 	"fingers": Vector3(0.0, -0.92, -0.39),
-	"palm": Vector3(0.0, -0.39, 0.92),
+	"palm": Vector3(-1.0, 0.0, 0.0),
 	"along_fingers": FINGER,
 }
 
@@ -37,26 +41,31 @@ const ENTRIES := {
 	"helm": {
 		"node": "helm_wheel",
 		"kind": Kind.MODE,
-		"pose": "wrap",
+		"pose": "rim",
 		"preferred": "L",
 		"on_rim": true,
 	},
 	"telegraph": {
 		"node": "throttle_lever",
 		"kind": Kind.MODE,
-		"pose": "fist",
+		"pose": "power",
 		"preferred": "R",
 		"pos": Vector3(0.0, 0.33, 0.0),
 		"fingers": Vector3(0.0, -0.35, -0.94),
-		"palm": Vector3(0.0, -0.94, 0.35),
+		# Right palm comes from the outboard side and faces inboard around the
+		# knob; palm-down made the forearm perform an almost 180° roll.
+		"palm": Vector3(-1.0, 0.0, 0.0),
 		"palm_offset": KNOB_R,
 	},
 	"ignition": {
 		"node": "ignition_key",
 		"kind": Kind.GESTURE,
-		"pose": "pinch",
+		"pose": "key",
+		"action": "toggle",
 		"preferred": "R",
-		"oneshot": 1.15,
+		"gesture": 0.92,
+		"contact_at": 0.36,
+		"approach": 0.075,
 		"drops_instruments": true,
 		"pos": Vector3(0.0, 0.020, 0.052),
 		"fingers": Vector3(0.05, -0.96, -0.27),
@@ -65,17 +74,28 @@ const ENTRIES := {
 	"radio": {
 		"node": "radio_handset",
 		"kind": Kind.HOLD,
-		"pose": "wrap",
+		"pose": "handset",
+		"action": "radio",
 		"toggle": true,
+		"gesture": 0.58,
+		"contact_at": 0.34,
+		"approach": 0.090,
+		"hold_after": true,
+		"handed": true,
 		"pos": Vector3(0.026, -0.004, 0.012),
-		"fingers": Vector3(0.15, -0.99, 0.0),
+		# The cradle is below and ahead of the shoulder; include that forward
+		# component so pickup does not begin with a 66° wrist break.
+		"fingers": Vector3(0.12, -0.85, -0.51),
 		"palm": Vector3(-1.0, 0.0, 0.0),
 	},
 	"radar": {
 		"node": "radar_housing",
 		"kind": Kind.GESTURE,
-		"pose": "wrap",
-		"oneshot": 0.7,
+		"pose": "hook",
+		"action": "rail",
+		"gesture": 0.76,
+		"contact_at": 0.34,
+		"approach": 0.090,
 		"rail": "radar",
 		"span": true,
 		"pos": Vector3(0.205, -0.05, 0.06),
@@ -85,19 +105,40 @@ const ENTRIES := {
 	"sounder": {
 		"node": "sounder_housing",
 		"kind": Kind.GESTURE,
-		"pose": "wrap",
-		"oneshot": 0.7,
+		"pose": "hook",
+		"action": "rail",
+		"gesture": 0.76,
+		"contact_at": 0.34,
+		"approach": 0.090,
 		"rail": "sounder",
 		"span": true,
 		"pos": Vector3(0.185, -0.03, 0.05),
 		"fingers": Vector3(0.0, 0.05, -1.0),
 		"palm": Vector3(-1.0, 0.0, 0.0),
 	},
+	"stove": {
+		"node": "stove_switch",
+		"kind": Kind.GESTURE,
+		"pose": "point",
+		"action": "toggle",
+		"gesture": 0.62,
+		"contact_at": 0.40,
+		"approach": 0.075,
+		"handed": true,
+		"pos": Vector3(0.0, 0.018, 0.0),
+		"fingers": Vector3(0.0, -0.94, -0.34),
+		"palm": Vector3(-1.0, 0.0, 0.0),
+		"along_fingers": FINGER,
+	},
 	"windlass": {
 		"node": "windlass_node",
 		"kind": Kind.GESTURE,
-		"pose": "fist",
-		"oneshot": 0.85,
+		"pose": "power",
+		"action": "tackle",
+		"gesture": 0.84,
+		"contact_at": 0.38,
+		"approach": 0.10,
+		"handed": true,
 		"drops_instruments": true,
 		"pos": Vector3(0.30, 0.10, 0.0),
 		"fingers": _DOOR_F,
@@ -106,18 +147,36 @@ const ENTRIES := {
 	"fusebox": {
 		"node": "fuse_lid",
 		"kind": Kind.GESTURE,
-		"pose": "wrap",
-		"oneshot": 0.85,
+		"pose": "pinch",
+		"action": "toggle",
+		"gesture": 0.86,
+		"contact_at": 0.38,
+		# Follow the real hinge until the fingers have lifted it through a useful
+		# arc.  This is a motion contract, not a fuse-box animation timer.
+		"follow_motion": {"type": "hinge", "angle": 0.74,
+				"min_time": 0.05, "timeout": 0.15},
+		"approach": 0.085,
 		"drops_instruments": true,
-		"pos": Vector3(0.0, 0.13, 0.77),
-		"fingers": _DOOR_F,
-		"palm": _DOOR_P,
+		"contact_accessor": "fuse_latch_local",
+		# Reach from the inboard aisle and pinch the 40 mm brass catch. The grip
+		# origin is the palm; along_fingers leaves the actual touch at the tips.
+		"pos": Vector3.ZERO,
+		"fingers": Vector3(0.99, -0.12, 0.0),
+		# Palm faces down; approach therefore comes from above the closed lid.
+		"palm": Vector3(-0.12, -0.99, 0.0),
+		"along_fingers": 0.075,
 	},
 	"locker": {
 		"node": "locker_door",
 		"kind": Kind.GESTURE,
-		"pose": "wrap",
-		"oneshot": 0.85,
+		"pose": "handle",
+		"action": "toggle",
+		"gesture": 0.90,
+		"contact_at": 0.36,
+		"approach": 0.10,
+		"follow_motion": {"type": "hinge", "angle": 0.44,
+				"min_time": 0.05, "timeout": 0.17},
+		"handed": true,
 		"drops_instruments": true,
 		"pos": Vector3(0.03, 0.10, 0.41),
 		"fingers": _DOOR_F,
@@ -127,18 +186,28 @@ const ENTRIES := {
 		"node": "fuse_body",
 		"kind": Kind.GESTURE,
 		"pose": "pinch",
-		"oneshot": 0.70,
+		"action": "toggle",
+		"gesture": 0.72,
+		"contact_at": 0.40,
+		"approach": 0.070,
+		"handed": true,
 		"gate": "fusebox",
 		"pos": Vector3.ZERO,
 		"fingers": Vector3(0.0, -0.92, -0.39),
-		"palm": Vector3(0.0, -0.39, 0.92),
+		"palm": Vector3(-1.0, 0.0, 0.0),
 		"along_fingers": FINGER,
 	},
 	"door_fwd": {
 		"node": "door_node",
 		"kind": Kind.GESTURE,
-		"pose": "pinch",
-		"oneshot": 0.85,
+		"pose": "handle",
+		"action": "toggle",
+		"gesture": 0.92,
+		"contact_at": 0.34,
+		"approach": 0.095,
+		"follow_motion": {"type": "hinge", "angle": 0.40,
+				"min_time": 0.05, "timeout": 0.16},
+		"handed": true,
 		"drops_instruments": true,
 		"latch": true,
 		"pos": Vector3(1.02, 1.58, -0.072),
@@ -148,8 +217,14 @@ const ENTRIES := {
 	"door_aft": {
 		"node": "door_node",
 		"kind": Kind.GESTURE,
-		"pose": "pinch",
-		"oneshot": 0.85,
+		"pose": "handle",
+		"action": "toggle",
+		"gesture": 0.92,
+		"contact_at": 0.34,
+		"approach": 0.095,
+		"follow_motion": {"type": "hinge", "angle": 0.40,
+				"min_time": 0.05, "timeout": 0.16},
+		"handed": true,
 		"drops_instruments": true,
 		"latch": true,
 		"pos": Vector3(1.02, 1.58, 0.072),
@@ -159,8 +234,14 @@ const ENTRIES := {
 	"door_wh": {
 		"node": "door_node",
 		"kind": Kind.GESTURE,
-		"pose": "pinch",
-		"oneshot": 0.85,
+		"pose": "handle",
+		"action": "toggle",
+		"gesture": 0.92,
+		"contact_at": 0.34,
+		"approach": 0.095,
+		"follow_motion": {"type": "hinge", "angle": 0.40,
+				"min_time": 0.05, "timeout": 0.16},
+		"handed": true,
 		"drops_instruments": true,
 		"latch": true,
 		"pos": Vector3(-0.98, 0.92, 0.072),
@@ -170,8 +251,14 @@ const ENTRIES := {
 	"door_eng": {
 		"node": "engine_door",
 		"kind": Kind.GESTURE,
-		"pose": "wrap",
-		"oneshot": 0.85,
+		"pose": "hook",
+		"action": "toggle",
+		"gesture": 0.90,
+		"contact_at": 0.36,
+		"approach": 0.090,
+		"follow_motion": {"type": "hinge", "angle": 0.40,
+				"min_time": 0.05, "timeout": 0.16},
+		"handed": true,
 		"drops_instruments": true,
 		"pos": Vector3(-0.07, -0.08, 1.10),
 		"fingers": _DOOR_F,
@@ -198,6 +285,45 @@ static func spec_for(id: String) -> Dictionary:
 	return {}
 
 
+static func validation_error(spec: Dictionary) -> String:
+	## Fail closed.  A malformed frame must never become an identity transform
+	## that sends a hand to the device origin and still fires gameplay.
+	if str(spec.get("node", "")) == "":
+		return "missing device accessor"
+	if str(spec.get("pose", "")) == "":
+		return "missing finger profile"
+	if not bool(spec.get("on_rim", false)):
+		var f: Vector3 = spec.get("fingers", Vector3.ZERO)
+		var p: Vector3 = spec.get("palm", Vector3.ZERO)
+		if f.length_squared() < 0.25 or p.length_squared() < 0.25:
+			return "degenerate finger/palm axis"
+		if absf(f.normalized().dot(p.normalized())) > 0.96:
+			return "finger and palm axes are nearly parallel"
+	var duration := float(spec.get("gesture", 0.0))
+	if duration > 0.0:
+		if str(spec.get("action", "")) == "":
+			return "gesture has no gameplay action"
+		var contact := float(spec.get("contact_at", -1.0))
+		if contact < 0.10 or contact > 0.80:
+			return "contact phase outside gesture"
+	var follow: Dictionary = spec.get("follow_motion", {})
+	if not follow.is_empty():
+		var motion_type := str(follow.get("type", ""))
+		if motion_type not in ["hinge", "linear"]:
+			return "unsupported follow motion"
+		if motion_type == "hinge" and float(follow.get("angle", 0.0)) <= 0.0:
+			return "follow motion has no travel"
+		if motion_type == "linear" and float(follow.get("distance", 0.0)) <= 0.0:
+			return "follow motion has no travel"
+		var direction: Vector3 = follow.get("direction", Vector3.ZERO)
+		if motion_type == "linear" and follow.has("direction") \
+				and direction.length_squared() < 0.25:
+			return "follow motion has invalid direction"
+		if float(follow.get("timeout", 0.0)) <= 0.0:
+			return "follow motion has no timeout"
+	return ""
+
+
 static func welded(spec: Dictionary) -> bool:
 	var k: int = int(spec.get("kind", Kind.GESTURE))
 	return k == Kind.MODE or k == Kind.HOLD or bool(spec.get("on_rim", false))
@@ -206,13 +332,15 @@ static func welded(spec: Dictionary) -> bool:
 ## A span has two holds, one on each flank. The catalog stores the RIGHT
 ## edge; the left is that frame mirrored through the device's X.
 static func sided(spec: Dictionary, side: String) -> Dictionary:
-	if side != "L" or not bool(spec.get("span", false)):
+	if side != "L" or not (bool(spec.get("span", false)) \
+			or bool(spec.get("handed", false))):
 		return spec
 	var out: Dictionary = spec.duplicate()
 	var pos: Vector3 = spec.get("pos", Vector3.ZERO)
 	var F: Vector3 = spec.get("fingers", Vector3(0.0, 0.0, -1.0))
 	var P: Vector3 = spec.get("palm", Vector3(0.0, -1.0, 0.0))
-	out["pos"] = Vector3(-pos.x, pos.y, pos.z)
+	if bool(spec.get("span", false)):
+		out["pos"] = Vector3(-pos.x, pos.y, pos.z)
 	out["fingers"] = Vector3(-F.x, F.y, F.z)
 	out["palm"] = Vector3(-P.x, P.y, P.z)
 	return out
@@ -232,10 +360,33 @@ static func local_frame(spec: Dictionary, contact: Vector3) -> Transform3D:
 
 static func contact_of(spec: Dictionary, boat: Node3D, id: String) -> Vector3:
 	var pos: Vector3 = spec.get("pos", Vector3.ZERO)
+	var contact_accessor := str(spec.get("contact_accessor", ""))
+	if contact_accessor != "" and boat != null and boat.has_method(contact_accessor):
+		var dynamic_contact: Variant = boat.call(contact_accessor)
+		if dynamic_contact is Vector3:
+			return dynamic_contact
 	if bool(spec.get("latch", false)) and boat != null \
 			and boat.has_method("door_latch_local"):
 		pos = boat.call("door_latch_local", id)
 	return pos
+
+
+static func oriented_at_contact(spec: Dictionary, contact: Vector3) -> Dictionary:
+	## A door handle is used from both faces of the leaf.  The latch point already
+	## changes face; its semantic frame must mirror with it or the fingers arrive
+	## through the steel from the opposite room.
+	if not bool(spec.get("latch", false)):
+		return spec
+	var authored: Vector3 = spec.get("pos", contact)
+	if absf(authored.z) < 1e-5 or absf(contact.z) < 1e-5 \
+			or signf(authored.z) == signf(contact.z):
+		return spec
+	var out := spec.duplicate()
+	var f: Vector3 = spec.get("fingers", Vector3.FORWARD)
+	var p: Vector3 = spec.get("palm", Vector3.DOWN)
+	out["fingers"] = Vector3(f.x, f.y, -f.z)
+	out["palm"] = Vector3(p.x, p.y, -p.z)
+	return out
 
 
 static func device_of(boat: Node3D, id: String) -> Node3D:

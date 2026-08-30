@@ -82,6 +82,7 @@ var _stove_ember: StandardMaterial3D
 var _stove_reflector: StandardMaterial3D
 var _stove_heat: GPUParticles3D
 var _stove_snd: AudioStreamPlayer3D
+var _stove_switch: Node3D
 ## Electric heater: switched, and slow at both ends. `stove_on` is what the
 ## switch says; `_stove_heat_t` is what the elements have got round to.
 var stove_on := false
@@ -676,7 +677,7 @@ const TELEGRAPH_STAND := Vector3(0.58, 2.91, 0.70)
 const INTERACT: Array = [
 	{"id": "helm", "pos": Vector3(0.0, 3.75, 0.30), "r": 0.36, "name": "Helm"},
 	{"id": "telegraph", "pos": Vector3(0.70, 3.78, 0.02), "r": 0.18, "name": "Throttle"},
-	{"id": "ignition", "pos": Vector3(0.50, 3.62, 0.06), "r": 0.28, "name": "Ignition"},
+	{"id": "ignition", "pos": Vector3(0.42, 3.68, 0.24), "r": 0.22, "name": "Ignition"},
 	{"id": "windlass", "pos": Vector3(0.0, 1.00, -3.35), "r": 0.55, "name": "Windlass (anchor)"},
 	# Switch console between the radar and the chart table. Walk up, throw.
 	{"id": "door_fwd", "pos": Vector3(0.47, 1.58, -0.44), "r": 0.30, "name": "Fore hatch"},
@@ -723,6 +724,10 @@ func throttle_lever() -> Node3D:
 
 func ignition_key() -> Node3D:
 	return _ign_key
+
+
+func stove_switch() -> Node3D:
+	return _stove_switch
 
 
 func windlass_node() -> Node3D:
@@ -777,6 +782,8 @@ func interact_pos(id: String, fallback: Vector3) -> Vector3:
 	## crosshair aimed at where a thing used to be is the whole problem.
 	if id == "fusebox" and _fuse_lid != null:
 		return to_local(_fuse_lid.to_global(_fuse_latch_local))
+	if id == "stove" and _stove_switch != null:
+		return to_local(_stove_switch.global_position)
 	if id.begins_with("sw_") and _switch_levers.has(id):
 		var piv: Node3D = _switch_levers[id]
 		if piv != null:
@@ -810,6 +817,12 @@ func gear_wear_t() -> float:
 
 func fuse_lid() -> Node3D:
 	return _fuse_lid
+
+
+func fuse_latch_local() -> Vector3:
+	## Single source of truth shared by aiming and the hand grip. The lid is
+	## procedural, so duplicating this dimension in GripMap will drift again.
+	return _fuse_latch_local
 
 
 func fuse_body(id: String) -> Node3D:
@@ -1191,8 +1204,13 @@ func _build_visuals() -> void:
 	_box(Vector3(0.03, 0.42, 0.03), Vector3(1.09, 0.94, 4.048), Vector3.ZERO, metal)
 	_box(Vector3(0.03, 0.42, 0.03), Vector3(1.47, 0.94, 4.048), Vector3.ZERO, metal)
 	# Rocker switch on the case top, and the flex running down to the skirting.
-	_box(Vector3(0.05, 0.02, 0.07), Vector3(1.28, 1.205, 4.20), Vector3.ZERO,
-			_mat(Color(0.36, 0.27, 0.13), 0.40, 0.75))
+	# It owns a pivot because the hand grip must be parented to the part that
+	# actually rocks; a painted box cannot carry contact motion.
+	_stove_switch = Node3D.new()
+	_stove_switch.position = Vector3(1.28, 1.205, 4.20)
+	add_child(_stove_switch)
+	_box(Vector3(0.05, 0.02, 0.07), Vector3.ZERO, Vector3.ZERO,
+			_mat(Color(0.36, 0.27, 0.13), 0.40, 0.75), _stove_switch)
 	_cyl(0.008, 0.008, 0.52, Vector3(1.47, 0.70, 4.44), Vector3(22.0, 0.0, 0.0),
 			_mat(Color(0.055, 0.055, 0.058), 0.85))
 	# The near lamp used to sit inside the case with a 1.8 m, steep falloff —
@@ -1701,7 +1719,7 @@ func _build_console(trim: Material, metal: Material) -> void:
 
 	# Ignition. A key in a barrel, not a switch on a panel — you turn it, you
 	# wait, and the diesel catches. Same place your right hand already is.
-	var ign := Vector3(0.50, 3.58, 0.06)
+	var ign := Vector3(0.42, 3.64, 0.24)
 	_box(Vector3(0.07, 0.04, 0.07), ign + Vector3(0.0, -0.02, 0.0), Vector3.ZERO, metal)
 	_cyl(0.022, 0.022, 0.04, ign, Vector3.ZERO, bronze)
 	_cyl(0.010, 0.010, 0.03, ign + Vector3(0.0, 0.018, 0.0), Vector3.ZERO, metal)
@@ -3890,6 +3908,9 @@ func _process(delta: float) -> void:
 		# and it rides the same sagging supply as the lamps.
 		lm2.emission_energy_multiplier = (2.0 if live else 0.0) \
 				* (0.12 if _blackout > 0.0 else (0.55 + 0.45 * _supply))
+	if _stove_switch != null:
+		_stove_switch.rotation.x = lerpf(_stove_switch.rotation.x,
+				0.20 if stove_on else -0.20, 1.0 - exp(-18.0 * delta))
 	for fu: String in _fuse_bodies:
 		var cart: Node3D = _fuse_bodies[fu]
 		if cart == null:

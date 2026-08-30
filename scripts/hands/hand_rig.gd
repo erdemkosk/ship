@@ -37,7 +37,15 @@ const SHOULDER_OFFSET := Vector3(0.0, -0.29, 0.16)
 # without that the far column of the switchboard is simply out of range and the
 # solver can only point the arm at it.
 const MAX_LEAN := 0.40
+## A low fitting is reached by folding at the hips, not by lengthening the
+## humerus. This extra travel is available only below the torso; horizontal
+## console reaches keep the stricter limit above.
+const MAX_DOWN_LEAN := 0.72
 const LEAN_TAU := 0.12
+## Do not spend the arm's entire measured length just because a target is still
+## technically inside it.  A person leans a few centimetres and keeps a soft
+## elbow; 88% leaves useful bend without making the torso chase every control.
+const COMFORT_REACH_RATIO := 0.88
 ## Max angle the fingers may swing off the live forearm. A real wrist is
 ## about 70/80 flex-extend; past ~55 the mesh reads as broken, not cocked.
 const WRIST_CONE := 0.96  # ~55 deg
@@ -49,20 +57,80 @@ const WRIST_CONE := 0.96  # ~55 deg
 ## your own arms — the "gap" that flashes whenever the head bobs. Looking up,
 ## the arms should stay put or they hover into the sky with you.
 const FOLLOW_UP := 0.15
-const FOLLOW_DOWN := 0.62
+const FOLLOW_DOWN := 0.72
 
 ## Curl per joint, radians, applied about each joint's MEASURED curl axis.
+##
+## These are grasps, not silhouettes.  Every digit owns three joint angles so
+## the index can operate a toggle while the other fingers stay folded away, a
+## thumb can oppose a key, and the four long fingers can hook behind a handle.
+## One scalar for the whole hand was incapable of expressing any of those.
 const POSES := {
-	"open":  {"thumb": 0.06, "fingers": 0.10},
-	"flat":  {"thumb": 0.10, "fingers": 0.04},
-	"wrap":  {"thumb": 0.40, "fingers": 0.62},
-	"fist":  {"thumb": 0.48, "fingers": 0.85},
-	"pinch": {"thumb": 0.50, "fingers": 0.24, "index": 0.58},
-	# One finger out, the rest rolled away and the thumb over them. Every
-	# switch on the boat asked for this pose by name and it was not in the
-	# table — set_pose falls back to "open" for anything it does not know, so
-	# what actually went at the toggles was a splayed, open hand.
-	"point": {"thumb": 0.62, "fingers": 0.98, "index": 0.07},
+	"open": {
+		"thumb": [0.08, 0.05, 0.03], "fingers": [0.10, 0.08, 0.06],
+	},
+	"flat": {
+		"thumb": [0.12, 0.08, 0.05], "fingers": [0.04, 0.03, 0.02],
+	},
+	# Cylindrical power grasp: ring and pinky close hardest, index remains a
+	# little freer, thumb opposes across the handle.
+	"power": {
+		"thumb": [0.46, 0.56, 0.38], "index": [0.55, 0.72, 0.64],
+		"middle": [0.62, 0.82, 0.72], "ring": [0.68, 0.88, 0.78],
+		"pinky": [0.72, 0.92, 0.82],
+	},
+	# A wheel rim is larger than a lever and needs a shallower, evenly loaded
+	# wrap.  This prevents the fingertips visibly tunnelling through the wood.
+	"rim": {
+		"thumb": [0.36, 0.44, 0.30], "index": [0.42, 0.56, 0.50],
+		"middle": [0.48, 0.62, 0.56], "ring": [0.52, 0.67, 0.60],
+		"pinky": [0.56, 0.70, 0.64],
+	},
+	# Four fingers behind an edge; thumb is only a brace on the near face.
+	"hook": {
+		"thumb": [0.22, 0.26, 0.18], "index": [0.46, 0.82, 0.78],
+		"middle": [0.52, 0.90, 0.84], "ring": [0.58, 0.94, 0.88],
+		"pinky": [0.62, 0.98, 0.92],
+	},
+	# Door/lid handle: index through ring carry the load, pinky follows lightly,
+	# thumb locks the grasp from the opposite side.
+	"handle": {
+		"thumb": [0.42, 0.50, 0.34], "index": [0.48, 0.68, 0.62],
+		"middle": [0.56, 0.78, 0.70], "ring": [0.60, 0.82, 0.74],
+		"pinky": [0.50, 0.66, 0.60],
+	},
+	# Precision pinch: thumb and index meet; unused fingers are curled safely
+	# away instead of floating open through the key or cartridge.
+	"pinch": {
+		"thumb": [0.52, 0.62, 0.42], "index": [0.50, 0.64, 0.48],
+		"middle": [0.72, 0.86, 0.78], "ring": [0.78, 0.92, 0.84],
+		"pinky": [0.82, 0.96, 0.88],
+	},
+	"key": {
+		"thumb": [0.58, 0.68, 0.46], "index": [0.56, 0.72, 0.54],
+		"middle": [0.76, 0.90, 0.82], "ring": [0.82, 0.96, 0.88],
+		"pinky": [0.86, 1.00, 0.92],
+	},
+	# Index operates the toggle. Middle/ring/pinky close into the palm so they
+	# cannot clip the panel; thumb stabilises the side of the hand.
+	"point": {
+		"thumb": [0.50, 0.58, 0.40], "index": [0.08, 0.05, 0.03],
+		"middle": [0.78, 0.94, 0.86], "ring": [0.84, 1.00, 0.92],
+		"pinky": [0.88, 1.04, 0.96],
+	},
+	# Handset power grasp, with a freer thumb for the push-to-talk bar.
+	"handset": {
+		"thumb": [0.26, 0.34, 0.22], "index": [0.48, 0.64, 0.58],
+		"middle": [0.56, 0.74, 0.66], "ring": [0.60, 0.78, 0.70],
+		"pinky": [0.64, 0.82, 0.74],
+	},
+	# Backwards-compatible names used by face/ladder gestures.
+	"wrap": {
+		"thumb": [0.40, 0.50, 0.34], "fingers": [0.58, 0.76, 0.68],
+	},
+	"fist": {
+		"thumb": [0.48, 0.58, 0.40], "fingers": [0.78, 0.94, 0.86],
+	},
 }
 
 var camera: Camera3D
@@ -86,6 +154,11 @@ var _pose := {"R": "open", "L": "open"}
 var _pose_amt := {"R": 0.0, "L": 0.0}
 var _lean := Vector3.ZERO
 var _lean_want := Vector3.ZERO
+var _lean_samples := 0
+var _lean_limit_want := MAX_LEAN
+## Per-hand, short-lived upper-body reach supplied by hands.gd when the player
+## has deliberately aimed at a valid fitting. It is cleared on release.
+var _reach_assist := {"L": 0.0, "R": 0.0}
 var _ready_ok := false
 var _measured := {}
 ## The dive watch on the left wrist: its face material (the scripts feed it
@@ -158,6 +231,19 @@ func is_ready() -> bool:
 	return _ready_ok
 
 
+func has_pose(pose: String) -> bool:
+	return POSES.has(pose)
+
+
+func set_reach_assist(side: String, metres: float) -> void:
+	if _reach_assist.has(side):
+		_reach_assist[side] = maxf(metres, 0.0)
+
+
+func reach_assist(side: String) -> float:
+	return float(_reach_assist.get(side, 0.0))
+
+
 ## The one entry point: put this hand's PALM on `contact`, palm facing `palm_n`,
 ## fingers along `fingers_d`, closed into `pose`.
 ##
@@ -191,20 +277,48 @@ func grip(side: String, contact: Vector3, fingers_d: Vector3, palm_n: Vector3,
 func evaluate(side: String, contact: Vector3) -> Dictionary:
 	if not _ready_ok or camera == null:
 		return {"distance": 1e6, "over": 1e6, "leftover": 1e6, "cross": 0.0,
-				"reachable": false, "wrist_break": PI, "comfortable": false}
-	var sh: Vector3 = _lag.global_transform * _shoulder_local.get(side, SHOULDER_OFFSET)
-	var d: float = sh.distance_to(contact)
+				"reachable": false, "wrist_break": PI, "palm_twist": PI,
+				"elbow_cost": PI, "shoulder_raise": 1.0, "comfortable": false}
+	var sh_local: Vector3 = _shoulder_local.get(side, SHOULDER_OFFSET)
+	var sh_base: Vector3 = _lag.global_transform * (sh_local - _lean)
+	var base_vec: Vector3 = contact - sh_base
+	var d: float = base_vec.length()
 	var reach: float = float(_measured.get("reach_m", 0.55))
+	var lean_limit := _lean_limit_for(base_vec) + float(_reach_assist.get(side, 0.0))
 	var over: float = maxf(d - reach, 0.0)
-	var leftover: float = maxf(over - MAX_LEAN, 0.0)
+	var leftover: float = maxf(over - lean_limit, 0.0)
+	var comfort_lean := minf(maxf(d - reach * COMFORT_REACH_RATIO, 0.0), lean_limit)
+	var sh: Vector3 = sh_base
+	if base_vec.length_squared() > 1e-8:
+		sh += base_vec.normalized() * comfort_lean
 	var out: float = 1.0 if side == "R" else -1.0
-	var lat: float = (contact - sh).dot(camera.global_basis.x) * out
+	var arm_vec: Vector3 = contact - sh
+	var lat: float = arm_vec.dot(camera.global_basis.x) * out
+	# Law of cosines gives the elbow's included angle for this target.  Full
+	# extension is PI, a folded arm approaches zero.  Both extremes look wrong
+	# and leave the solver numerically unstable, even when the wrist is in reach.
+	var upper: float = float(_measured.get("upper_arm_m", 0.31))
+	var forearm: float = float(_measured.get("forearm_m", FOREARM_METRES))
+	var solve_d := clampf(arm_vec.length(), absf(upper - forearm) + 1e-4,
+			upper + forearm - 1e-4)
+	var elbow: float = acos(clampf((upper * upper + forearm * forearm
+			- solve_d * solve_d) / maxf(2.0 * upper * forearm, 1e-5), -1.0, 1.0))
+	var elbow_cost := maxf(deg_to_rad(42.0) - elbow, 0.0) \
+			+ maxf(elbow - deg_to_rad(158.0), 0.0)
+	var arm_dir: Vector3 = arm_vec.normalized() if arm_vec.length_squared() > 1e-8 \
+			else Vector3.DOWN
+	var shoulder_raise := maxf(arm_dir.dot(Vector3.UP) - 0.52, 0.0)
 	return {
 		"distance": d,
 		"reach": reach,
 		"over": over,
 		"leftover": leftover,
+		"comfort_lean": comfort_lean,
+		"lean_limit": lean_limit,
 		"cross": maxf(-lat, 0.0),
+		"elbow_angle": elbow,
+		"elbow_cost": elbow_cost,
+		"shoulder_raise": shoulder_raise,
 		"reachable": leftover < 0.025,
 		"wrist_break": 0.0,
 		"comfortable": leftover < 0.025 and maxf(-lat, 0.0) < 0.08,
@@ -219,15 +333,32 @@ func consider(side: String, contact: Vector3, fingers_d: Vector3 = Vector3.ZERO,
 	var ev: Dictionary = evaluate(side, contact)
 	var nat: Dictionary = natural_axes(side, contact)
 	var F_nat: Vector3 = nat["fingers"]
+	var P_nat: Vector3 = nat["palm"]
 	var brk: float = 0.0
+	var twist: float = 0.0
 	if fingers_d.length_squared() > 0.25:
-		brk = fingers_d.normalized().angle_to(F_nat)
+		var asked_f: Vector3 = fingers_d.normalized()
+		brk = asked_f.angle_to(F_nat)
+		# Finger flex and forearm roll are separate anatomical costs.  The old
+		# test measured only the first one, so two rim points with the same reach
+		# looked equally good even when one turned the palm almost backwards.
+		# Compare palm normals in the plane perpendicular to the asked fingers;
+		# this is the actual pronation/supination the grip asks of the forearm.
+		if palm_n.length_squared() > 0.25:
+			var asked_p: Vector3 = palm_n - palm_n.project(asked_f)
+			var natural_p: Vector3 = P_nat - P_nat.project(asked_f)
+			if asked_p.length_squared() > 1e-6 and natural_p.length_squared() > 1e-6:
+				twist = asked_p.normalized().angle_to(natural_p.normalized())
 	ev["wrist_break"] = brk
+	ev["palm_twist"] = twist
 	ev["comfortable"] = bool(ev["reachable"]) \
 			and float(ev["cross"]) < 0.08 \
-			and brk <= WRIST_CONE
+			and float(ev["elbow_cost"]) < deg_to_rad(6.0) \
+			and float(ev["shoulder_raise"]) < 0.12 \
+			and brk <= WRIST_CONE \
+			and twist <= deg_to_rad(125.0)
 	ev["fingers"] = F_nat
-	ev["palm"] = nat["palm"]
+	ev["palm"] = P_nat
 	return ev
 
 
@@ -281,8 +412,12 @@ func update(delta: float) -> void:
 		for side in _end_bone:
 			_wrist.weights[_end_bone[side]] = _weight[side]
 	var k := 1.0 - exp(-delta / LEAN_TAU)
-	_lean = _lean.lerp(_lean_want.limit_length(MAX_LEAN), k)
+	var lean_goal := _lean_want / float(_lean_samples) if _lean_samples > 0 \
+			else Vector3.ZERO
+	_lean = _lean.lerp(lean_goal.limit_length(_lean_limit_want), k)
 	_lean_want = Vector3.ZERO
+	_lean_samples = 0
+	_lean_limit_want = MAX_LEAN
 	_lag.position = _lean
 	var fwd: Vector3 = -camera.global_basis.z
 	var cam_pitch: float = asin(clampf(fwd.y, -1.0, 1.0))
@@ -318,18 +453,27 @@ func _cone_to_forearm(side: String, contact: Vector3, F: Vector3) -> Vector3:
 	return fore.rotated(axis.normalized(), WRIST_CONE)
 
 
+func _lean_limit_for(to_grip: Vector3) -> float:
+	if to_grip.length_squared() < 1e-8 or camera == null:
+		return MAX_LEAN
+	var down := clampf(-to_grip.normalized().dot(camera.global_basis.y), 0.0, 1.0)
+	return lerpf(MAX_LEAN, MAX_DOWN_LEAN, smoothstep(0.15, 0.65, down))
+
+
 func _reach(side: String, xf: Transform3D, weight: float, clamp_sphere := false) -> void:
 	var sh_local: Vector3 = _shoulder_local.get(side, SHOULDER_OFFSET)
 	var sh_now: Vector3 = _lag.global_transform * sh_local
 	var sh_unleaned: Vector3 = _lag.global_transform * (sh_local - _lean)
 	var to_grip: Vector3 = xf.origin - sh_unleaned
 	var reach: float = float(_measured.get("reach_m", 0.6)) - 0.015
-	var over: float = to_grip.length() - reach
+	var lean_limit := _lean_limit_for(to_grip) + float(_reach_assist.get(side, 0.0))
+	var over: float = to_grip.length() - reach * COMFORT_REACH_RATIO
 	if over > 0.0:
 		var want: Vector3 = _lag.global_transform.basis.inverse() \
-				* (to_grip.normalized() * minf(over, MAX_LEAN))
-		if want.length() > _lean_want.length():
-			_lean_want = want
+				* (to_grip.normalized() * minf(over, lean_limit))
+		_lean_want += want
+		_lean_samples += 1
+		_lean_limit_want = maxf(_lean_limit_want, lean_limit)
 	# Only for one-shot reaches. Pinning a helm grip to the arm sphere lifts
 	# the palm off the rim the moment the wrist sits a centimetre past reach.
 	if clamp_sphere:
@@ -364,14 +508,15 @@ func _apply_fingers(side: String) -> void:
 	var amt: float = _pose_amt[side]
 	for f: int in _fingers[side]:
 		var chain: PackedInt32Array = _fingers[side][f]
-		var base: float = spec.get("thumb", 0.0) if f == THUMB else spec.get("fingers", 0.0)
-		if f == INDEX and spec.has("index"):
-			base = spec["index"]
+		var digit_name: String = FINGERS[f]
+		var values: Array = spec.get(digit_name,
+				spec.get("thumb", [0.0, 0.0, 0.0]) if f == THUMB \
+				else spec.get("fingers", [0.0, 0.0, 0.0]))
 		for i in chain.size():
 			var b: int = chain[i]
 			var axis: Vector3 = _curl_axis.get(b, Vector3.RIGHT)
 			var rest: Quaternion = skeleton.get_bone_rest(b).basis.get_rotation_quaternion()
-			var ang: float = base * amt * (1.0 + float(i) * 0.10)
+			var ang: float = float(values[mini(i, values.size() - 1)]) * amt
 			skeleton.set_bone_pose_rotation(b, rest * Quaternion(axis, ang))
 
 
@@ -1128,3 +1273,13 @@ func wrist_global(side: String) -> Transform3D:
 	if b < 0 or not _wrist.solved.has(b):
 		return Transform3D.IDENTITY
 	return skeleton.global_transform * (_wrist.solved[b] as Transform3D)
+
+
+func palm_global(side: String) -> Vector3:
+	var wrist := wrist_global(side)
+	if wrist == Transform3D.IDENTITY or not _palm_local.has(side):
+		return wrist.origin
+	# _palm_local is already measured in metres. wrist.basis still contains the
+	# imported GLB hierarchy scale, so multiplying the point transform directly
+	# would apply that scale twice and report the wrist as the palm.
+	return wrist.origin + wrist.basis.orthonormalized() * (_palm_local[side] as Vector3)
