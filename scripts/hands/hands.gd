@@ -17,6 +17,7 @@ extends Node3D
 
 const RIG := preload("res://scripts/hands/hand_rig.gd")
 const GRASP_PLANNER := preload("res://scripts/hands/grasp_planner.gd")
+const INTERACTION_MOTION := preload("res://scripts/hands/interaction_motion.gd")
 
 ## Fired at the exact contact phase of a hand-authored interaction.  The camera
 ## owns gameplay intent; the hand owns when flesh actually reaches the control.
@@ -209,52 +210,10 @@ func plan_world_grasp(contact: Vector3, fingers := Vector3.ZERO,
 		return {}
 	var candidates := {}
 	for side: String in ["L", "R"]:
-		var base: Dictionary = rig.consider(side, contact, fingers, palm)
-		var old_assist: float = rig.reach_assist(side)
 		var natural_frame := fingers.length_squared() < 0.25 \
 				or palm.length_squared() < 0.25
-		var goal_axes: Dictionary = rig.natural_axes(side, contact) \
-				if natural_frame else {"fingers": fingers.normalized(),
-						"palm": palm.normalized()}
-		var worst_leftover := float(base.get("leftover", 0.0))
-		for raw_alpha: float in [0.0, 0.34, 0.67, 1.0]:
-			var raw_point := contact - (goal_axes["palm"] as Vector3) \
-					* maxf(approach, 0.0) * (1.0 - raw_alpha)
-			var raw_ev: Dictionary = rig.consider(side, raw_point,
-					Vector3.ZERO if natural_frame else fingers,
-					Vector3.ZERO if natural_frame else palm)
-			worst_leftover = maxf(worst_leftover,
-					float(raw_ev.get("leftover", 0.0)))
-		var needed := 0.0
-		if assist_cap > 0.0:
-			needed = minf(maxf(worst_leftover + 0.025, 0.0), assist_cap)
-		rig.set_reach_assist(side, needed)
-		var path: Array[Dictionary] = []
-		for alpha: float in [0.0, 0.34, 0.67, 1.0]:
-			var point := contact - (goal_axes["palm"] as Vector3) \
-					* maxf(approach, 0.0) * (1.0 - alpha)
-			var ev: Dictionary = rig.consider(side, point,
-					Vector3.ZERO if natural_frame else fingers,
-					Vector3.ZERO if natural_frame else palm)
-			# A generic contact frame is semantic guidance, not permission to snap
-			# a wrist. If it is impossible, infer the human arrival frame instead.
-			if not natural_frame and (float(ev.get("wrist_break", 0.0)) \
-					> rig.WRIST_CONE * 0.85 \
-					or float(ev.get("palm_twist", 0.0)) > deg_to_rad(125.0)):
-				ev = rig.consider(side, point)
-				ev["natural_fallback"] = true
-			path.append(ev)
-		candidates[side] = {
-			"side": side,
-			"end": path.back(),
-			"path": path,
-			"required_assist": needed,
-			"soft_occupancy": 0.15 if _claim.get(side, "") in ["helm", "telegraph"]
-					else 0.0,
-			"fingers": (path.back() as Dictionary).get("fingers", goal_axes["fingers"]),
-			"palm": (path.back() as Dictionary).get("palm", goal_axes["palm"]),
-		}
-		rig.set_reach_assist(side, old_assist)
+		candidates[side] = _sample_grasp_candidate(side, contact, fingers, palm,
+				approach, assist_cap, natural_frame, true)
 	return GRASP_PLANNER.choose(candidates, rig.WRIST_CONE,
 			{"L": _locked("L"), "R": _locked("R")}, preferred)
 
@@ -521,40 +480,14 @@ func _start_gesture(side: String, id: String, spec: Dictionary,
 		"release_after": release_after,
 		"approach": maxf(float(spec.get("approach", 0.08)), 0.0),
 		"follow_motion": spec.get("follow_motion", {}),
-		# Local rotation excludes the boat's own pitch/roll. Only motion of the
-		# contacted fitting may count as progress of the hand action.
-		"motion_start": device.transform.basis.get_rotation_quaternion() \
-				if device != null else Quaternion.IDENTITY,
-		"motion_start_origin": device.transform.origin if device != null \
-				else Vector3.ZERO,
+		"motion_start": INTERACTION_MOTION.snapshot(device),
 	}
 
 
 func _motion_progress(gs: Dictionary) -> float:
-	## How far the contacted object has moved through its declared affordance.
-	## This deliberately knows nothing about fuse boxes, lockers or doors.
 	var follow: Dictionary = gs.get("follow_motion", {})
-	if follow.is_empty():
-		return 0.0
 	var device := _device_of(str(gs.get("id", "")))
-	if device == null:
-		return 0.0
-	match str(follow.get("type", "")):
-		"hinge":
-			var start: Quaternion = gs.get("motion_start", Quaternion.IDENTITY)
-			var live := device.transform.basis.get_rotation_quaternion()
-			var travel := absf(start.angle_to(live))
-			return clampf(travel / maxf(float(follow.get("angle", 0.01)), 0.01),
-					0.0, 1.0)
-		"linear":
-			var start: Vector3 = gs.get("motion_start_origin", device.transform.origin)
-			var displacement := device.transform.origin - start
-			var direction: Vector3 = follow.get("direction", Vector3.ZERO)
-			var travel := absf(displacement.dot(direction.normalized())) \
-					if direction.length_squared() > 0.25 else displacement.length()
-			return clampf(travel / maxf(float(follow.get("distance", 0.01)), 0.01),
-					0.0, 1.0)
-	return 0.0
+	return INTERACTION_MOTION.progress(follow, gs.get("motion_start", {}), device)
 
 
 func _tick_gestures(delta: float) -> void:
@@ -590,10 +523,8 @@ func _tick_gestures(delta: float) -> void:
 					- float(gs["duration"]) * float(gs["contact_at"])
 			var follow: Dictionary = gs.get("follow_motion", {})
 			if not follow.is_empty():
-				var minimum := maxf(float(follow.get("min_time", 0.0)), 0.0)
-				var timeout := maxf(float(follow.get("timeout", 0.18)), minimum)
-				if after_contact >= minimum and (_motion_progress(gs) >= 1.0 \
-						or after_contact >= timeout):
+				if INTERACTION_MOTION.should_release(follow, after_contact,
+						_motion_progress(gs)):
 					_gesture[side] = {}
 					_release(side)
 					continue
@@ -645,72 +576,73 @@ func _grip_evaluation(side: String, id: String) -> Dictionary:
 func _evaluate_grip_frame(side: String, id: String, contact: Vector3,
 		asked: Dictionary) -> Dictionary:
 	var spec: Dictionary = GripMap.spec_for(id)
-	var ev: Dictionary = rig.consider(side, contact, asked["fingers"], asked["palm"])
-	# Drive uses the live forearm frame for a non-welded gesture whose authored
-	# approach would break the wrist. Admission must judge that same final pose,
-	# not reject the obsolete catalog frame that drive will never use.
-	if not GripMap.welded(spec) and (float(ev.get("wrist_break", 0.0)) \
+	return _evaluate_candidate_frame(side, contact, asked["fingers"], asked["palm"],
+			false, not GripMap.welded(spec))
+
+
+func _evaluate_candidate_frame(side: String, contact: Vector3, fingers: Vector3,
+		palm: Vector3, natural_frame: bool, allow_fallback: bool) -> Dictionary:
+	var ev: Dictionary = rig.consider(side, contact,
+			Vector3.ZERO if natural_frame else fingers,
+			Vector3.ZERO if natural_frame else palm)
+	# Contact semantics guide the grasp, but may never authorize a snapped wrist.
+	if allow_fallback and not natural_frame and (float(ev.get("wrist_break", 0.0)) \
 			> rig.WRIST_CONE * 0.85 \
 			or float(ev.get("palm_twist", 0.0)) > deg_to_rad(125.0)):
-		ev = rig.consider(side, contact, ev["fingers"], ev["palm"])
+		ev = rig.consider(side, contact)
 		ev["natural_fallback"] = true
 	return ev
 
 
-func _evaluation_with_assist(side: String, id: String, assist_cap: float) -> Dictionary:
-	## Score the pose the player will actually end up in, after the deliberate
-	## torso motion. Judging the pre-lean straight elbow was rejecting exactly
-	## the low/far fittings this assistance exists to make usable.
-	var base: Dictionary = _grip_evaluation(side, id)
-	if assist_cap <= 0.0:
-		return base
+func _sample_grasp_candidate(side: String, contact: Vector3, fingers: Vector3,
+		palm: Vector3, approach: float, assist_cap: float, natural_frame: bool,
+		allow_fallback: bool) -> Dictionary:
+	## Single source of truth for catalog and runtime-created interactables.
 	var old_assist: float = rig.reach_assist(side)
-	var needed := minf(maxf(float(base.get("leftover", 0.0)) + 0.025, 0.025),
-			assist_cap)
-	rig.set_reach_assist(side, needed)
-	var assisted: Dictionary = _grip_evaluation(side, id)
-	rig.set_reach_assist(side, old_assist)
-	assisted["required_assist"] = needed
-	return assisted
-
-
-func _planned_candidate(side: String, id: String, assist_cap: float) -> Dictionary:
-	## Sample the actual palm path, not only its endpoint. New interactables get
-	## this automatically from their contact frame and approach distance.
-	var base: Dictionary = _grip_evaluation(side, id)
-	var old_assist: float = rig.reach_assist(side)
-	var goal: Vector3 = _side_contact(id, side)
-	var asked: Dictionary = _asked_axes(id, side)
-	var palm: Vector3 = asked.get("palm", Vector3.ZERO)
-	if palm.length_squared() < 0.25:
-		palm = (rig.natural_axes(side, goal) as Dictionary)["palm"]
-	palm = palm.normalized()
-	var approach := maxf(float(GripMap.spec_for(id).get("approach", 0.0)), 0.0)
-	# Torso assistance must cover the hardest point on the way, not merely the
-	# final contact. Otherwise a far control can be promised by the reticle and
-	# rejected because its clear-of-object start is a few centimetres farther.
-	var worst_leftover := float(base.get("leftover", 0.0))
+	var goal_axes: Dictionary = rig.natural_axes(side, contact) \
+			if natural_frame else {"fingers": fingers.normalized(),
+					"palm": palm.normalized()}
+	var points: Array[Vector3] = []
 	for alpha: float in [0.0, 0.34, 0.67, 1.0]:
-		var raw_point := goal - palm * approach * (1.0 - alpha)
-		var raw_ev := _evaluate_grip_frame(side, id, raw_point, asked)
+		points.append(contact - (goal_axes["palm"] as Vector3) \
+				* maxf(approach, 0.0) * (1.0 - alpha))
+	var worst_leftover := 0.0
+	for point: Vector3 in points:
+		var raw_ev := _evaluate_candidate_frame(side, point, fingers, palm,
+				natural_frame, allow_fallback)
 		worst_leftover = maxf(worst_leftover, float(raw_ev.get("leftover", 0.0)))
 	var needed := 0.0
 	if assist_cap > 0.0:
 		needed = minf(maxf(worst_leftover + 0.025, 0.025), assist_cap)
 	rig.set_reach_assist(side, needed)
 	var path: Array[Dictionary] = []
-	for alpha: float in [0.0, 0.34, 0.67, 1.0]:
-		var point := goal - palm * approach * (1.0 - alpha)
-		path.append(_evaluate_grip_frame(side, id, point, asked))
+	for point: Vector3 in points:
+		path.append(_evaluate_candidate_frame(side, point, fingers, palm,
+				natural_frame, allow_fallback))
+	var end: Dictionary = path.back()
 	var candidate := {
 		"side": side,
-		"end": path.back() if not path.is_empty() else base,
+		"end": end,
 		"path": path,
 		"required_assist": needed,
-		"soft_occupancy": 0.15 if _claim.get(side, "") in ["helm", "telegraph"] else 0.0,
+		"soft_occupancy": 0.15 if _claim.get(side, "") in ["helm", "telegraph"]
+				else 0.0,
+		"fingers": end.get("fingers", goal_axes["fingers"]),
+		"palm": end.get("palm", goal_axes["palm"]),
 	}
 	rig.set_reach_assist(side, old_assist)
 	return candidate
+
+
+func _planned_candidate(side: String, id: String, assist_cap: float) -> Dictionary:
+	## Sample the actual palm path, not only its endpoint. New interactables get
+	## this automatically from their contact frame and approach distance.
+	var goal: Vector3 = _side_contact(id, side)
+	var asked: Dictionary = _asked_axes(id, side)
+	var approach := maxf(float(GripMap.spec_for(id).get("approach", 0.0)), 0.0)
+	var spec: Dictionary = GripMap.spec_for(id)
+	return _sample_grasp_candidate(side, goal, asked["fingers"], asked["palm"],
+			approach, assist_cap, false, not GripMap.welded(spec))
 
 
 func _pick_hand(id: String, preferred := "", reach_slack := 0.0) -> String:

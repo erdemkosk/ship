@@ -1,5 +1,7 @@
 extends RefCounted
 class_name GripMap
+
+const INTERACTION_MOTION := preload("res://scripts/hands/interaction_motion.gd")
 ## The object's side of a hold. Hands do not invent a grip — they read this.
 ##
 ## A grip is a frame in the DEVICE's local space:
@@ -24,6 +26,7 @@ const _DOOR_P := Vector3(-0.94, -0.20, 0.0)
 
 const SWITCH := {
 	"node": "switch_lever",
+	"node_uses_id": true,
 	"kind": Kind.GESTURE,
 	"pose": "point",
 	"action": "toggle",
@@ -184,6 +187,7 @@ const ENTRIES := {
 	},
 	"fu_cabin": {
 		"node": "fuse_body",
+		"node_uses_id": true,
 		"kind": Kind.GESTURE,
 		"pose": "pinch",
 		"action": "toggle",
@@ -199,6 +203,7 @@ const ENTRIES := {
 	},
 	"door_fwd": {
 		"node": "door_node",
+		"node_uses_id": true,
 		"kind": Kind.GESTURE,
 		"pose": "handle",
 		"action": "toggle",
@@ -210,12 +215,15 @@ const ENTRIES := {
 		"handed": true,
 		"drops_instruments": true,
 		"latch": true,
+		"contact_accessor": "door_latch_local",
+		"contact_uses_id": true,
 		"pos": Vector3(1.02, 1.58, -0.072),
 		"fingers": _DOOR_F,
 		"palm": _DOOR_P,
 	},
 	"door_aft": {
 		"node": "door_node",
+		"node_uses_id": true,
 		"kind": Kind.GESTURE,
 		"pose": "handle",
 		"action": "toggle",
@@ -227,12 +235,15 @@ const ENTRIES := {
 		"handed": true,
 		"drops_instruments": true,
 		"latch": true,
+		"contact_accessor": "door_latch_local",
+		"contact_uses_id": true,
 		"pos": Vector3(1.02, 1.58, 0.072),
 		"fingers": _DOOR_F,
 		"palm": _DOOR_P,
 	},
 	"door_wh": {
 		"node": "door_node",
+		"node_uses_id": true,
 		"kind": Kind.GESTURE,
 		"pose": "handle",
 		"action": "toggle",
@@ -244,6 +255,8 @@ const ENTRIES := {
 		"handed": true,
 		"drops_instruments": true,
 		"latch": true,
+		"contact_accessor": "door_latch_local",
+		"contact_uses_id": true,
 		"pos": Vector3(-0.98, 0.92, 0.072),
 		"fingers": _DOOR_F,
 		"palm": _DOOR_P,
@@ -307,20 +320,9 @@ static func validation_error(spec: Dictionary) -> String:
 		if contact < 0.10 or contact > 0.80:
 			return "contact phase outside gesture"
 	var follow: Dictionary = spec.get("follow_motion", {})
-	if not follow.is_empty():
-		var motion_type := str(follow.get("type", ""))
-		if motion_type not in ["hinge", "linear"]:
-			return "unsupported follow motion"
-		if motion_type == "hinge" and float(follow.get("angle", 0.0)) <= 0.0:
-			return "follow motion has no travel"
-		if motion_type == "linear" and float(follow.get("distance", 0.0)) <= 0.0:
-			return "follow motion has no travel"
-		var direction: Vector3 = follow.get("direction", Vector3.ZERO)
-		if motion_type == "linear" and follow.has("direction") \
-				and direction.length_squared() < 0.25:
-			return "follow motion has invalid direction"
-		if float(follow.get("timeout", 0.0)) <= 0.0:
-			return "follow motion has no timeout"
+	var motion_error := INTERACTION_MOTION.validation_error(follow)
+	if motion_error != "":
+		return motion_error
 	return ""
 
 
@@ -362,12 +364,11 @@ static func contact_of(spec: Dictionary, boat: Node3D, id: String) -> Vector3:
 	var pos: Vector3 = spec.get("pos", Vector3.ZERO)
 	var contact_accessor := str(spec.get("contact_accessor", ""))
 	if contact_accessor != "" and boat != null and boat.has_method(contact_accessor):
-		var dynamic_contact: Variant = boat.call(contact_accessor)
+		var dynamic_contact: Variant = boat.call(contact_accessor, id) \
+				if bool(spec.get("contact_uses_id", false)) \
+				else boat.call(contact_accessor)
 		if dynamic_contact is Vector3:
 			return dynamic_contact
-	if bool(spec.get("latch", false)) and boat != null \
-			and boat.has_method("door_latch_local"):
-		pos = boat.call("door_latch_local", id)
 	return pos
 
 
@@ -396,12 +397,8 @@ static func device_of(boat: Node3D, id: String) -> Node3D:
 	var acc: String = str(spec.get("node", ""))
 	if acc == "":
 		return null
-	if acc == "switch_lever":
-		return boat.call("switch_lever", id) as Node3D
-	if acc == "fuse_body":
-		return boat.call("fuse_body", id) as Node3D
-	if acc == "door_node":
-		return boat.call("door_node", id) as Node3D
 	if not boat.has_method(acc):
 		return null
+	if bool(spec.get("node_uses_id", false)):
+		return boat.call(acc, id) as Node3D
 	return boat.call(acc) as Node3D

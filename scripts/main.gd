@@ -158,6 +158,8 @@ func _ready() -> void:
 			_fusebox_grip_test(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--grasp-planner-test":
 			_grasp_planner_test(rig, boat)
+		elif arg == "--interaction-contract-test":
+			_interaction_contract_test()
 		elif arg == "--pull-radar":
 			_pull_radar(rig)
 		elif arg == "--pull-sounder":
@@ -555,6 +557,37 @@ func _grasp_planner_test(rig: Node3D, boat: RigidBody3D) -> void:
 				rad_to_deg(float(ev.get("wrist_break", 0.0))),
 				rad_to_deg(float(ev.get("palm_twist", 0.0))),
 				(choice.get("path", []) as Array).size()])
+	get_tree().quit()
+
+
+func _interaction_contract_test() -> void:
+	## Pure contract test; no hand skeleton or ship fitting is involved.
+	var motion := preload("res://scripts/hands/interaction_motion.gd")
+	var device := Node3D.new()
+	var hinge := {"type": "hinge", "angle": 0.74,
+			"min_time": 0.05, "timeout": 0.15}
+	var start: Dictionary = motion.snapshot(device)
+	device.rotation.y = 0.37
+	var hinge_progress: float = motion.progress(hinge, start, device)
+	if not is_equal_approx(hinge_progress, 0.5):
+		push_error("hinge motion contract progress %.3f, expected 0.5" % hinge_progress)
+	device.rotation = Vector3.ZERO
+	var linear := {"type": "linear", "distance": 0.20,
+			"direction": Vector3.RIGHT, "min_time": 0.04, "timeout": 0.18}
+	start = motion.snapshot(device)
+	device.position = Vector3(0.10, 0.0, 0.30)
+	var linear_progress: float = motion.progress(linear, start, device)
+	if not is_equal_approx(linear_progress, 0.5):
+		push_error("linear motion contract progress %.3f, expected 0.5" % linear_progress)
+	if motion.should_release(linear, 0.02, 1.0):
+		push_error("motion contract ignored minimum contact time")
+	if not motion.should_release(linear, 0.05, 1.0):
+		push_error("motion contract did not release at completed travel")
+	if motion.validation_error(linear) != "":
+		push_error("valid linear motion contract was rejected")
+	print("[interaction-motion] hinge=%.3f linear=%.3f minimum=true release=true" % [
+			hinge_progress, linear_progress])
+	device.free()
 	get_tree().quit()
 
 
