@@ -143,7 +143,11 @@ vec3 sky_color_n(vec3 dir, float blur, float disk_mul, int layers) {
 	}
 	col = mix(col, cloud_col, m * 0.96);
 	col += vec3(0.62, 0.68, 0.95) * flash_energy * 0.08;
-	return col;
+	// Reflection rays from a steep water face can legitimately point below the
+	// horizon. Returning horizon_color there made every face bright grey and left
+	// the authored ground colour unused. The real lower hemisphere is the dark
+	// sea/land environment, with a soft haze transition at the line.
+	return mix(col, ground_color, smoothstep(0.0, 0.16, -dir.y));
 }
 
 // What the sea reflects. The dome version runs three 5-octave FBMs per pixel;
@@ -174,7 +178,7 @@ vec3 sky_color(vec3 dir, float blur, float disk_mul) {
 
 	col = mix(col, cloud_col, m * 0.96);
 	col += vec3(0.62, 0.68, 0.95) * flash_energy * 0.08;
-	return col;
+	return mix(col, ground_color, smoothstep(0.0, 0.16, -dir.y));
 }
 
 #endif

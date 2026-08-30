@@ -38,6 +38,7 @@ uniform float mss : hint_range(0.0, 0.3) = 0.05;
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.55;
 uniform float foam_amount : hint_range(0.0, 2.0) = 0.85;
 uniform float sss_strength : hint_range(0.0, 3.0) = 1.0;
+uniform float boat_wave_gain : hint_range(0.5, 2.0) = 1.0;
 // Irradiance of the whole sky hemisphere. A rough surface reflects the average
 // of the dome, not the one patch a mirror would pick.
 uniform vec3 sky_ambient : source_color = vec3(0.14, 0.18, 0.22);
@@ -47,6 +48,14 @@ uniform vec2 current_vec = vec2(0.0);    // tidal stream at the boat, m/s
 uniform float rain_amount : hint_range(0.0, 1.0) = 0.0;
 uniform sampler2D foam_noise : filter_linear_mipmap, repeat_enable;
 uniform sampler2D height_map : filter_linear, repeat_enable;
+// Boat-centred, non-periodic interaction field. r=height, g=vertical velocity,
+// b=foam energy. The FFT remains the sea; this texture is what lets a hull,
+// propeller, swimmer and impact leave water behind instead of drawing decals.
+uniform sampler2D local_field : filter_linear;
+uniform int local_field_on = 0;
+uniform vec2 local_centre = vec2(0.0);
+uniform float local_world_size = 64.0;
+uniform float local_texel = 0.25;
 // filter_linear, NOT mipmap: asking for mipmaps here makes the renderer build a
 // full mip chain of the screen every single frame, and the only thing it bought
 // was a slightly softer refraction in shallow water.
@@ -86,9 +95,10 @@ uniform vec4 floater_vel[MAX_FLOATERS];
 //
 // trail[i]: xy = world xz, z = arc length back from the transom, w = the speed
 // the boat had there (which is what set the wavelength at that point).
-const int MAX_TRAIL = 20;
+const int MAX_TRAIL = 32;
 uniform int trail_count = 0;
 uniform vec4 trail[MAX_TRAIL];
+uniform float trail_age[MAX_TRAIL];
 // Short-lived physical impulses shared with ocean.gd's CPU height queries.
 // xy = origin, z = birth time, w = strength.
 const int MAX_IMPACTS = 12;
@@ -133,6 +143,8 @@ varying float v_fold;
 varying float v_disturb;
 varying float v_rip;
 varying float v_hull_wash;
+varying float v_bow_wash;
+varying float v_local_foam;
 
 // Rain on water: each cell drops once per cycle and throws an expanding ring.
 // Two scales so it does not read as a regular grid.
@@ -159,6 +171,31 @@ vec2 rain_ripple(vec2 p, float t) {
 
 float terrain_h(vec2 xz) {
 	return texture(height_map, xz / terrain_size + 0.5).r;
+}
+
+vec4 local_water(vec2 p) {
+	if (local_field_on == 0) {
+		return vec4(0.0);
+	}
+	vec2 uv = (p - local_centre) / max(local_world_size, 1.0) + 0.5;
+	float edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+	if (edge <= 0.0) {
+		return vec4(0.0);
+	}
+	float rim = smoothstep(0.0, 0.055, edge);
+	return textureLod(local_field, clamp(uv, vec2(0.001), vec2(0.999)), 0.0) * rim;
+}
+
+vec2 local_water_gradient(vec2 p) {
+	if (local_field_on == 0) {
+		return vec2(0.0);
+	}
+	float e = max(local_texel, 0.05);
+	float hx0 = local_water(p - vec2(e, 0.0)).r;
+	float hx1 = local_water(p + vec2(e, 0.0)).r;
+	float hz0 = local_water(p - vec2(0.0, e)).r;
+	float hz1 = local_water(p + vec2(0.0, e)).r;
+	return vec2(hx1 - hx0, hz1 - hz0) / (2.0 * e);
 }
 
 vec3 lh_glitter(vec3 p, vec3 n, vec3 v, vec3 bdir) {
@@ -197,6 +234,13 @@ void vertex() {
 	WaveSample w = sample_waves(p, cam_dist);
 	vec3 disp = w.disp;
 	vec2 extra_slope = vec2(0.0);
+	vec4 local = local_water(p);
+	// The compute field is quarter-metre data. Keep its geometry on the dense
+	// close clipmap and hand its remaining slope to the fragment shader; this
+	// broad fade is shared by overlapping rings, so no circular seam can open.
+	float local_geom = 1.0 - smoothstep(18.0, 24.0, cam_dist);
+	disp.y += local.r * local_geom * boat_wave_gain;
+	v_local_foam = local.b * (1.0 - smoothstep(22.0, 31.0, cam_dist));
 
 	// Green's law: a wave that feels the bottom slows down, shortens and grows.
 	// scripts/ocean.gd applies the same factor to the CPU height query, so the
@@ -217,6 +261,7 @@ void vertex() {
 	// rings and a short V, the way a dinghy or a swimmer does.
 	v_disturb = 0.0;
 	v_hull_wash = 0.0;
+	v_bow_wash = 0.0;
 	for (int i = 0; i < num_floaters; i++) {
 		vec2 fp = floaters[i].xy;
 		float rad = max(floaters[i].z, 0.15);
@@ -332,8 +377,10 @@ void vertex() {
 		// Keep the geometry response shallow. A deep procedural ridge attached to
 		// the hull visibly breathed as the physics velocity changed; the actual
 		// far-field displacement belongs to the Kelvin wake and one-shot impacts.
-		disp.y += pressure * 0.065;
-		v_hull_wash = clamp(pressure * 1.65, 0.0, 1.0);
+		disp.y += pressure * 0.065 * boat_wave_gain;
+		float wash_gain = mix(1.0, boat_wave_gain, 0.55);
+		v_hull_wash = clamp(pressure * 1.65 * wash_gain, 0.0, 1.0);
+		v_bow_wash = clamp(bow_band * contact * drive * 1.65 * wash_gain, 0.0, 1.0);
 		v_disturb = max(v_disturb, v_hull_wash);
 	}
 
@@ -350,6 +397,7 @@ void vertex() {
 	float along = -1.0;
 	float lat = 0.0;
 	float spd = 0.0;
+	float wake_age = 0.0;
 	vec2 axis = vec2(0.0, 1.0);
 	if (trail_count > 1 && distance(p, boat_pos) < 170.0) {
 		float best = 1e9;
@@ -369,6 +417,7 @@ void vertex() {
 				lat = dl * sgn;
 				along = mix(trail[i].z, trail[i + 1].z, u);
 				spd = mix(trail[i].w, trail[i + 1].w, u);
+				wake_age = mix(trail_age[i], trail_age[i + 1], u);
 				axis = normalize(ab + vec2(1e-6, 0.0));
 			}
 		}
@@ -380,9 +429,15 @@ void vertex() {
 		float wedge = along * 0.3536 + 0.9;             // tan(19.47 deg)
 		float e_lat = 1.0 - smoothstep(0.62, 1.06, abs(lat) / wedge);
 		float decay = exp(-along * 0.016) / sqrt(max(along, 1.2));
+		float age_decay = exp(-wake_age / 13.5);
 		float speed_energy = clamp(spd * spd / 16.0, 0.0, 2.35);
-		float amp = 0.50 * speed_energy * e_lat * decay
-				* smoothstep(0.0, 1.8, along) * interaction_geom;
+		// A 19 m displacement wake is perfectly resolvable on the 2 m mid ring;
+		// a one-metre dead-slow ripple is not. Reach therefore follows wavelength
+		// instead of using the old universal 13.5 m cutoff.
+		float geom_reach = mix(21.0, 76.0, smoothstep(2.1, 5.8, spd));
+		float wake_geom = 1.0 - smoothstep(geom_reach * 0.82, geom_reach, cam_dist);
+		float amp = 0.50 * boat_wave_gain * speed_energy * e_lat * decay
+				* smoothstep(0.0, 1.8, along) * wake_geom * age_decay;
 		float ph_t = kt * along;
 		float ph_d = kt * (0.76 * along + 1.32 * abs(lat));
 		disp.y += amp * (sin(ph_t) * 0.45 + sin(ph_d) * 0.9);
@@ -397,7 +452,8 @@ void vertex() {
 		float edge = abs(lat) / max(wedge, 0.7) - 0.80;
 		float cusp = exp(-edge * edge * 40.0) * exp(-along * 0.055) * 0.22;
 		v_wake = clamp((track + cusp)
-				* clamp(spd * spd * 0.065 - 0.08, 0.0, 1.35), 0.0, 1.0);
+				* clamp(spd * spd * 0.065 - 0.08, 0.0, 1.35)
+				* mix(1.0, boat_wave_gain, 0.45) * age_decay, 0.0, 1.0);
 	}
 
 	// Shore chop: extra small waves where water meets sand / islets.
@@ -499,6 +555,11 @@ void fragment() {
 	vec2 wgrad;
 	float wfoam;
 	wave_gradient(v_rest, dist, wgrad, wfoam);
+	// Re-sample the interaction field per pixel. The vertex slope keeps the
+	// silhouette honest; this fetch preserves quarter-metre prop and impact
+	// detail between half-metre close-ring vertices.
+	wgrad += local_water_gradient(v_rest) * boat_wave_gain
+			* (1.0 - smoothstep(22.0, 31.0, dist));
 	// Heavy rain visibly flattens the small chop — the sea goes matte under a
 	// downpour. It used to damp the detail-normal layers; now it damps the real
 	// gradient, which is the same statement about the same waves.
@@ -517,7 +578,8 @@ void fragment() {
 	// patch of foam keeps moving after the wave that made it has gone.
 	// Three noise fetches, and on open water there is usually nothing for them
 	// to break up. One cheap test on the varyings decides whether to pay.
-	float foam_src = max(max(fold, v_shore), max(max(v_wake, v_disturb), v_rip));
+	float foam_src = max(max(fold, v_shore),
+			max(max(max(v_wake, v_disturb), v_rip), v_local_foam));
 	float foam = 0.0;
 	float shore_foam = 0.0;
 	float foam_hi = 0.0;
@@ -549,14 +611,19 @@ void fragment() {
 		// Foam albedo is ~10x the water's, so even a little of it doubles the
 		// brightness. A waterline ring gets a hint, not a halo.
 		float floater_foam = v_disturb * (0.15 + 0.85 * foam_hi) * 0.035;
-		float hull_foam = v_hull_wash * (0.35 + 0.90 * foam_hi) * 0.72;
+		float side_wash = max(v_hull_wash - v_bow_wash, 0.0);
+		float hull_foam = side_wash * (0.20 + 0.80 * foam_hi) * 0.16
+				+ v_bow_wash * (0.30 + 0.92 * foam_hi) * 0.62;
+		float local_foam = smoothstep(0.012, 0.34, v_local_foam)
+				* (0.22 + 0.88 * foam_hi);
 		// Rip foam is drawn out into lines by the flow, not scattered like
 		// whitecaps, so it is streaked along the current.
 		vec2 cdir = normalize(current_vec + vec2(1e-5));
 		vec2 rip_uv = vec2(dot(foam_p, cdir) * 0.06, dot(foam_p, vec2(-cdir.y, cdir.x)) * 0.55);
 		float rip_n = texture(foam_noise, rip_uv).r;
 		float rip_foam = smoothstep(0.35, 0.95, v_rip * (0.4 + 1.5 * rip_n)) * 0.5;
-		foam = clamp(foam + shore_foam + wake_foam + floater_foam + hull_foam + rip_foam, 0.0, 1.0);
+		foam = clamp(foam + shore_foam + wake_foam + floater_foam
+				+ hull_foam + local_foam + rip_foam, 0.0, 1.0);
 	}
 
 	// --- roughness -----------------------------------------------------------
@@ -566,30 +633,43 @@ void fragment() {
 	// A rip is rougher water: the extra short chop it stands up is far too small
 	// to draw, so it arrives as slope variance.
 	float mss_eff = (mss + v_rip * 0.04) * (1.0 - rain_amount * 0.45);
-	float alpha_g = sqrt(2.0 * mss_eff * (0.05 + 0.95 * lost) + base_roughness * base_roughness);
-	float rough = clamp(alpha_g, base_roughness, 0.55);
+	// Cox-Munk variance is a distribution of unresolved slopes, not a direct
+	// perceptual-roughness value. Feeding it to GGX at full strength turned the
+	// far sea into one grey average and erased the dark/bright faces that sell
+	// scale in the reference. Preserve energy, but keep directional structure.
+	float alpha_g = sqrt(0.72 * mss_eff * (0.08 + 0.92 * lost)
+			+ base_roughness * base_roughness);
+	float rough = clamp(alpha_g, base_roughness, 0.42);
 	rough = mix(rough, 0.72, foam);
 
 	// --- reflection ----------------------------------------------------------
 	vec3 refl_dir = reflect(-view_dir, wn);
-	// A chopped-up normal can throw the reflection under the horizon; bend it
-	// back rather than sampling the sky's ground colour.
-	refl_dir.y = abs(refl_dir.y) * 0.85 + 0.02;
+	// Steep faces are allowed to see the dark lower hemisphere. Folding every
+	// negative ray upward made a gale one flat reflection of the bright horizon.
+	refl_dir.y = max(refl_dir.y, -0.22);
 	vec3 reflection = sky_color(normalize(refl_dir), clamp(rough * 2.2, 0.0, 1.0), 0.0);
-	reflection = mix(reflection, sky_ambient, clamp(rough * 1.5, 0.0, 0.65));
+	reflection = mix(reflection, sky_ambient, clamp(rough * 0.72, 0.0, 0.30));
 	// Everything that is not sky: boat, buoy, flotsam, the lighthouse. The
 	// mirror camera is an ordinary right-handed camera placed at the reflected
 	// position, so its image comes out horizontally flipped relative to the
 	// main view — hence 1 - u, and the sideways wobble has to flip with it.
 	if (reflect_on == 1) {
 		vec2 ruv = vec2(1.0 - SCREEN_UV.x, SCREEN_UV.y);
-		ruv += vec2(-view_n.x, view_n.y) * 0.045 * clamp(1.0 - rough * 1.2, 0.0, 1.0);
+		// Distort by slope RELATIVE to a flat water plane. Using the complete
+		// view-space normal added the camera's pitch as a permanent UV offset;
+		// mast lights then detached from the hull and jumped as the camera moved.
+		vec3 flat_view_n = (VIEW_MATRIX * vec4(0.0, 1.0, 0.0, 0.0)).xyz;
+		vec2 refl_slope = view_n.xy - flat_view_n.xy;
+		ruv += vec2(-refl_slope.x, refl_slope.y) * 0.022
+				* clamp(1.0 - rough * 1.35, 0.0, 1.0);
 		vec4 pr = texture(reflect_tex, clamp(ruv, vec2(0.002), vec2(0.998)));
 		// Alpha is the coverage mask for solid things, but anything drawn with
 		// additive blending — the lighthouse beams, the lantern glass — adds
 		// colour without ever writing alpha. Take brightness as coverage too, or
 		// the one light for miles never lands on the water.
-		float cov = max(pr.a, clamp(dot(pr.rgb, vec3(0.34, 0.5, 0.16)) * 2.2, 0.0, 1.0));
+		float emissive_cov = smoothstep(0.10, 0.72,
+				dot(pr.rgb, vec3(0.34, 0.5, 0.16))) * 0.86;
+		float cov = max(pr.a, emissive_cov);
 		// One plane cannot fit a whole sea: fade the planar term out where this
 		// fragment is far from the plane it was rendered for, and let the
 		// analytic sky carry those pixels instead.
@@ -607,7 +687,7 @@ void fragment() {
 	float f0 = 0.02;
 	float fresnel = f0 + (1.0 - f0) * pow(1.0 - ndotv, 5.0);
 	// A rough surface never reaches a perfect grazing mirror.
-	fresnel = mix(fresnel, clamp(fresnel, 0.0, 0.6), clamp(rough * 1.6, 0.0, 1.0));
+	fresnel = mix(fresnel, clamp(fresnel, 0.0, 0.84), clamp(rough * 1.25, 0.0, 0.72));
 
 	// --- refraction + absorption --------------------------------------------
 	float water_dist = -(VIEW_MATRIX * vec4(v_world_pos, 1.0)).z;
@@ -688,7 +768,11 @@ void fragment() {
 		float ci = clamp(dot(I, n_u), 0.0, 1.0);
 		// cos(θc) for n=1.333. Soften a few degrees so the tear is a shard
 		// edge, not a pixel staircase.
-		float win = smoothstep(0.62, 0.73, ci);
+		float win = smoothstep(0.615, 0.725, ci);
+		// The optical window is overhead, never a bright horizon stripe.  At the
+		// clipmap hand-off any remaining near-critical light is multiple-scattered
+		// into the water volume instead of exposing the coarse far plate.
+		win *= 1.0 - smoothstep(65.0, 145.0, dist);
 		vec3 air = refract(I, -n_u, 1.333);
 		if (dot(air, air) < 1e-5) {
 			air = I;
@@ -697,7 +781,7 @@ void fragment() {
 		air = normalize(air);
 		vec3 through = sky_color(air, clamp(rough * 1.6, 0.0, 1.0), 0.0);
 		float thin = smoothstep(0.02, 0.52, max(v_crest, 0.0));
-		through *= 0.42 + 0.70 * thin + 0.18 * sun_energy;
+		through *= 0.50 + 0.76 * thin + 0.20 * sun_energy;
 		// Shredded sun: only along the refracted ray. Follows the slope, not
 		// the clipmap.
 		float sun_along = max(dot(air, sun_dir), 0.0);
@@ -707,10 +791,18 @@ void fragment() {
 				vec2(0.002), vec2(0.998));
 		vec3 scene = textureLod(screen_tex, suv, 0.0).rgb;
 		float scene_l = dot(scene, vec3(0.299, 0.587, 0.114));
-		// Night stays black glass. No teal lid.
-		vec3 dark = scatter_color * (0.08 + 0.22 * sun_energy);
-		vec3 mirror = mix(dark, scene * vec3(0.42, 0.68, 0.74),
-				smoothstep(0.04, 0.24, scene_l) * 0.55);
+		// Outside Snell's window the ceiling reflects the underwater world. Screen
+		// colour is the available scene term; a low, depth-coloured irradiance keeps
+		// empty open water from becoming a featureless black polygon.
+		vec3 dark = scatter_color * (0.42 + 0.34 * sun_energy)
+				+ vec3(0.004, 0.018, 0.021);
+		// SCREEN_TEXTURE also contains the bright sky behind the transparent sea.
+		// That is not an underwater reflection: accepting it painted the sky's
+		// horizon as a ruler-straight white line through the basin. Depth admits
+		// nearby hull/seabed geometry and rejects background radiance.
+		float solid_scene = 1.0 - smoothstep(120.0, 300.0, behind);
+		vec3 mirror = mix(dark, scene * vec3(0.50, 0.74, 0.78) + dark * 0.35,
+				smoothstep(0.025, 0.22, scene_l) * 0.62 * solid_scene);
 		col = mix(mirror, through, win);
 
 		float specks = texture(foam_noise, v_world_pos.xz * 3.8 - wave_time * 0.12).r;
@@ -719,9 +811,11 @@ void fragment() {
 		col += foam_color * trapped * (0.18 + 0.55 * sun_energy);
 		col = mix(col, foam_color * (0.10 + 0.32 * sun_energy), foam * 0.50);
 
-		vec3 beer_u = exp(-extinction * max(water_z, 0.0) * 0.09);
+		vec3 beer_u = exp(-extinction * max(water_z, 0.0) * 0.075);
 		col *= mix(beer_u, vec3(1.0), 0.12);
 		col = mix(dark, col, clamp(beer_u.g * 1.55, 0.0, 1.0));
+		float volume_handoff = smoothstep(55.0, 145.0, dist);
+		col = mix(col, dark * (0.75 + 0.25 * sun_energy), volume_handoff);
 		diffuse_albedo = vec3(0.0);
 		rough = 1.0;
 	}

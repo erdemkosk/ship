@@ -113,6 +113,8 @@ var _screw: Node3D
 var _engine_room: Node3D
 var _prop: GPUParticles3D
 var _prop_pm: ParticleProcessMaterial
+var _prop_bubbles: GPUParticles3D
+var _prop_bubble_pm: ParticleProcessMaterial
 ## False while you are walking the deck rather than standing at the wheel.
 var helm_engaged := true
 ## Engine telegraph setting, -0.4 (slow astern) to 1.0 (full ahead). A SETTING:
@@ -3605,6 +3607,37 @@ func _build_water_fx() -> void:
 	_prop.emitting = false
 	add_child(_prop)
 
+	# The visible half of prop wash below the waterline: an aerated plume that
+	# rises and widens while the local compute field carries its pressure/foam on
+	# the surface. Droplets alone made a working screw look like rain behind her.
+	_prop_bubbles = GPUParticles3D.new()
+	_prop_bubbles.amount = 130
+	_prop_bubbles.lifetime = 1.75
+	_prop_bubbles.fixed_fps = 30
+	_prop_bubbles.local_coords = false
+	_prop_bubbles.transform_align = GPUParticles3D.TRANSFORM_ALIGN_DISABLED
+	_prop_bubbles.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_prop_bubbles.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_prop_bubbles.position = Vector3(0.0, -0.66, 4.18)
+	_prop_bubbles.visibility_aabb = AABB(Vector3(-7, -3, -3), Vector3(14, 9, 14))
+	_prop_bubble_pm = ParticleProcessMaterial.new()
+	_prop_bubble_pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	_prop_bubble_pm.emission_sphere_radius = 0.24
+	_prop_bubble_pm.direction = Vector3(0.0, 0.34, 1.0)
+	_prop_bubble_pm.spread = 34.0
+	_prop_bubble_pm.initial_velocity_min = 0.45
+	_prop_bubble_pm.initial_velocity_max = 1.9
+	_prop_bubble_pm.gravity = Vector3(0.0, 1.55, 0.0)
+	_prop_bubble_pm.damping_min = 0.18
+	_prop_bubble_pm.damping_max = 0.75
+	_prop_bubble_pm.scale_min = 0.20
+	_prop_bubble_pm.scale_max = 0.85
+	_prop_bubble_pm.color_ramp = _spray_fade()
+	_prop_bubbles.process_material = _prop_bubble_pm
+	_prop_bubbles.draw_pass_1 = _drop_mesh(0.016)
+	_prop_bubbles.emitting = false
+	add_child(_prop_bubbles)
+
 
 func _process(delta: float) -> void:
 	_t += delta
@@ -3958,6 +3991,13 @@ func _process(delta: float) -> void:
 	if _prop != null:
 		_prop.amount_ratio = clampf(absf(_rpm) * 0.7 + maxf(fwd_speed, 0.0) * 0.12, 0.0, 1.0)
 		_prop.emitting = absf(_rpm) > 0.06 or fwd_speed > 0.9
+	if _prop_bubbles != null:
+		_prop_bubbles.amount_ratio = clampf(absf(_rpm) * 0.92, 0.0, 1.0)
+		_prop_bubbles.emitting = absf(_rpm) > 0.035
+		if _prop_bubble_pm != null:
+			_prop_bubble_pm.initial_velocity_max = 0.75 + absf(_rpm) * 2.4
+	if ocean != null and ocean.has_method("prop_wash") and absf(_rpm) > 0.015:
+		ocean.prop_wash(to_global(Vector3(0.0, -0.62, 4.15)), global_basis.z, _rpm, delta)
 
 
 func toggle_lights() -> void:

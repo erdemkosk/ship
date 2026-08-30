@@ -186,6 +186,8 @@ func _ready() -> void:
 			_ladder_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--dive-test="):
 			_dive_test(rig, boat, arg.get_slice("=", 1))
+		elif arg.begins_with("--ocean-test="):
+			_ocean_test(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--turn-test="):
 			_turn_test(arg.get_slice("=", 1))
 		elif arg == "--probe-helm":
@@ -821,6 +823,49 @@ func _ladder_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 func _shot(dir: String, name: String) -> void:
 	await RenderingServer.frame_post_draw
 	get_viewport().get_texture().get_image().save_png("%s/%s.png" % [dir, name])
+
+
+func _ocean_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Repeatable water review: lay down a full-speed track, then inspect its
+	## centreline/cusps and the bow contact at the camera heights that expose them.
+	var pnl: Node = get_tree().get_first_node_in_group("ui_panel")
+	if pnl != null:
+		var pc: CanvasItem = pnl.get("_panel") as CanvasItem
+		if pc != null:
+			pc.visible = false
+	await get_tree().create_timer(2.2).timeout
+	rig.set_mode(2)
+	_look_rig = rig
+	_look_boat = boat
+	var cam: Camera3D = rig.get("_cam")
+	# Match the user's high, calm-water review angle before laying down the wake;
+	# this isolates planar-reflection alignment from prop wash and white water.
+	_eye_local = Vector3(8.5, 7.0, 10.5)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var reflection_goal := boat.to_global(Vector3(0.0, 0.15, 0.0))
+	var reflection_dir := reflection_goal - cam.global_position
+	rig.set("yaw", atan2(-reflection_dir.x, -reflection_dir.z))
+	rig.set("pitch", asin(clampf(reflection_dir.normalized().y, -1.0, 1.0)))
+	await get_tree().create_timer(0.55).timeout
+	await _shot(dir, "ocean2_reflection")
+	for i in 70:
+		boat.linear_velocity = -boat.global_basis.z * 5.5
+		await get_tree().create_timer(0.10).timeout
+	for setup in [
+		[Vector3(0.0, 2.05, 13.5), Vector3(0.0, -0.10, 2.6), "ocean0_wake"],
+		[Vector3(5.8, 0.82, -0.8), Vector3(0.0, -0.12, -3.8), "ocean1_bow"],
+	]:
+		_eye_local = setup[0]
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var goal: Vector3 = boat.to_global(setup[1])
+		var d: Vector3 = goal - cam.global_position
+		rig.set("yaw", atan2(-d.x, -d.z))
+		rig.set("pitch", asin(clampf(d.normalized().y, -1.0, 1.0)))
+		await get_tree().create_timer(0.55).timeout
+		await _shot(dir, setup[2])
+	get_tree().quit()
 
 
 func _dive_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:

@@ -50,12 +50,13 @@ const EARTH_RADIUS := 6371000.0
 ## is reflecting into (and the seabed, which would otherwise show up mirrored
 ## in the sky reflection), so both live on their own layers.
 const MAX_FLOATERS := 8  # must match the shader's MAX_FLOATERS
-const MAX_TRAIL := 20    # must match the shader's MAX_TRAIL
+const MAX_TRAIL := 32    # must match the shader's MAX_TRAIL
 const MAX_IMPACTS := 12  # must match the shader's MAX_IMPACTS
 ## How far the boat travels between track samples. Small enough that a hard turn
 ## still reads as a curve, large enough that MAX_TRAIL covers the whole visible
 ## length of the wake.
-const TRAIL_SPACING := 2.5
+const TRAIL_SPACING := 1.75
+const WAKE_LIFE := 28.0
 
 ## Tidal stream. Coastal water is not still: it runs, it reverses, and it speeds
 ## up wherever the bottom comes close. TIDE_PERIOD is one full ebb-flood cycle —
@@ -86,6 +87,10 @@ var wind_direction_deg := 40.0
 var current_strength := 0.85
 var wave_height := 1.0
 var steepness := 0.9
+## Art-direction multiplier for water made by the boat itself.  Kept separate
+## from the sea-state controls: increasing this must not make the whole ocean
+## rougher, only the bow shoulder, local pressure field and Kelvin track.
+@export_range(0.5, 2.0, 0.05) var boat_wave_gain := 1.30
 
 var follow_target: Node3D
 var seabed: Node3D
@@ -108,6 +113,7 @@ var _far_y := -1.0
 ## GPU wave field and its CPU mirror.
 var _wave_gen: WaveGenerator
 var _cascades: Array[WaveCascade] = []
+var _local_field: LocalWaterField
 ## Per-cascade 1/tile_length, hoisted: buoyancy hits this thousands of times a
 ## frame and a property lookup per cascade per probe is not free in GDScript.
 var _tile_inv := PackedFloat32Array()
@@ -142,6 +148,8 @@ var _splash_fx: GPUParticles3D
 var _splash_pm: ParticleProcessMaterial
 var _spindrift: GPUParticles3D
 var _spindrift_pm: ParticleProcessMaterial
+var _bow_spray: GPUParticles3D
+var _bow_spray_pm: ParticleProcessMaterial
 var _rings: Array[MeshInstance3D] = []
 var _ring_next := 0
 var _breakers: Array[GPUParticles3D] = []
@@ -156,7 +164,7 @@ var _floaters: Array = []  # [{node, radius, draft}]
 var _floater_prev: Dictionary = {}  # instance_id -> Vector2 last xz
 var _cam_xz := Vector2.ZERO
 var _cam_xz_ready := false
-var _trail: Array = []     # [[Vector2 world_xz, float speed]], newest first
+var _trail: Array = []     # [[Vector2 world_xz, speed_at_birth, born]], newest first
 var _impacts: Array = []   # [{pos: Vector2, born: float, strength: float}]
 var _boat_motion_smooth := Vector3.ZERO
 var _heave_prev := 0.0
@@ -194,6 +202,13 @@ func _ready() -> void:
 
 	_bind_fallback_height()
 	rebuild_waves()
+	_local_field = LocalWaterField.new()
+	_local_field.setup(Vector2.ZERO)
+	if _local_field.is_ready():
+		ShaderSet.many(_mats(), &"local_field", _local_field.texture)
+		ShaderSet.many(_mats(), &"local_world_size", LocalWaterField.WORLD_SIZE)
+		ShaderSet.many(_mats(), &"local_texel", LocalWaterField.CELL)
+		ShaderSet.many(_mats(), &"local_field_on", 1)
 	_build_splash()
 	_build_spray()
 	_build_reflection()
@@ -398,6 +413,7 @@ func _push_uniforms() -> void:
 	ShaderSet.many(mats, &"map_scales", scales)
 	ShaderSet.many(mats, &"choppiness", steepness)
 	ShaderSet.many(mats, &"max_amp", max_amplitude)
+	ShaderSet.many(mats, &"boat_wave_gain", boat_wave_gain)
 	ShaderSet.many(mats, &"wind_dir", wind_dir)
 	# Stokes drift is roughly 3% of the wind. _process adds the tidal stream
 	# on top of this every frame.
@@ -419,7 +435,12 @@ func _push_uniforms() -> void:
 	ShaderSet.param(_mat_wide, &"near_radius", _clip_radius(MID_SIZE))
 	ShaderSet.param(_mat_far, &"hull_mask", 0)
 	ShaderSet.param(_mat_far, &"far_clip", 1)
-	ShaderSet.param(_mat_far, &"near_radius", _clip_radius(WIDE_SIZE))
+	# The far grid snaps in 146 m steps. A six-metre overlap was enough while
+	# looking down from above, but from below the displaced wide ring could expose
+	# the bright sky through a hairline gap. Bury that hand-off a full grid half-
+	# step under the 900 m wide ring; distance haze makes the double coverage free.
+	ShaderSet.param(_mat_far, &"near_radius",
+			maxf(_clip_radius(WIDE_SIZE) - FAR_QUAD * 0.52, WIDE_SIZE * 0.32))
 	# The horizon plate has no geometry left to carry chop, so all of its slope
 	# variance has to arrive as roughness.
 	ShaderSet.param(_mat_far, &"normal_strength", 0.0)
@@ -471,8 +492,11 @@ func _exit_tree() -> void:
 		if mat != null:
 			ShaderSet.param(mat, &"wave_displacements", null)
 			ShaderSet.param(mat, &"wave_normals", null)
+			ShaderSet.param(mat, &"local_field", null)
 	if _wave_gen != null:
 		_wave_gen.release()
+	if _local_field != null:
+		_local_field.release()
 
 
 func _process(delta: float) -> void:
@@ -500,7 +524,11 @@ func _process(delta: float) -> void:
 		_snap_ring(_close, p, CLOSE_QUAD, 0.0)
 		_snap_ring(_mid, p, MID_QUAD, 0.0)
 		_snap_ring(_wide, p, WIDE_QUAD, 0.0)
-		_snap_ring(_far, p, FAR_QUAD, _far_y)
+		# The lowered far plate is safe from troughs above water, but from below it
+		# opened a perfectly straight crack in the ceiling.  At mean level the
+		# underside is continuous; the underwater distance term hides the coarse
+		# hand-off long before the 9 m -> 146 m topology change is visible.
+		_snap_ring(_far, p, FAR_QUAD, 0.0 if camera_under else _far_y)
 
 		# wake track + hull water mask follow the boat every frame
 		var vel := Vector3.ZERO
@@ -512,6 +540,7 @@ func _process(delta: float) -> void:
 		var raw_motion := Vector3(-local_vel.z, local_vel.x, local_vel.y)
 		_boat_motion_smooth = _boat_motion_smooth.lerp(raw_motion,
 				1.0 - exp(-3.5 * delta))
+		_update_local_hull_field(delta, p, _boat_motion_smooth)
 		_update_heave_radiation(delta, bp, _boat_motion_smooth.z)
 		_update_trail(bp, spd, delta)
 		# Foam floats on the water, so it has to ride the current as well as the
@@ -537,6 +566,16 @@ func _process(delta: float) -> void:
 		ShaderSet.many(mats, &"boat_pos", bp)
 		ShaderSet.many(mats, &"boat_speed", spd)
 	ShaderSet.many(mats, &"camera_under", 1 if camera_under else 0)
+	# From below, every clipmap hole is seen edge-on. Give the coarser level two
+	# of its own cells beneath the finer one so horizontal FFT pinch cannot expose
+	# the bright background as a circular horizon line. Above water the smaller
+	# overlap avoids unnecessary intersecting depth surfaces.
+	ShaderSet.param(_mat_mid, &"near_radius", maxf(_clip_radius(CLOSE_SIZE)
+			- (MID_QUAD * 4.0 if camera_under else 0.0), CLOSE_SIZE * 0.20))
+	ShaderSet.param(_mat_wide, &"near_radius", maxf(_clip_radius(MID_SIZE)
+			- (WIDE_QUAD * 2.0 if camera_under else 0.0), MID_SIZE * 0.30))
+	ShaderSet.param(_mat_far, &"near_radius", maxf(_clip_radius(WIDE_SIZE)
+			- FAR_QUAD * (0.72 if camera_under else 0.52), WIDE_SIZE * 0.28))
 	if seabed != null:
 		var wd := Vector2(cos(deg_to_rad(wind_direction_deg)), sin(deg_to_rad(wind_direction_deg)))
 		seabed.set_underwater(camera_under, wave_time, wd)
@@ -765,30 +804,98 @@ func set_reflection_ambient(color: Color, energy: float) -> void:
 		_refl_env.ambient_light_energy = energy
 
 
-func _update_trail(bp: Vector2, spd: float, delta: float) -> void:
+func inject_local_water(world_pos: Vector3, radius_m: float, velocity_impulse: float) -> void:
+	## Small, high-frequency interaction that does not belong in the spectral sea:
+	## propeller pulses, a swimmer's kick, a dropped object.  Large slams also keep
+	## their analytic CPU-visible packet; this field supplies the torn-up surface
+	## and foam inside the first few boat lengths.
+	if _local_field != null and _local_field.is_ready():
+		_local_field.inject(Vector2(world_pos.x, world_pos.z), radius_m, velocity_impulse)
+
+
+func prop_wash(origin: Vector3, aft: Vector3, power: float, delta: float) -> void:
+	## Alternating pressure prevents a propeller from inflating a permanent mound.
+	## Foam uses |impulse| in the compute pass, so both halves of the pulse aerate
+	## the track while the mean term still gives astern/ahead a little net thrust.
+	var load := clampf(absf(power), 0.0, 1.0)
+	if load < 0.015 or _local_field == null or not _local_field.is_ready():
+		return
+	var d := Vector2(aft.x, aft.z).normalized()
+	var spin := sin(wave_time * (18.0 + load * 12.0))
+	for i in 3:
+		var q := Vector2(origin.x, origin.z) + d * (0.35 + float(i) * 0.58)
+		var alternating := spin * load * (0.42 - float(i) * 0.07)
+		var thrust_bias := signf(power) * load * 0.10
+		_local_field.inject(q, 0.34 + float(i) * 0.16,
+				(alternating + thrust_bias) * minf(delta, 1.0 / 30.0))
+
+
+func _update_local_hull_field(delta: float, boat_world: Vector3, motion: Vector3) -> void:
+	if _local_field == null or not _local_field.is_ready() or follow_target == null:
+		return
+	var dt := minf(delta, 1.0 / 30.0)
+	var ahead := motion.x
+	var speed := absf(ahead)
+	if speed > 0.18:
+		var forward := ahead >= 0.0
+		var lead_z := -4.22 if forward else 4.12
+		var shoulder_z := -3.35 if forward else 3.42
+		var trail_z := 3.82 if forward else -3.92
+		var pressure := clampf(speed * 0.035 + speed * speed * 0.020, 0.0, 0.82)
+		var lead: Vector3 = follow_target.to_global(Vector3(0.0, 0.0, lead_z))
+		_local_field.inject(Vector2(lead.x, lead.z), 0.68, pressure * dt)
+		for sx in [-1.0, 1.0]:
+			var shoulder: Vector3 = follow_target.to_global(Vector3(sx * 1.18, 0.0, shoulder_z))
+			_local_field.inject(Vector2(shoulder.x, shoulder.z), 0.52, pressure * 0.52 * dt)
+		var hollow: Vector3 = follow_target.to_global(Vector3(0.0, 0.0, trail_z))
+		_local_field.inject(Vector2(hollow.x, hollow.z), 0.95, -pressure * 0.44 * dt)
+
+	# Leeway and heave write on opposite shoulders.  Keeping these below the
+	# centimetre-per-frame range makes them visible without feeding micro chop
+	# back into the four-and-a-half-tonne buoyancy solver.
+	if absf(motion.y) > 0.08:
+		var lee_x := -signf(motion.y) * 1.38
+		var lee: Vector3 = follow_target.to_global(Vector3(lee_x, 0.0, -0.4))
+		_local_field.inject(Vector2(lee.x, lee.z), 0.62,
+				clampf(absf(motion.y) * 0.045, 0.0, 0.16) * dt)
+	if absf(motion.z) > 0.12:
+		for z in [-2.6, 2.6]:
+			var slap: Vector3 = follow_target.to_global(Vector3(0.0, 0.0, z))
+			_local_field.inject(Vector2(slap.x, slap.z), 1.05,
+					clampf(motion.z * 0.035, -0.20, 0.20) * dt)
+
+	var centre := Vector2(boat_world.x, boat_world.z)
+	_local_field.update(delta, centre)
+	ShaderSet.many(_mats(), &"local_centre", _local_field.centre)
+
+
+func _update_trail(bp: Vector2, spd: float, _delta: float) -> void:
 	## The boat's recent track, newest first. A new sample is laid down every
 	## TRAIL_SPACING metres of travel, so the trail resolves a turn rather than
 	## the passage of time — a boat drifting at half a knot does not fill it.
 	if not _trail.is_empty() and bp.distance_squared_to(_trail[0][0]) > 1600.0:
 		_trail.clear()  # teleported (respawn); the old track is not ours
 	if _trail.is_empty() or bp.distance_to(_trail[0][0]) >= TRAIL_SPACING:
-		_trail.push_front([bp, spd])
+		_trail.push_front([bp, spd, wave_time])
 		if _trail.size() > MAX_TRAIL:
 			_trail.resize(MAX_TRAIL)
 
-	# A wake dissipates. Without this the arc a boat carved an hour ago would
-	# still be sitting in the water behind it.
-	var decay := exp(-delta / 7.0)
-	for e in _trail:
-		e[1] *= decay
-	while not _trail.is_empty() and _trail[_trail.size() - 1][1] < 0.2:
+	# Age and source speed are different quantities.  Decaying `speed` made an
+	# old crest's wavelength physically shrink in place because lambda is v^2/g.
+	# Keep the speed that created it and let the shader attenuate amplitude from
+	# this timestamp instead.
+	while not _trail.is_empty() \
+			and wave_time - float(_trail[_trail.size() - 1][2]) > WAKE_LIFE:
 		_trail.resize(_trail.size() - 1)
 
 	var arr := PackedVector4Array()
+	var ages := PackedFloat32Array()
 	arr.resize(MAX_TRAIL)
+	ages.resize(MAX_TRAIL)
 	# Element 0 is the transom right now, so the wake's root never lags behind
 	# the boat even between samples.
 	arr[0] = Vector4(bp.x, bp.y, 0.0, spd)
+	ages[0] = 0.0
 	var n := 1
 	var prev := bp
 	var arc := 0.0
@@ -799,12 +906,14 @@ func _update_trail(bp: Vector2, spd: float, delta: float) -> void:
 			continue
 		arc += d
 		arr[n] = Vector4(q.x, q.y, arc, e[1])
+		ages[n] = maxf(wave_time - float(e[2]), 0.0)
 		prev = q
 		n += 1
 		if n >= MAX_TRAIL:
 			break
 	var mats := _mats()
 	ShaderSet.many(mats, &"trail", arr)
+	ShaderSet.many(mats, &"trail_age", ages)
 	ShaderSet.many(mats, &"trail_count", n)
 
 
@@ -955,6 +1064,11 @@ func _add_impact(pos: Vector2, strength: float,
 		"strength": strength,
 		"shape": Vector4(speed, width, width_growth, damping),
 	})
+	if _local_field != null and _local_field.is_ready():
+		# The analytic packet carries metres and remains CPU-visible.  A sharper
+		# velocity kick in the local solver supplies the crown of micro ripples and
+		# aerated water that the broad packet intentionally omits.
+		_local_field.inject(pos, maxf(width * 1.35, 0.32), strength * 0.18)
 	if _impacts.size() > MAX_IMPACTS:
 		_impacts.resize(MAX_IMPACTS)
 
@@ -1115,6 +1229,41 @@ func _build_rings() -> void:
 # actually breaking.
 
 func _build_spray() -> void:
+	# Bow sheet.  It rides the true stem/water intersection in _update_spray;
+	# speed controls how many droplets escape, while slams still use the separate
+	# one-shot burst pool below.
+	_bow_spray = GPUParticles3D.new()
+	_bow_spray.amount = 115
+	_bow_spray.lifetime = 0.82
+	_bow_spray.fixed_fps = 30
+	_bow_spray.local_coords = false
+	_bow_spray.emitting = false
+	_bow_spray.transform_align = GPUParticles3D.TRANSFORM_ALIGN_DISABLED
+	_bow_spray.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_bow_spray.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_bow_spray.visibility_aabb = AABB(Vector3(-7, -4, -7), Vector3(14, 12, 14))
+	_bow_spray_pm = ParticleProcessMaterial.new()
+	_bow_spray_pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	_bow_spray_pm.emission_box_extents = Vector3(0.58, 0.05, 0.16)
+	_bow_spray_pm.direction = Vector3(0.0, 0.82, -0.36)
+	_bow_spray_pm.spread = 54.0
+	_bow_spray_pm.initial_velocity_min = 1.6
+	_bow_spray_pm.initial_velocity_max = 4.8
+	_bow_spray_pm.gravity = Vector3(0.0, -12.5, 0.0)
+	_bow_spray_pm.damping_min = 0.3
+	_bow_spray_pm.damping_max = 1.0
+	_bow_spray_pm.scale_min = 0.45
+	_bow_spray_pm.scale_max = 1.45
+	_bow_spray_pm.color_ramp = _ramp(
+			PackedColorArray([
+				Color(0.88, 0.94, 0.96, 0.0),
+				Color(0.82, 0.90, 0.92, 0.52),
+				Color(0.58, 0.66, 0.68, 0.0)]),
+			PackedFloat32Array([0.0, 0.12, 1.0]))
+	_bow_spray.process_material = _bow_spray_pm
+	_bow_spray.draw_pass_1 = _droplet_quad(Vector2(0.055, 0.045))
+	add_child(_bow_spray)
+
 	_spindrift = GPUParticles3D.new()
 	_spindrift.amount = 130
 	_spindrift.lifetime = 1.5
@@ -1202,6 +1351,18 @@ func _update_spray(delta: float) -> void:
 		return
 	var cam := get_viewport().get_camera_3d()
 	var centre: Vector3 = cam.global_position if cam != null else follow_target.global_position
+	if _bow_spray != null and _bow_spray_pm != null:
+		var ahead := maxf(_boat_motion_smooth.x, 0.0)
+		var stem: Vector3 = follow_target.to_global(Vector3(0.0, -0.16, -4.28))
+		var wy := get_height(stem)
+		var contact := 1.0 - smoothstep(0.18, 1.15, absf(stem.y - wy))
+		var load := smoothstep(0.65, 4.8, ahead) * contact
+		_bow_spray.global_transform = Transform3D(
+				follow_target.global_basis.orthonormalized(), Vector3(stem.x, wy + 0.07, stem.z))
+		_bow_spray.amount_ratio = load
+		_bow_spray.emitting = load > 0.025 and not camera_under
+		_bow_spray_pm.initial_velocity_min = 1.1 + ahead * 0.22
+		_bow_spray_pm.initial_velocity_max = 2.5 + ahead * 0.62
 	_spindrift.global_position = Vector3(centre.x, 0.35, centre.z)
 	_spindrift.emitting = wind_speed > 11.5 and not camera_under
 

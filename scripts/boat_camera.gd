@@ -1047,19 +1047,23 @@ func _update_underwater() -> void:
 	if ocean == null or _cam == null:
 		return
 	var wh: float = ocean.get_height(_cam.global_position)
-	var under := _cam.global_position.y < wh - 0.05
 	var depth := wh - _cam.global_position.y
+	var under := depth > 0.025
+	# A real eye crosses the meniscus over centimetres, not one boolean frame.
+	# Fade the lens treatment through that band while the world/ocean switch at
+	# its middle; this removes the cyan full-screen pop on every wave crossing.
+	var submerge_fade := smoothstep(-0.035, 0.16, depth)
 	ocean.camera_under = under
 	if weather != null and weather.has_method("set_underwater"):
 		weather.set_underwater(under)
 	if _under_rect != null:
-		_under_rect.visible = under
+		_under_rect.visible = submerge_fade > 0.002
 	if _warm_rect != null and under:
 		_warm_rect.visible = false
-	if under and _under_mat != null:
-		_under_mat.set_shader_parameter("amount", 1.0)
+	if submerge_fade > 0.002 and _under_mat != null:
+		_under_mat.set_shader_parameter("amount", submerge_fade)
 		_under_mat.set_shader_parameter("wave_time", ocean.wave_time)
-		_under_mat.set_shader_parameter("depth_m", depth)
+		_under_mat.set_shader_parameter("depth_m", maxf(depth, 0.0))
 		_under_mat.set_shader_parameter("look_down",
 				clampf(-_cam.global_basis.z.y, 0.0, 1.0))
 	if _motes != null:
@@ -1072,7 +1076,8 @@ func _update_underwater() -> void:
 			_bubbles.global_position = _cam.global_position + Vector3(0.0, -2.0, 0.0)
 	_update_breath(under)
 	_update_mask(get_process_delta_time(), under)
-	if under and _under_mat != null and weather != null and weather.has_method("sun_direction"):
+	if submerge_fade > 0.002 and _under_mat != null and weather != null \
+			and weather.has_method("sun_direction"):
 		# Bloom toward the real sun/moon. Night is a silver wash, not blades.
 		var sd: Vector3 = weather.sun_direction()
 		var vp := get_viewport().get_visible_rect().size
@@ -1299,7 +1304,6 @@ func _inum(obj: Object, key: String) -> int:
 	if typeof(v) == TYPE_FLOAT:
 		return int(v)
 	return 0
-
 
 
 

@@ -7,7 +7,7 @@ const WORLD_SIZE := 64.0
 const CELL := WORLD_SIZE / float(GRID)
 const MAX_IMPULSES := 24
 
-var texture := Texture2DArrayRD.new()
+var texture := Texture2DRD.new()
 var centre := Vector2.ZERO
 
 var _context: RenderingContext
@@ -15,6 +15,7 @@ var _fields: Array[RenderingContext.Descriptor] = []
 var _sets: Array[RID] = []
 var _pipeline: Callable
 var _impulse_buffer: RenderingContext.Descriptor
+var _impulse_set := RID()
 var _pending: Array = []
 var _front := 0
 var _cell_origin := Vector2i.ZERO
@@ -34,14 +35,14 @@ func setup(world_centre: Vector2) -> void:
 			| RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
 	for _i in 2:
 		_fields.append(_context.create_texture(Vector2i(GRID, GRID),
-				RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT, usage, 1))
+				RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT, usage, 0))
 	_impulse_buffer = _context.create_storage_buffer(MAX_IMPULSES * 16)
 	for i in 2:
 		_sets.append(_context.create_descriptor_set(
 				[_fields[i], _fields[1 - i]], shader, 0))
-	var impulse_set := _context.create_descriptor_set([_impulse_buffer], shader, 1)
+	_impulse_set = _context.create_descriptor_set([_impulse_buffer], shader, 1)
 	_pipeline = _context.create_pipeline([GRID / 16, GRID / 16, 1],
-			[_sets[0], impulse_set], shader)
+			[_sets[0], _impulse_set], shader)
 	texture.texture_rd_rid = _fields[_front].rid
 	_ready = true
 
@@ -80,7 +81,12 @@ func update(delta: float, world_centre: Vector2) -> void:
 		count, scroll.x, scroll.y, GRID,
 	])
 	var cl := _context.compute_list_begin()
-	_pipeline.call(_context, cl, pc, [_sets[_front], _sets[0] if false else _context.create_descriptor_set([_impulse_buffer], _context.load_shader("res://shaders/compute/local_wave_step.glsl"), 1)])
+	# The field set is ping-ponged; the impulse descriptor never changes.  The
+	# previous implementation rebuilt both the shader RID and a descriptor set
+	# every frame, and the dead `_sets[0] if false` branch made that look
+	# intentional.  Apart from leaking RIDs it meant the texture exposed to the
+	# ocean could change before the dispatch that filled it was even described.
+	_pipeline.call(_context, cl, pc, [_sets[_front], _impulse_set])
 	_context.compute_list_end()
 	_front = dst
 	texture.texture_rd_rid = _fields[_front].rid

@@ -732,6 +732,12 @@ eklemesine ve denizin griye kaçmasına yol açıyordu.
   Yer değiştirme çukuru bilerek yok: birkaç santimlik bir çukur görünmez ama
   eğimi metrelerce genişlikte soluk bir disk basıyor (su, sıyırma açılarında
   ayna gibi davranıyor).
+- **Yerel etkileşim alanı** — spektral denizin üstünde, tekne merkezli 64 m'lik
+  ve 256² çözünürlüklü ayrı bir GPU yükseklik/hız/köpük çözücüsü çalışır. Pruva
+  basıncı, omuz dalgası, kıç çukuru, yalpa-vurma, pervane, yüzücü tekmesi ve
+  çarpmalar bu alana hız darbesi yazar. Alan tekneyle kaydırılır; soğurucu
+  kenarı sayesinde FFT denizine halka yansıtmadan karışır. Böylece yakın su
+  decal gibi boyanmak yerine gerçekten yükselir, çöker ve mikro dalga yayar.
 - **Dalga öz-gölgelemesi** — güneş alçaldıkça tepeler arkalarındaki çukurları
   karartır. Olmayınca alçak güneş denizin her yerini eşit aydınlatıyor ve
   yüzey "gölgelendirilmiş bir düzlem" gibi okunuyor.
@@ -765,13 +771,21 @@ Kıyı suyu durmaz: akar, döner ve dip yükseldiği her yerde hızlanır.
 - **Kelvin izi** — hıza bağlı olmayan 19.47° kama içinde enine + ıraksak dalga
   aileleri. Beyaz köpük kamanın tamamını değil, sadece kıçtan çıkan dar
   çalkantı izini ve kama kenarındaki kırılma çizgisini kaplar.
-  İz teknenin anlık yönüne değil, **geçtiği yola** oturur: sandalın son ~50 m'lik
-  rotası 2.5 m aralıklarla örneklenip shader'a veriliyor, `along`/`lat` bu
+  İz teknenin anlık yönüne değil, **geçtiği yola** oturur: sandalın son ~56 m'lik
+  rotası 1.75 m aralıklarla örneklenip shader'a veriliyor, `along`/`lat` bu
   poliçizgiye göre ölçülüyor. Yöne kilitlendiğinde dümen kırar kırmaz bütün kama
   tekneyle birlikte dönüp yana kayıyordu; artık kök hep kıçta kalıyor, arkası
   teknenin çizdiği yayı takip ediyor. Örnekler zamanla değil mesafeyle
-  alınıyor (yavaş sürüklenen bir tekne izi doldurmasın diye) ve kayıtlı hız
-  ~7 s'lik bir sabitle sönümleniyor — iz dağılır.
+  alınıyor (yavaş sürüklenen bir tekne izi doldurmasın diye). Her örnek doğduğu
+  andaki hızı ve zamanı saklar: genlik yaşla söner ama `lambda = v²/g` ile
+  belirlenen dalga boyu sonradan küçülmez. Geometrik erişim tekne hızına göre
+  21–76 m, en eski iz 28 saniyede atılır.
+- **Pruva ve pervane** — pruva spreyi sabit bir parçacık noktası değil, her kare
+  gerçek stem–dalga kesişimine oturur; temas ve ileri hız kesilince o da kesilir.
+  Pervane hem yüzey çözücüsüne alternatif basınç darbeleri/kalıcı havalanma
+  yazar hem su altında yükselip genişleyen ayrı bir kabarcık sütunu bırakır.
+  `Ocean.boat_wave_gain` yalnız bu tekne kaynaklı basınç, Kelvin izi ve köpüğü
+  ölçekler; hava durumunun FFT dalga yüksekliğini değiştirmez.
 - **Spindrift** — 11 m/s üstünde yüzeyden koparılan sürekli su tozu; ayrıca
   CPU'da Jacobian taranarak gerçekten kırılan tepede sprey patlaması.
 - Sıçrama sistemi: suya düşen her şey damlacık + köpük üretir; gövde içinde su
@@ -796,7 +810,16 @@ Kıyı suyu durmaz: akar, döner ve dip yükseldiği her yerde hızlanır.
 ### Su altı
 
 - Snell penceresi ve tam iç yansıma: aşağıdan bakınca bütün gökyüzü 97°'lik bir
-  koniye sıkışır, dışında yüzey aynaya döner.
+  koniye sıkışır, dışında yüzey aynaya döner. Ekran dokusundaki gökyüzü TIR'a
+  yanlışlıkla karışmasın diye yalnız gerçek sahne derinliği olan gövde/dip
+  pikselleri yansımaya kabul edilir.
+- Kamera menisküsü tek karede maviye atlamaz; 19.5 cm'lik geçiş bandında
+  soğurma, renk ve mercek bozulması kademeli devreye girer. Gürültüyle taşınan
+  eğim alanı düz sinüs çizgilerinin yerini alır; derinlikle su yolu sisi ve
+  askıda zerre görünürlüğü artar.
+- Yakın, orta, geniş ve ufuk clipmap'leri su altındayken daha geniş bindirilir;
+  en uzak plaka ortalama su seviyesine çıkar. Bu, dalga tavanını kesen düz beyaz
+  ufuk yarığını kapatırken mesafe saçılması kaba geometri geçişini gizler.
 - Yüzeyden inen ışık huzmeleri gerçek güneş yönüne bakar (ekran uzayına
   projekte edilir), derinlikle söner.
 - Askıda zerreler + yükselen kabarcıklar.

@@ -4,8 +4,8 @@
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 // r = height, g = vertical velocity, b = foam energy, a = reserved.
-layout(rgba16f, set = 0, binding = 0) restrict readonly uniform image2DArray source_field;
-layout(rgba16f, set = 0, binding = 1) restrict writeonly uniform image2DArray target_field;
+layout(rgba16f, set = 0, binding = 0) restrict readonly uniform image2D source_field;
+layout(rgba16f, set = 0, binding = 1) restrict writeonly uniform image2D target_field;
 
 layout(set = 1, binding = 0, std430) restrict readonly buffer ImpulseBuffer {
 	vec4 impulses[]; // xy grid position, z radius in cells, w velocity impulse
@@ -26,7 +26,7 @@ vec4 read_cell(ivec2 p) {
 	if (p.x < 0 || p.y < 0 || p.x >= params.grid_size || p.y >= params.grid_size) {
 		return vec4(0.0);
 	}
-	return imageLoad(source_field, ivec3(p, 0));
+	return imageLoad(source_field, p);
 }
 
 void main() {
@@ -54,9 +54,11 @@ void main() {
 	}
 	velocity *= exp(-params.damping * params.dt);
 	float height = state.r + velocity * params.dt;
-	float foam = max(state.b * exp(-0.48 * params.dt), foam_add);
+	// Aerated prop wash and a slammed crest remain visible for several seconds;
+	// height damps much faster than the bubbles carried by that water.
+	float foam = max(state.b * exp(-0.22 * params.dt), foam_add);
 	// Absorbing rim: the local patch hands back to the FFT sea without reflection.
 	vec2 edge = min(vec2(id), vec2(params.grid_size - 1 - id));
 	float rim = smoothstep(1.0, 14.0, min(edge.x, edge.y));
-	imageStore(target_field, ivec3(id, 0), vec4(height * rim, velocity * rim, foam * rim, 0.0));
+	imageStore(target_field, id, vec4(height * rim, velocity * rim, foam * rim, 0.0));
 }

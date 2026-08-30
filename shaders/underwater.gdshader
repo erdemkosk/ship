@@ -12,14 +12,31 @@ uniform float look_down : hint_range(0.0, 1.0) = 0.0;
 uniform vec4 shaft_color : source_color = vec4(0.72, 0.82, 0.88, 1.0);
 uniform float lamp_tight : hint_range(0.25, 2.5) = 1.0;
 
+float hash12(vec2 p) {
+	vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+	p3 += dot(p3, p3.yzx + 33.33);
+	return fract((p3.x + p3.y) * p3.z);
+}
+
+float value_noise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), f.x),
+			mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0)), f.x), f.y);
+}
+
 void fragment() {
 	vec2 uv = SCREEN_UV;
 	float t = wave_time;
 	float look_up = 1.0 - look_down;
 	float murk = clamp(depth_m / 22.0, 0.0, 1.0);
+	// Two advecting, non-commensurate cells. Straight sine bands looked like a
+	// heat-haze filter; underwater refraction is a changing slope field.
 	vec2 distort = vec2(
-		sin(uv.y * 28.0 + t * 1.4) * 0.0018,
-		cos(uv.x * 22.0 - t * 1.1) * 0.0014);
+		value_noise(uv * vec2(11.0, 17.0) + vec2(t * 0.13, -t * 0.09)),
+		value_noise(uv.yx * vec2(19.0, 8.0) + vec2(-t * 0.11, t * 0.15))) - 0.5;
+	distort *= 0.0042;
 	// Looking up, the far ceiling sits behind more water — a slightly
 	// longer warp, not a second picture.
 	distort *= 1.0 + look_up * murk * 1.4;
@@ -28,7 +45,7 @@ void fragment() {
 			* sin((uv.x * 7.0 - uv.y * 16.0) - t * 0.9);
 	cau = pow(abs(cau), 3.0) * 0.11 * amount;
 	float lum = dot(scene, vec3(0.299, 0.587, 0.114));
-	float from_above = smoothstep(0.10, 0.42, lum) * look_down;
+	float from_above = smoothstep(0.10, 0.42, lum) * look_up;
 	float absorb = mix(0.16, 0.48, murk) * amount * (1.0 - from_above * 0.70);
 	vec3 beer = vec3(exp(-1.85 * absorb), exp(-0.32 * absorb), exp(-0.18 * absorb));
 	vec3 col = scene * beer;
@@ -36,6 +53,12 @@ void fragment() {
 	col = mix(col, col * vec3(0.62, 0.95, 0.90) + tint.rgb * 0.55,
 			absorb * 0.38 * (1.0 - from_above) * (1.0 - look_up * 0.70));
 	col += vec3(0.07, 0.16, 0.13) * cau * 0.45 * (1.0 - look_up * 0.5);
+	float water_path = 1.0 - exp(-max(depth_m, 0.0) * 0.085);
+	col = mix(col, tint.rgb * (0.22 + 0.16 * look_up),
+			water_path * mix(0.12, 0.28, look_down));
+	float particulate = smoothstep(0.83, 0.98,
+			value_noise(uv * vec2(210.0, 120.0) + vec2(t * 0.7, -t * 0.42)));
+	col += shaft_color.rgb * particulate * water_path * 0.018;
 	float depth_fade = exp(-murk * 0.85);
 	// Soft bloom of the already-shredded window, not a mesh disc.
 	if (shaft_energy > 0.001) {
@@ -75,5 +98,5 @@ void fragment() {
 	float vig = smoothstep(0.55, 1.18, distance(uv, vec2(0.5)));
 	col *= 1.0 - vig * (0.10 + 0.18 * murk) * amount * (1.0 - from_above);
 	col *= 1.0 - look_down * mix(0.18, 0.78, murk) * amount * (1.0 - from_above);
-	COLOR = mix(vec4(0.0), vec4(col, 1.0), step(0.001, amount));
+	COLOR = vec4(col, clamp(amount, 0.0, 1.0));
 }

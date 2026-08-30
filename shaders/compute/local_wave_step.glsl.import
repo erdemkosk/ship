@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://cb2cehxngk3kl"
+path="res://.godot/imported/local_wave_step.glsl-be0318e878685602f291cf0cb52b8e92.res"
+
+[deps]
+
+source_file="res://shaders/compute/local_wave_step.glsl"
+dest_files=["res://.godot/imported/local_wave_step.glsl-be0318e878685602f291cf0cb52b8e92.res"]
+
+[params]
+

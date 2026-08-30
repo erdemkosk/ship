@@ -355,6 +355,11 @@ func _swim(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
 		if ocean.has_method("surface_velocity"):
 			var orb: Vector3 = ocean.surface_velocity(wpos)
 			wpos += Vector3(orb.x, 0.0, orb.z) * delta * 0.45 * frac
+		if ocean.has_method("inject_local_water") and drive.length_squared() > 0.04 \
+				and frac > 0.18:
+			var kick_phase := sin(float(Time.get_ticks_msec()) * 0.001 * TAU * 1.35)
+			ocean.inject_local_water(wpos + fwd * 0.28, 0.30,
+					kick_phase * drive.length() * minf(delta, 1.0 / 30.0) * 0.32)
 		if ocean.has_method("get_seafloor_height"):
 			wpos.y = maxf(wpos.y, float(ocean.get_seafloor_height(wpos)) + 0.05)
 

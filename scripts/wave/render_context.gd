@@ -74,7 +74,7 @@ func create_uniform_buffer(size : int, data : PackedByteArray=[]) -> Descriptor:
 	return Descriptor.new(deletion_queue.push(device.uniform_buffer_create(max(size, len(data)), data)), RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER)
 
 func create_texture(dimensions : Vector2i, format : RenderingDevice.DataFormat, usage:=0x18B, num_layers:=0, view:=RDTextureView.new(), data : PackedByteArray=[], num_mipmaps:=1) -> Descriptor:
-	assert(num_layers >= 1)
+	assert(num_layers >= 0)
 	var texture_format := RDTextureFormat.new()
 	texture_format.mipmaps = max(1, num_mipmaps)
 	texture_format.array_layers = 1 if num_layers == 0 else num_layers
