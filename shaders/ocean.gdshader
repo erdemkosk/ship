@@ -89,8 +89,17 @@ uniform vec4 floater_vel[MAX_FLOATERS];
 const int MAX_TRAIL = 20;
 uniform int trail_count = 0;
 uniform vec4 trail[MAX_TRAIL];
+// Short-lived physical impulses shared with ocean.gd's CPU height queries.
+// xy = origin, z = birth time, w = strength.
+const int MAX_IMPACTS = 12;
+uniform int impact_count = 0;
+uniform vec4 impacts[MAX_IMPACTS];
+// x = propagation speed, y = initial width, z = width growth, w = damping.
+uniform vec4 impact_shape[MAX_IMPACTS];
 uniform vec2 boat_pos = vec2(0.0);
 uniform float boat_speed = 0.0;
+// x = ahead speed, y = lateral slip, z = vertical hull speed, boat-local m/s.
+uniform vec3 boat_motion = vec3(0.0);
 uniform int hull_mask = 0;
 uniform mat4 boat_inv = mat4(1.0);
 // 1 when the camera is in the closed cabin. Then the house volume is
@@ -123,6 +132,7 @@ varying float v_wake;
 varying float v_fold;
 varying float v_disturb;
 varying float v_rip;
+varying float v_hull_wash;
 
 // Rain on water: each cell drops once per cycle and throws an expanding ring.
 // Two scales so it does not read as a regular grid.
@@ -178,6 +188,12 @@ void vertex() {
 
 	// Distance drives which cascades may move this vertex — see cascade_fade.
 	float cam_dist = distance(p, CAMERA_POSITION_WORLD.xz);
+	// Analytic interaction waves are short-range detail. Past the dense 0.5 m
+	// mesh they alias into diamonds and razor-straight ridges; fade their actual
+	// displacement before that boundary while leaving wake foam visible.
+	// Only the dense close mesh can carry these wavelengths cleanly. Begin the
+	// handoff early and make it broad enough that no circular cutoff is visible.
+	float interaction_geom = 1.0 - smoothstep(7.5, 13.5, cam_dist);
 	WaveSample w = sample_waves(p, cam_dist);
 	vec3 disp = w.disp;
 	vec2 extra_slope = vec2(0.0);
@@ -200,6 +216,7 @@ void vertex() {
 	// A still body is a capillary ring. A moving one also leaves expanding
 	// rings and a short V, the way a dinghy or a swimmer does.
 	v_disturb = 0.0;
+	v_hull_wash = 0.0;
 	for (int i = 0; i < num_floaters; i++) {
 		vec2 fp = floaters[i].xy;
 		float rad = max(floaters[i].z, 0.15);
@@ -212,6 +229,14 @@ void vertex() {
 		if (dd >= reach) {
 			continue;
 		}
+		// The ship already owns the track-based Kelvin wake below. Giving it the
+		// same time-driven radial oscillator as a plank made the whole waterline
+		// shiver even at rest: energy appeared from nowhere at the hull centre.
+		// body == 0 is therefore only a Kelvin-wake source. Actual floating
+		// objects and the swimmer (body == 1) still disturb the local surface.
+		if (body < 0.5) {
+			continue;
+		}
 		vec2 dir = (p - fp) / max(dd, 1e-4);
 		float k = dd / rad;
 		float kr = k - 1.1;
@@ -220,9 +245,6 @@ void vertex() {
 		disp.y += sin(ph) * str * 0.45 * env;
 		extra_slope += dir * cos(ph) * str * 0.45 * env * 9.0 / rad;
 		v_disturb = max(v_disturb, env);
-		if (body < 0.5) {
-			continue;
-		}
 		float fall = exp(-dd / max(rad * 4.8, 1.2));
 		float a0 = str * (0.10 + 0.20 * clamp(spd * 0.35, 0.0, 1.0));
 		float r1 = dd * 5.4 - wave_time * 3.4;
@@ -251,6 +273,68 @@ void vertex() {
 					* cos(phd) * wamp * kt * 1.15;
 			v_disturb = max(v_disturb, e_lat * decay * 0.7);
 		}
+	}
+
+	// Water-entry impulses. Unlike the old foam disk this displaces the actual
+	// surface, and ocean.gd evaluates the same pulse for buoyancy queries.
+	for (int i = 0; i < impact_count; i++) {
+		float age = wave_time - impacts[i].z;
+		if (age < 0.0 || age > 6.0) {
+			continue;
+		}
+		vec2 rel = p - impacts[i].xy;
+		float dist = length(rel);
+		float radius = age * impact_shape[i].x;
+		float sigma = impact_shape[i].y + age * impact_shape[i].z;
+		// The ambient FFT surface bends the ring instead of letting it cut across
+		// every crest as a mathematically perfect circle.
+		float warped_dist = dist + w.disp.y * 0.32;
+		float q = (warped_dist - radius) / sigma;
+		float decay = exp(-age * impact_shape[i].w);
+		float spreading = inversesqrt(1.0 + radius * 0.32);
+		float amp = impacts[i].w * 0.18 * decay * spreading;
+		// Broad Ricker packet: one rounded crest with shoulders, not a knife line.
+		float pulse = (1.0 - 2.0 * q * q) * exp(-q * q);
+		disp.y += pulse * amp * interaction_geom;
+		vec2 idir = rel / max(dist, 1e-4);
+		float dp_dq = (4.0 * q * q * q - 6.0 * q) * exp(-q * q);
+		extra_slope += idir * dp_dq * amp / sigma * interaction_geom;
+		v_disturb = max(v_disturb, abs(pulse) * decay * 0.9);
+	}
+
+	// Water attached to the hull: a pressure ridge at the bow and a thin wash
+	// along both shoulders. It is evaluated in boat space, so roll, pitch and
+	// heave move the contact line across the actual sides instead of leaving a
+	// painted stripe at mean sea level.
+	if (hull_mask == 1) {
+		vec3 hp = (boat_inv * vec4(vec3(p.x, disp.y, p.y), 1.0)).xyz;
+		float hx = 1.48;
+		if (hp.z < -3.20) {
+			float ht = clamp((-3.20 - hp.z) / 1.50, 0.0, 1.0);
+			hx = mix(1.48, 0.16, ht * ht);
+		}
+		float outside = abs(hp.x) - hx;
+		float side_band = exp(-outside * outside / 0.075)
+				* smoothstep(-0.10, 0.05, outside)
+				* smoothstep(-4.65, -3.75, hp.z)
+				* (1.0 - smoothstep(4.0, 5.0, hp.z));
+		float bow_band = exp(-pow((hp.z + 4.05) / 0.72, 2.0))
+				* exp(-pow(abs(hp.x) / max(hx + 0.35, 0.35), 4.0));
+		float contact = 1.0 - smoothstep(0.18, 0.72, abs(hp.y + 0.18));
+		float ahead = abs(boat_motion.x);
+		// Dynamic pressure rises with v². The linear term keeps steerage-speed
+		// wash readable; the quadratic term makes a fast displacement hull build
+		// a proper bow shoulder instead of looking identical at every throttle.
+		float ahead_drive = ahead * 0.10 + ahead * ahead * 0.052;
+		float drive = clamp(ahead_drive + abs(boat_motion.y) * 0.34
+				+ abs(boat_motion.z) * 0.42, 0.0, 2.6);
+		float pressure = (side_band * 0.55 + bow_band) * contact * drive;
+		// Keep the geometry response shallow. A deep procedural ridge attached to
+		// the hull visibly breathed as the physics velocity changed; the actual
+		// far-field displacement belongs to the Kelvin wake and one-shot impacts.
+		disp.y += pressure * 0.065;
+		v_hull_wash = clamp(pressure * 1.65, 0.0, 1.0);
+		v_disturb = max(v_disturb, v_hull_wash);
 	}
 
 	// --- Kelvin wake ---------------------------------------------------------
@@ -296,8 +380,9 @@ void vertex() {
 		float wedge = along * 0.3536 + 0.9;             // tan(19.47 deg)
 		float e_lat = 1.0 - smoothstep(0.62, 1.06, abs(lat) / wedge);
 		float decay = exp(-along * 0.016) / sqrt(max(along, 1.2));
-		float amp = 0.62 * clamp(spd / 5.0, 0.0, 1.5) * e_lat * decay
-				* smoothstep(0.0, 1.6, along);
+		float speed_energy = clamp(spd * spd / 16.0, 0.0, 2.35);
+		float amp = 0.50 * speed_energy * e_lat * decay
+				* smoothstep(0.0, 1.8, along) * interaction_geom;
 		float ph_t = kt * along;
 		float ph_d = kt * (0.76 * along + 1.32 * abs(lat));
 		disp.y += amp * (sin(ph_t) * 0.45 + sin(ph_d) * 0.9);
@@ -311,7 +396,8 @@ void vertex() {
 		float track = exp(-lat * lat / (half_w * half_w)) * exp(-along * 0.13);
 		float edge = abs(lat) / max(wedge, 0.7) - 0.80;
 		float cusp = exp(-edge * edge * 40.0) * exp(-along * 0.055) * 0.22;
-		v_wake = clamp((track + cusp) * clamp(spd * 0.26 - 0.14, 0.0, 1.0), 0.0, 1.0);
+		v_wake = clamp((track + cusp)
+				* clamp(spd * spd * 0.065 - 0.08, 0.0, 1.35), 0.0, 1.0);
 	}
 
 	// Shore chop: extra small waves where water meets sand / islets.
@@ -463,13 +549,14 @@ void fragment() {
 		// Foam albedo is ~10x the water's, so even a little of it doubles the
 		// brightness. A waterline ring gets a hint, not a halo.
 		float floater_foam = v_disturb * (0.15 + 0.85 * foam_hi) * 0.035;
+		float hull_foam = v_hull_wash * (0.35 + 0.90 * foam_hi) * 0.72;
 		// Rip foam is drawn out into lines by the flow, not scattered like
 		// whitecaps, so it is streaked along the current.
 		vec2 cdir = normalize(current_vec + vec2(1e-5));
 		vec2 rip_uv = vec2(dot(foam_p, cdir) * 0.06, dot(foam_p, vec2(-cdir.y, cdir.x)) * 0.55);
 		float rip_n = texture(foam_noise, rip_uv).r;
 		float rip_foam = smoothstep(0.35, 0.95, v_rip * (0.4 + 1.5 * rip_n)) * 0.5;
-		foam = clamp(foam + shore_foam + wake_foam + floater_foam + rip_foam, 0.0, 1.0);
+		foam = clamp(foam + shore_foam + wake_foam + floater_foam + hull_foam + rip_foam, 0.0, 1.0);
 	}
 
 	// --- roughness -----------------------------------------------------------

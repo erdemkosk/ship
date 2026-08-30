@@ -51,6 +51,7 @@ const EARTH_RADIUS := 6371000.0
 ## in the sky reflection), so both live on their own layers.
 const MAX_FLOATERS := 8  # must match the shader's MAX_FLOATERS
 const MAX_TRAIL := 20    # must match the shader's MAX_TRAIL
+const MAX_IMPACTS := 12  # must match the shader's MAX_IMPACTS
 ## How far the boat travels between track samples. Small enough that a hard turn
 ## still reads as a curve, large enough that MAX_TRAIL covers the whole visible
 ## length of the wake.
@@ -156,6 +157,12 @@ var _floater_prev: Dictionary = {}  # instance_id -> Vector2 last xz
 var _cam_xz := Vector2.ZERO
 var _cam_xz_ready := false
 var _trail: Array = []     # [[Vector2 world_xz, float speed]], newest first
+var _impacts: Array = []   # [{pos: Vector2, born: float, strength: float}]
+var _boat_motion_smooth := Vector3.ZERO
+var _heave_prev := 0.0
+var _heave_peak := 0.0
+var _heave_ready := false
+var _heave_wave_cd := 0.0
 
 
 func _ready() -> void:
@@ -334,12 +341,11 @@ func _cascade_fade_distances() -> PackedFloat32Array:
 	## ~4*quad. Walk the rings outward and take the last one still fine enough
 	## for this cascade; its outer radius is where the cascade has to fade.
 	##
-	## The band is judged by its geometric CENTRE, not its shortest wave. The
-	## strict reading is wrong in practice: every band has a thin tail below the
-	## limit, so testing the tail threw away whole octaves — at wind 12 the peak
-	## sits at 66 m and the wide ring was refusing the cascade containing it,
-	## which is exactly why the distance went flat. Judging by where the energy
-	## actually sits keeps the octave and leaves only its tail under-sampled.
+	## The band is judged by its shortest wavelength. Using its geometric centre
+	## sent the short tail onto 2 m and 9 m quads; from deck that became the large
+	## diamond/chevron geometry visible in the distance. Those short components
+	## remain in the fragment normal, so rejecting them from coarse vertices does
+	## not flatten the lighting.
 	##
 	## Nothing dropped here is lost. The fragment stage fetches every cascade's
 	## gradient regardless of distance, so these waves keep lighting the surface
@@ -357,17 +363,16 @@ func _cascade_fade_distances() -> PackedFloat32Array:
 		var c: WaveCascade = _cascades[i]
 		if c.k_max <= 0.0 or c.k_min <= 0.0:
 			continue
-		var lam: float = sqrt((TAU / c.k_min) * (TAU / c.k_max))
+		var lam: float = TAU / c.k_max
 		var d := 0.0
 		for r in rings:
 			if 4.0 * float(r[0]) <= lam:
 				d = float(r[1])
-		# Never fade a cascade closer than the finest ring reaches. That ring
-		# exists precisely to carry the finest band, and once a cascade runs down
-		# to centimetres its geometric centre drops below any quad size — which
-		# would fade it out at arm's length and throw away the metre-scale chop
-		# sitting in the same band.
-		out[i] = maxf(d, CLOSE_SIZE * 0.5)
+		# Fade the finest geometric displacement BEFORE the close plane's square
+		# edge. Keeping it alive all the way to 24 m exposed that square: the next
+		# ring has 2 m vertices and represented the same chop as large diamonds.
+		# Fragment normals still sample every cascade, so surface detail remains.
+		out[i] = maxf(d, CLOSE_SIZE * 0.25)
 	return out
 
 
@@ -487,6 +492,7 @@ func _process(delta: float) -> void:
 			_cpu_last = _wave_gen.cpu_data
 	var mats := _mats()
 	ShaderSet.many(mats, &"wave_time", wave_time)
+	_update_impacts(mats)
 
 	if follow_target != null:
 		var p := follow_target.global_position
@@ -502,6 +508,11 @@ func _process(delta: float) -> void:
 			vel = follow_target.linear_velocity
 		var bp := Vector2(p.x, p.z)
 		var spd := Vector2(vel.x, vel.z).length()
+		var local_vel := follow_target.global_basis.inverse() * vel
+		var raw_motion := Vector3(-local_vel.z, local_vel.x, local_vel.y)
+		_boat_motion_smooth = _boat_motion_smooth.lerp(raw_motion,
+				1.0 - exp(-3.5 * delta))
+		_update_heave_radiation(delta, bp, _boat_motion_smooth.z)
 		_update_trail(bp, spd, delta)
 		# Foam floats on the water, so it has to ride the current as well as the
 		# wind. One sample at the boat is enough for what you can see.
@@ -511,6 +522,7 @@ func _process(delta: float) -> void:
 		ShaderSet.many(mats, &"surface_drift", drift)
 		ShaderSet.many(mats, &"current_vec", cur)
 		ShaderSet.param(_mat_close, &"boat_inv", follow_target.global_transform.affine_inverse())
+		ShaderSet.param(_mat_close, &"boat_motion", _boat_motion_smooth)
 		var inside := 0
 		var cam := get_viewport().get_camera_3d()
 		if cam != null:
@@ -916,6 +928,7 @@ func splash(world_pos: Vector3, strength := 1.0) -> void:
 	if _splash_fx == null:
 		_build_splash()
 	var s := clampf(strength, 0.4, 2.2)
+	_add_impact(Vector2(world_pos.x, world_pos.z), s)
 	_splash_pm.initial_velocity_min = 2.4 * s
 	_splash_pm.initial_velocity_max = 5.2 * s
 	_splash_pm.radial_accel_min = 1.2 * s
@@ -929,6 +942,61 @@ func splash(world_pos: Vector3, strength := 1.0) -> void:
 		_ring_next = (_ring_next + 1) % _rings.size()
 		ring.retrigger(Vector2(world_pos.x, world_pos.z), s,
 				0.8 + 0.4 * s, 0.9 + 1.5 * s)
+
+
+func _add_impact(pos: Vector2, strength: float,
+		speed := 3.8, width := 0.34, width_growth := 0.16, damping := 0.52) -> void:
+	## The render and physics surfaces read this same impulse list. Repeated hull
+	## slams close together reinforce one another instead of spawning a jittery
+	## oscillator permanently attached to the boat.
+	_impacts.push_front({
+		"pos": pos,
+		"born": wave_time,
+		"strength": strength,
+		"shape": Vector4(speed, width, width_growth, damping),
+	})
+	if _impacts.size() > MAX_IMPACTS:
+		_impacts.resize(MAX_IMPACTS)
+
+
+func _update_heave_radiation(delta: float, boat_xz: Vector2, heave_velocity: float) -> void:
+	## A heaving hull radiates once per half-cycle, at the turning point. Emitting
+	## every frame made a comb of narrow rings; a broad pulse at each reversal is
+	## both visible and stable, and its energy follows the measured heave peak.
+	_heave_wave_cd -= delta
+	_heave_peak = maxf(_heave_peak, absf(heave_velocity))
+	if not _heave_ready:
+		_heave_prev = heave_velocity
+		_heave_ready = true
+		return
+	var crossed := (_heave_prev > 0.0 and heave_velocity <= 0.0) \
+			or (_heave_prev < 0.0 and heave_velocity >= 0.0)
+	if crossed:
+		if _heave_wave_cd <= 0.0 and _heave_peak > 0.06:
+			# Deliberately strong while tuning: makes the half-cycle radiation easy
+			# to read from deck. Once its shape is approved this can be scaled back.
+			var strength := clampf(1.20 + _heave_peak * 1.60, 1.50, 4.50)
+			_add_impact(boat_xz, strength, 2.35, 1.05, 0.30, 0.42)
+			_heave_wave_cd = 1.15
+		_heave_peak = absf(heave_velocity)
+	_heave_prev = heave_velocity
+
+
+func _update_impacts(mats: Array[ShaderMaterial]) -> void:
+	while not _impacts.is_empty() and wave_time - float(_impacts[-1]["born"]) > 6.0:
+		_impacts.pop_back()
+	var packed := PackedVector4Array()
+	var shapes := PackedVector4Array()
+	packed.resize(MAX_IMPACTS)
+	shapes.resize(MAX_IMPACTS)
+	for i in _impacts.size():
+		var impact: Dictionary = _impacts[i]
+		var pos: Vector2 = impact["pos"]
+		packed[i] = Vector4(pos.x, pos.y, impact["born"], impact["strength"])
+		shapes[i] = impact["shape"]
+	ShaderSet.many(mats, &"impacts", packed)
+	ShaderSet.many(mats, &"impact_shape", shapes)
+	ShaderSet.many(mats, &"impact_count", _impacts.size())
 
 
 func _ensure_splash_tex() -> void:
@@ -1269,16 +1337,43 @@ func get_height(world_pos: Vector3) -> float:
 	var xz := Vector2(world_pos.x, world_pos.z)
 	var pt := xz
 	if not _cpu_live():
-		return 0.0
+		return _impact_height(xz, wave_time)
 	var data := _wave_gen.cpu_data
 	for i in 2:
 		var d := _sample_disp(data, pt)
 		pt = xz - Vector2(d.x, d.z)
-	return _sample_disp(data, pt).y * shoal_factor(world_pos)
+	return _sample_disp(data, pt).y * shoal_factor(world_pos) \
+			+ _impact_height(xz, wave_time)
 
 
 func get_normal(world_pos: Vector3, _eps := 0.85) -> Vector3:
-	return normal_at_rest(rest_xz(Vector2(world_pos.x, world_pos.z)))
+	var xz := Vector2(world_pos.x, world_pos.z)
+	var base := normal_at_rest(rest_xz(xz))
+	var eps := maxf(_eps * 0.35, 0.22)
+	var gx := (_impact_height(xz + Vector2(eps, 0.0), wave_time)
+			- _impact_height(xz - Vector2(eps, 0.0), wave_time)) / (2.0 * eps)
+	var gz := (_impact_height(xz + Vector2(0.0, eps), wave_time)
+			- _impact_height(xz - Vector2(0.0, eps), wave_time)) / (2.0 * eps)
+	return (base + Vector3(-gx, 0.0, -gz)).normalized()
+
+
+func _impact_height(pos: Vector2, at_time: float) -> float:
+	## Must stay numerically identical to the impact loop in ocean.gdshader.
+	var height := 0.0
+	for impact: Dictionary in _impacts:
+		var age := at_time - float(impact["born"])
+		if age < 0.0 or age > 6.0:
+			continue
+		var dist := pos.distance_to(impact["pos"])
+		var shape: Vector4 = impact["shape"]
+		var radius := age * shape.x
+		var sigma := shape.y + age * shape.z
+		var q := (dist - radius) / sigma
+		var decay := exp(-age * shape.w)
+		var spreading := 1.0 / sqrt(1.0 + radius * 0.32)
+		var pulse := (1.0 - 2.0 * q * q) * exp(-q * q)
+		height += pulse * float(impact["strength"]) * 0.18 * decay * spreading
+	return height
 
 
 func rest_xz(world_xz: Vector2) -> Vector2:
@@ -1297,9 +1392,9 @@ func surface_point(xz: Vector2) -> Vector3:
 	## Follows the water particle at rest-xz, so foam rides the chop instead of
 	## sliding backward over it.
 	if not _cpu_live():
-		return Vector3(xz.x, 0.0, xz.y)
+		return Vector3(xz.x, _impact_height(xz, wave_time), xz.y)
 	var disp := _sample_disp(_wave_gen.cpu_data, xz)
-	return Vector3(xz.x + disp.x, disp.y, xz.y + disp.z)
+	return Vector3(xz.x + disp.x, disp.y + _impact_height(xz, wave_time), xz.y + disp.z)
 
 
 func surface_velocity(world_pos: Vector3) -> Vector3:
@@ -1308,12 +1403,18 @@ func surface_velocity(world_pos: Vector3) -> Vector3:
 	## The Gerstner version could differentiate its own closed form. An FFT field
 	## has no closed form, so this differences two consecutive readbacks of the
 	## same texels. Same answer, one readback interval late.
+	var xz := Vector2(world_pos.x, world_pos.z)
+	var impact_dt := 0.025
+	var impact_vy := (_impact_height(xz, wave_time)
+			- _impact_height(xz, wave_time - impact_dt)) / impact_dt
 	if not _cpu_live() or _cpu_prev.is_empty() or _cpu_dt <= 1e-4:
-		return Vector3.ZERO
+		return Vector3(0.0, impact_vy, 0.0)
 	var rest := rest_xz(Vector2(world_pos.x, world_pos.z))
 	var now := _sample_disp(_wave_gen.cpu_data, rest)
 	var was := _sample_disp(_cpu_prev, rest)
-	return (now - was) / _cpu_dt
+	var velocity := (now - was) / _cpu_dt
+	velocity.y += impact_vy
+	return velocity
 
 
 func foam_at(rest_p: Vector2) -> float:

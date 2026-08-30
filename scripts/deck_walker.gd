@@ -144,6 +144,9 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 			# it here is what used to make going over the side read as stepping
 			# into a bath.
 			_swim_vel = xf.basis * vel
+			if ocean.has_method("splash"):
+				var entry_strength := clampf(absf(_swim_vel.y) * 0.24 + 0.45, 0.45, 2.2)
+				ocean.splash(wp, entry_strength)
 	if swimming:
 		_swim(delta, boat, xf, ocean, axes, look_w, want_jump, want_up, want_down)
 		return
