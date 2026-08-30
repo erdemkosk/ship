@@ -71,6 +71,9 @@ uniform float curvature_k = 0.0;
 const int MAX_FLOATERS = 8;
 uniform int num_floaters = 0;
 uniform vec4 floaters[MAX_FLOATERS];
+// xy = velocity on the water, w = 1 if this body leaves its own sea
+// (a dinghy, a swimmer). The ship is 0: it already has the Kelvin wedge.
+uniform vec4 floater_vel[MAX_FLOATERS];
 
 // boat wake + hull water mask (pushed every frame from ocean.gd)
 //
@@ -192,28 +195,61 @@ void vertex() {
 	float cur_spd = length(current_vec);
 	v_rip = clamp(cur_spd - 0.40, 0.0, 1.6) * smoothstep(26.0, 6.0, depth_here);
 
-	// Floating things displace water: a dip under the hull and a ring of
-	// capillary waves running away from it.
+	// Floating things write their own waves ON TOP of the FFT field, so the
+	// swell keeps running through them — that crossing is the whole point.
+	// A still body is a capillary ring. A moving one also leaves expanding
+	// rings and a short V, the way a dinghy or a swimmer does.
 	v_disturb = 0.0;
 	for (int i = 0; i < num_floaters; i++) {
 		vec2 fp = floaters[i].xy;
 		float rad = max(floaters[i].z, 0.15);
 		float str = floaters[i].w;
+		vec2 fvel = floater_vel[i].xy;
+		float body = floater_vel[i].w;
+		float spd = length(fvel);
+		float reach = rad * mix(2.6, 11.0, body);
 		float dd = length(p - fp);
-		if (dd < rad * 2.6) {
-			// Only the capillary ring at the waterline. The displacement bowl a
-			// dinghy makes is a few centimetres across metres of water — its
-			// depth is invisible, but its slope is not: water is a mirror at
-			// grazing angles, so a wide gentle dip prints a big pale disc on the
-			// sea. Keep the ring, drop the bowl.
-			vec2 dir = (p - fp) / max(dd, 1e-4);
-			float k = dd / rad;
-			float kr = k - 1.1;
-			float env = exp(-kr * kr * 14.0);
-			float ph = kr * 9.0 - wave_time * 3.6;
-			disp.y += sin(ph) * str * 0.45 * env;
-			extra_slope += dir * cos(ph) * str * 0.45 * env * 9.0 / rad;
-			v_disturb = max(v_disturb, env);
+		if (dd >= reach) {
+			continue;
+		}
+		vec2 dir = (p - fp) / max(dd, 1e-4);
+		float k = dd / rad;
+		float kr = k - 1.1;
+		float env = exp(-kr * kr * 14.0);
+		float ph = kr * 9.0 - wave_time * 3.6;
+		disp.y += sin(ph) * str * 0.45 * env;
+		extra_slope += dir * cos(ph) * str * 0.45 * env * 9.0 / rad;
+		v_disturb = max(v_disturb, env);
+		if (body < 0.5) {
+			continue;
+		}
+		float fall = exp(-dd / max(rad * 4.8, 1.2));
+		float a0 = str * (0.10 + 0.20 * clamp(spd * 0.35, 0.0, 1.0));
+		float r1 = dd * 5.4 - wave_time * 3.4;
+		float r2 = dd * 9.2 - wave_time * 5.6;
+		disp.y += (sin(r1) * 0.62 + sin(r2) * 0.32) * a0 * fall;
+		extra_slope += dir * (cos(r1) * 0.62 * 5.4 + cos(r2) * 0.32 * 9.2) * a0 * fall;
+		v_disturb = max(v_disturb, fall * 0.85);
+		if (spd < 0.35) {
+			continue;
+		}
+		vec2 ahead = fvel / spd;
+		vec2 rel = p - fp;
+		float along = -dot(rel, ahead);
+		float lat = dot(rel, vec2(-ahead.y, ahead.x));
+		if (along > 0.15 && along < 9.0) {
+			float lam = 1.05 + spd * 0.28;
+			float kt = PI2 / max(lam, 0.7);
+			float wedge = along * 0.40 + 0.35;
+			float e_lat = 1.0 - smoothstep(0.55, 1.15, abs(lat) / max(wedge, 0.2));
+			float decay = exp(-along * 0.28);
+			float wamp = a0 * 1.15 * e_lat * decay;
+			float phd = kt * (0.70 * along + 1.15 * abs(lat));
+			disp.y += sin(phd) * wamp;
+			extra_slope += ahead * cos(phd) * wamp * kt * 0.70;
+			extra_slope += vec2(-ahead.y, ahead.x) * sign(lat)
+					* cos(phd) * wamp * kt * 1.15;
+			v_disturb = max(v_disturb, e_lat * decay * 0.7);
 		}
 	}
 
@@ -324,11 +360,17 @@ void fragment() {
 	// sharp parallelogram out of the sea along the gunwale.
 	if (hull_mask == 1) {
 		vec3 lp = (boat_inv * vec4(v_world_pos, 1.0)).xyz;
-		float pad = camera_under == 1 ? 0.20 : 0.0;
-		bool cut = abs(lp.x) < 1.50 + pad && abs(lp.z) < 4.70 + pad
-				&& lp.y > -1.20 - pad && lp.y < 0.52 + pad;
-		// Inset from the skin so a heel does not take this box outboard
-		// through the waterline (that was the gunwale parallelogram).
+		// Underwater, only deepen the keel cut. The old 20 cm pad on XZ
+		// punched a rectangle of missing sea in front of the stem — the
+		// bow is a wedge, not a box.
+		float keel = camera_under == 1 ? 0.16 : 0.0;
+		float hx = 1.48;
+		if (lp.z < -3.20) {
+			float t = clamp((-3.20 - lp.z) / 1.50, 0.0, 1.0);
+			hx = mix(1.48, 0.16, t * t);
+		}
+		bool cut = abs(lp.x) < hx && lp.z > -4.58 && lp.z < 4.62
+				&& lp.y > -1.18 - keel && lp.y < 0.50;
 		if (interior_clip == 1) {
 			cut = cut || (abs(lp.x) < 1.62 && lp.z > -0.35 && lp.z < 4.55
 					&& lp.y > 0.56 && lp.y < 2.82);
@@ -539,43 +581,60 @@ void fragment() {
 			+ scatter_color * sun_color * sun_energy * sss * 9.0 * wave_shadow;
 
 	// --- underwater ----------------------------------------------------------
-	// Seen from below, the whole sky is squeezed into a 97 deg cone (Snell's
-	// window). That ceiling is the actual sky — looking up a black ocean you
-	// still see daylight. Only looking DOWN is the abyss. The old mix painted
-	// the TIR ring (and then the engine fog) with the same black as the basin.
+	// Water → air. Critical angle ~48.6° (cos ≈ 0.66). The window is where
+	// this ray, against the LOCAL normal, still refracts; everywhere else is
+	// TIR — a dark mirror of the basin. Mesh normals used to stay out of it
+	// because they faceted the sun into clipmap quads. The sun stays a
+	// refracted sky sample (and a screen-space lamp in the post), not a disc
+	// painted on the mesh. The normal only tears the window.
 	if (camera_under == 1) {
 		float water_z = -(VIEW_MATRIX * vec4(v_world_pos, 1.0)).z;
 		float behind = scene_depth(SCREEN_UV, INV_PROJECTION_MATRIX);
-		// Keel and transom sit IN FRONT of the surface. Do not paint water
-		// over them — that is the only reason the stern survived and the rest
-		// of her vanished.
 		if (behind + 0.04 < water_z) {
 			discard;
 		}
-		vec3 d = -view_dir;
-		// Window is a zenith cone. Mesh normals stay out of it — they are
-		// what turned the sun into a square of quads.
-		float ct = clamp(d.y, 0.0, 1.0);
-		float win = smoothstep(0.22, 0.82, ct);
-		vec3 ceiling = scatter_color * (2.8 + 3.2 * sun_energy)
-				+ sky_ambient * 0.26;
-		vec3 through = ceiling;
-		vec3 air = d;
-		air.y = max(air.y, 0.08);
+		vec3 I = -view_dir;
+		vec2 micro = texture(foam_noise, v_world_pos.xz * 1.9 + wave_time * vec2(0.06, -0.04)).rg;
+		vec3 n_u = normalize(wn + vec3(micro.x - 0.5, 0.0, micro.y - 0.5)
+				* (0.38 + 0.22 * rain_amount) * near_fade);
+		n_u = normalize(n_u + vec3(0.0, -0.10 * foam - 0.06 * fold, 0.0));
+		float ci = clamp(dot(I, n_u), 0.0, 1.0);
+		// cos(θc) for n=1.333. Soften a few degrees so the tear is a shard
+		// edge, not a pixel staircase.
+		float win = smoothstep(0.62, 0.73, ci);
+		vec3 air = refract(I, -n_u, 1.333);
+		if (dot(air, air) < 1e-5) {
+			air = I;
+			air.y = max(air.y, 0.04);
+		}
 		air = normalize(air);
-		through = sky_color(air, 1.0, 0.0);
-		// Only a wide wash on the mesh. The lamp itself is the underwater
-		// post — a screen-space orb is a circle; a mesh disc is a facet.
-		float wash = pow(max(dot(d, sun_dir), 0.0), 2.0) * 0.18 * sun_energy;
-		through += sun_color * wash;
-		col = mix(ceiling, through, win);
-		col = mix(col, foam_color * 0.45, foam * 0.22);
-		vec2 suv = clamp(SCREEN_UV + view_n.xy * 0.010, vec2(0.002), vec2(0.998));
+		vec3 through = sky_color(air, clamp(rough * 1.6, 0.0, 1.0), 0.0);
+		float thin = smoothstep(0.02, 0.52, max(v_crest, 0.0));
+		through *= 0.42 + 0.70 * thin + 0.18 * sun_energy;
+		// Shredded sun: only along the refracted ray. Follows the slope, not
+		// the clipmap.
+		float sun_along = max(dot(air, sun_dir), 0.0);
+		through += sun_color * pow(sun_along, 72.0) * sun_energy * (0.25 + 1.1 * thin) * win;
+
+		vec2 suv = clamp(SCREEN_UV + n_u.xz * 0.035 + view_n.xy * 0.018,
+				vec2(0.002), vec2(0.998));
 		vec3 scene = textureLod(screen_tex, suv, 0.0).rgb;
 		float scene_l = dot(scene, vec3(0.299, 0.587, 0.114));
-		float scene_k = (1.0 - win) * 0.22 * smoothstep(0.06, 0.28, scene_l);
-		scene *= vec3(0.58, 0.90, 0.94);
-		col = mix(col, scene, scene_k);
+		// Night stays black glass. No teal lid.
+		vec3 dark = scatter_color * (0.08 + 0.22 * sun_energy);
+		vec3 mirror = mix(dark, scene * vec3(0.42, 0.68, 0.74),
+				smoothstep(0.04, 0.24, scene_l) * 0.55);
+		col = mix(mirror, through, win);
+
+		float specks = texture(foam_noise, v_world_pos.xz * 3.8 - wave_time * 0.12).r;
+		float trapped = smoothstep(0.64, 0.93, specks)
+				* (0.20 + 0.80 * foam + 0.40 * fold) * near_fade;
+		col += foam_color * trapped * (0.18 + 0.55 * sun_energy);
+		col = mix(col, foam_color * (0.10 + 0.32 * sun_energy), foam * 0.50);
+
+		vec3 beer_u = exp(-extinction * max(water_z, 0.0) * 0.09);
+		col *= mix(beer_u, vec3(1.0), 0.12);
+		col = mix(dark, col, clamp(beer_u.g * 1.55, 0.0, 1.0));
 		diffuse_albedo = vec3(0.0);
 		rough = 1.0;
 	}

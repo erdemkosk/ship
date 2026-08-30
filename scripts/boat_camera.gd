@@ -258,11 +258,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_wipe_drops()
 		return
 
-	# The circuits, by key. A physical switch under the fuse box lid is the
-	# honest way to work one, and it is still there — but the status panel
-	# prints a key beside every row, and a panel that prints keys that do
-	# nothing is worse than no panel. `by_hand = false` is what says "this is
-	# the shortcut, not a finger", so the shut lid does not swallow it.
+	# The circuits, by key. The toggles are on the face; the keys throw the
+	# same fields. `by_hand = false` is the shortcut, not a finger.
 	if mode == Mode.FPS and target != null and target.has_method("toggle_switch"):
 		for act: String in SHORTCUTS:
 			if event.is_action_pressed(act):
@@ -391,11 +388,11 @@ func _process_fps(delta: float) -> void:
 			if iid == "divegear" and not (_flag(target, "locker_open")
 					or _flag(target, "gear_worn")):
 				continue
-			# Same for the switchboard: the toggles are under a steel hood. With
-			# the hood down they are not merely inoperable — they are not there
-			# to point at, and offering them was the confusing part, because the
-			# prompt appeared and then E did nothing.
-			if iid.begins_with("sw_") and not _flag(target, "fusebox_open"):
+			# Cartridges and the house toggles sit in the well: with the
+			# lid down they are not a thing you can take.
+			if (iid.begins_with("fu_") or (target.has_method("switch_in_well")
+					and target.switch_in_well(iid))) \
+					and not _flag(target, "fusebox_open"):
 				continue
 			var ipos: Vector3 = it["pos"]
 			if target.has_method("interact_pos"):
@@ -415,8 +412,12 @@ func _process_fps(delta: float) -> void:
 				continue
 			# And it has to be in SIGHT. With the fuse lid standing open the
 			# radio sits right behind it, and reaching through a steel plate to
-			# take a handset off its hook is not a thing.
-			if _occluded(target, eye, ipos):
+			# take a handset off its hook is not a thing. The lid itself is
+			# the fuse-box catch — do not let the plate hide its own latch.
+			if iid != "fusebox" and not iid.begins_with("fu_") \
+					and not (target.has_method("switch_in_well")
+					and target.switch_in_well(iid)) \
+					and _occluded(target, eye, ipos):
 				continue
 			# Angle off the crosshair, then a size penalty so a fat volume
 			# behind a knob cannot win just because you clipped its edge.
@@ -500,6 +501,7 @@ func _process_fps(delta: float) -> void:
 					# Brass toggles and doors: E throws the circuit.
 					var cid := str(cand["id"])
 					if (cid.begins_with("sw_") or cid.begins_with("door_")
+							or cid.begins_with("fu_")
 							or cid == "fusebox" or cid == "stove") \
 							and target.has_method("toggle_switch"):
 						target.toggle_switch(str(cand["id"]))
@@ -563,6 +565,9 @@ func _process_fps(delta: float) -> void:
 				var st := _inum(target, "engine")
 				_prompt.text = "E — Ignition  (%s)" % (
 						"stop" if st == 2 else ("cranking" if st == 1 else "start"))
+			elif str(cand["id"]).begins_with("fu_") and target.has_method("fuse_seated"):
+				_prompt.text = "E — %s  (%s)" % [cand["name"],
+						"in" if target.fuse_seated(str(cand["id"])) else "out"]
 			elif (str(cand["id"]).begins_with("sw_") or str(cand["id"]).begins_with("door_")) \
 					and target.has_method("switch_state"):
 				_prompt.text = "E — %s  (%s)" % [cand["name"],

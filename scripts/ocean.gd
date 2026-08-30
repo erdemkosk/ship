@@ -152,6 +152,9 @@ var _refl_cam: Camera3D
 var _refl_env: Environment
 var _refl_plane_y := 0.0
 var _floaters: Array = []  # [{node, radius, draft}]
+var _floater_prev: Dictionary = {}  # instance_id -> Vector2 last xz
+var _cam_xz := Vector2.ZERO
+var _cam_xz_ready := false
 var _trail: Array = []     # [[Vector2 world_xz, float speed]], newest first
 
 
@@ -526,7 +529,7 @@ func _process(delta: float) -> void:
 		var wd := Vector2(cos(deg_to_rad(wind_direction_deg)), sin(deg_to_rad(wind_direction_deg)))
 		seabed.set_underwater(camera_under, wave_time, wd)
 	_update_spray(delta)
-	_update_floaters()
+	_update_floaters(delta)
 	_update_reflection(delta)
 
 
@@ -642,41 +645,87 @@ func register_floater(node: Node3D, radius: float, draft: float) -> void:
 	_floaters.append({"node": node, "radius": radius, "draft": draft})
 
 
-func _update_floaters() -> void:
+func _update_floaters(delta: float) -> void:
 	var cam := get_viewport().get_camera_3d()
 	var centre: Vector3 = cam.global_position if cam != null else Vector3.ZERO
+	var dt := maxf(delta, 0.001)
+	# Each entry: [dist2, xz, radius, strength, vel_xz, body]
+	# body 0 = ship capillary only (Kelvin already owns the wake).
+	# body 1 = own sea: rings + a short V, added onto the FFT so they cross.
 	var found: Array = []
 	if follow_target != null and is_instance_valid(follow_target):
-		# A boat sitting still barely marks the water; one under way pushes a
-		# real bow wave. Scale the disturbance with speed through the water.
 		var bv := Vector3.ZERO
 		if follow_target is RigidBody3D:
 			bv = follow_target.linear_velocity
 		var bspd := clampf(Vector2(bv.x, bv.z).length() / 12.0, 0.0, 1.0)
-		found.append([0.0, Vector2(follow_target.global_position.x, follow_target.global_position.z),
-				3.4, lerpf(0.05, 0.22, bspd)])
+		found.append([0.0,
+				Vector2(follow_target.global_position.x, follow_target.global_position.z),
+				3.4, lerpf(0.05, 0.22, bspd),
+				Vector2(bv.x, bv.z), 0.0])
 	var stale := false
+	var live: Dictionary = {}
 	for f in _floaters:
 		var n: Node3D = f["node"]
 		if not is_instance_valid(n):
 			stale = true
 			continue
 		var p := n.global_position
+		var xz := Vector2(p.x, p.z)
+		var id := n.get_instance_id()
+		live[id] = true
+		var vel := Vector2.ZERO
+		if _floater_prev.has(id):
+			vel = (xz - _floater_prev[id]) / dt
+		_floater_prev[id] = xz
 		var d := Vector2(p.x - centre.x, p.z - centre.z).length_squared()
-		if d > 3600.0:  # past 60 m the ring is under a pixel
+		if d > 3600.0:
 			continue
-		found.append([d, Vector2(p.x, p.z), f["radius"], f["draft"]])
+		var spd := vel.length()
+		var str: float = float(f["draft"]) * lerpf(0.55, 1.35, clampf(spd / 2.4, 0.0, 1.0))
+		found.append([d, xz, f["radius"], str, vel, 1.0])
 	if stale:
 		_floaters = _floaters.filter(func(f): return is_instance_valid(f["node"]))
+	var drop: Array = []
+	for k in _floater_prev.keys():
+		if not live.has(k):
+			drop.append(k)
+	for k in drop:
+		_floater_prev.erase(k)
+	if cam != null:
+		var cxz := Vector2(cam.global_position.x, cam.global_position.z)
+		var cvel := Vector2.ZERO
+		if _cam_xz_ready:
+			cvel = (cxz - _cam_xz) / dt
+		_cam_xz = cxz
+		_cam_xz_ready = true
+		var sea_y := get_height(cam.global_position)
+		var eye := cam.global_position.y - sea_y
+		var on_deck := false
+		if follow_target != null and is_instance_valid(follow_target):
+			var lp: Vector3 = follow_target.global_transform.affine_inverse() \
+					* cam.global_position
+			on_deck = absf(lp.x) < 1.72 and lp.z > -4.85 and lp.z < 5.65 and lp.y > 0.38
+		# Eye in the water, not on the house: a swimmer writes rings.
+		if not on_deck and eye < 0.90 and eye > -2.8:
+			var cspd := cvel.length()
+			found.append([0.01, cxz, 0.42,
+					lerpf(0.06, 0.20, clampf(cspd / 1.8, 0.0, 1.0)),
+					cvel, 1.0])
 	found.sort_custom(func(a, b): return a[0] < b[0])
 
 	var arr := PackedVector4Array()
+	var vel_arr := PackedVector4Array()
 	arr.resize(MAX_FLOATERS)
+	vel_arr.resize(MAX_FLOATERS)
 	var n_used := mini(found.size(), MAX_FLOATERS)
 	for i in n_used:
-		arr[i] = Vector4(found[i][1].x, found[i][1].y, found[i][2], found[i][3])
+		var e: Array = found[i]
+		arr[i] = Vector4(e[1].x, e[1].y, e[2], e[3])
+		var fv: Vector2 = e[4]
+		vel_arr[i] = Vector4(fv.x, fv.y, 0.0, e[5])
 	var mats := _mats()
 	ShaderSet.many(mats, &"floaters", arr)
+	ShaderSet.many(mats, &"floater_vel", vel_arr)
 	ShaderSet.many(mats, &"num_floaters", n_used)
 
 

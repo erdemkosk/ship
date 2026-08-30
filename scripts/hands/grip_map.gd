@@ -27,7 +27,6 @@ const SWITCH := {
 	"kind": Kind.GESTURE,
 	"pose": "point",
 	"oneshot": 1.05,
-	"gate": "fusebox",
 	"pos": Vector3(0.0, 0.064, 0.0),
 	"fingers": Vector3(0.0, -0.92, -0.39),
 	"palm": Vector3(0.0, -0.39, 0.92),
@@ -124,6 +123,17 @@ const ENTRIES := {
 		"fingers": _DOOR_F,
 		"palm": _DOOR_P,
 	},
+	"fu_cabin": {
+		"node": "fuse_body",
+		"kind": Kind.GESTURE,
+		"pose": "pinch",
+		"oneshot": 0.70,
+		"gate": "fusebox",
+		"pos": Vector3.ZERO,
+		"fingers": Vector3(0.0, -0.92, -0.39),
+		"palm": Vector3(0.0, -0.39, 0.92),
+		"along_fingers": FINGER,
+	},
 	"door_fwd": {
 		"node": "door_node",
 		"kind": Kind.GESTURE,
@@ -174,7 +184,17 @@ static func spec_for(id: String) -> Dictionary:
 	if ENTRIES.has(id):
 		return ENTRIES[id]
 	if id.begins_with("sw_"):
+		if id == "sw_cabin" or id == "sw_helm" or id == "sw_beacon" \
+				or id == "sw_anchor":
+			var well: Dictionary = SWITCH.duplicate()
+			well["gate"] = "fusebox"
+			return well
 		return SWITCH
+	if id.begins_with("fu_"):
+		var fuse: Dictionary = ENTRIES.get("fu_cabin", {}).duplicate()
+		if fuse.is_empty():
+			return {}
+		return fuse
 	return {}
 
 
@@ -227,6 +247,8 @@ static func device_of(boat: Node3D, id: String) -> Node3D:
 		return null
 	if acc == "switch_lever":
 		return boat.call("switch_lever", id) as Node3D
+	if acc == "fuse_body":
+		return boat.call("fuse_body", id) as Node3D
 	if acc == "door_node":
 		return boat.call("door_node", id) as Node3D
 	if not boat.has_method(acc):

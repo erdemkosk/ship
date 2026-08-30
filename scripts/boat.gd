@@ -4,6 +4,10 @@ extends RigidBody3D
 
 const WeatherScript := preload("res://scripts/weather.gd")
 const ShaderSet := preload("res://scripts/shader_set.gd")
+const BoatAudio := preload("res://scripts/boat_audio_factory.gd")
+const BoatAudioControllerScript := preload("res://scripts/boat_audio_controller.gd")
+const BoatVisuals := preload("res://scripts/boat_visual_factory.gd")
+const BoatMeshBatcherScript := preload("res://scripts/boat_mesh_batcher.gd")
 
 # Hull bottom + deck probes. Deck samples (y > 0) only matter when inverted —
 # they keep a capsized boat floating instead of falling through.
@@ -136,8 +140,7 @@ var _hull_mats: Array[ShaderMaterial] = []
 ## Static _box/_cyl/_prism pieces, keyed by material, flushed into one
 ## ArrayMesh each. Pivots, glass and anything that must hide on its own
 ## stay as separate instances — merging those would move or smear them.
-var _mesh_batch: Dictionary = {}
-var _batching := false
+var _mesh_batcher: BoatMeshBatcher
 var _soak := 0.0
 var _glass_wet := 0.0
 ## Off-screen rain field. Beads run here at 1024×512, a few times a second,
@@ -160,6 +163,10 @@ var _chain_mesh: Mesh
 const CHAIN_PITCH := 0.032
 var _switch_levers := {}
 var _switch_leds := {}
+## Cartridge in its clips. Pull one (lid open) and that row goes dead even
+## if the toggle is still up — that is what a fuse is for.
+var _fuse_in := {}
+var _fuse_bodies := {}
 var _door_fwd: Node3D
 var _door_aft: Node3D
 var _door_wh: Node3D
@@ -171,10 +178,10 @@ var door_wh_open := false
 ## green shadow behind joinery; open, the whole well reads.
 var _door_eng: Node3D
 var door_eng_open := false
-## The switchboard lives under a steel fuse-box cover now. Closed, the toggles
-## are sealed away (and refuse to throw); open, the whole board is offered to
-## the fingers. E on the box works the lid.
+## Distribution panel. Flood and wiper live on the dash; the other four
+## toggles sit in the well with the cartridges. Lid down, those are gone.
 var _fuse_lid: Node3D
+var _fuse_latch_local := Vector3(0.0, 0.012, 0.44)
 var fusebox_open := false
 ## Dive locker, port side of the cabin. `gear_worn` is the mask and suit ON
 ## YOU; `_gear_t` is the putting-on itself, which is a second and a half of
@@ -195,8 +202,6 @@ var _gear_tank: Node3D
 ## a door heard from the far end of the cabin is a different sound from the one
 ## under your hand, and the only way to get that is to put the speaker on the
 ## hinge. Four voices, so two doors and a locker lid can overlap.
-var _door_snd: Array[AudioStreamPlayer3D] = []
-var _door_voice := 0
 ## Doorways get a blocker only while their door is SHUT. BLOCKERS is a const —
 ## it has to be, the walker reads it every tick — so the two that move live
 ## here, and deck_walker.gd resolves against both lists.
@@ -279,17 +284,7 @@ var chart_engaged := false
 var _wiper_phase := 0.0
 const WIPER_RATE := 2.6
 var _slam_cd := 0.0
-var _hull_creak: Array[AudioStreamPlayer3D] = []
-var _hull_creak_voice := 0
-var _creak_light: Array[AudioStream] = []
-var _creak_heavy: Array[AudioStream] = []
-var _creak_last: AudioStream
-var _creak_cd := 0.0
-var _prev_heel := 0.0
-var _heel_ready := false
-var _helm_snd: AudioStreamPlayer3D
-var _prev_wheel_z := 0.0
-var _wheel_ready := false
+var _boat_audio: BoatAudioController
 var _t := 0.0
 var _flicker := 1.0
 var _prev_wh := PackedFloat32Array()
@@ -315,7 +310,7 @@ func _ready() -> void:
 	_prev_wh.resize(PROBES.size())
 	_build_collision()
 	_build_rain_shields()
-	_batching = true
+	_mesh_batcher = BoatMeshBatcherScript.new(self)
 	_build_visuals()
 	_dress_steel()
 	_build_motor()
@@ -329,9 +324,8 @@ func _ready() -> void:
 	_flush_mesh_batch()
 	_build_rain_field()
 	_build_engine_sound()
-	_build_door_sound()
-	_build_hull_creak()
-	_build_helm_sound()
+	_boat_audio = BoatAudioControllerScript.new()
+	_boat_audio.setup(self)
 	_build_water_fx()
 	# Roughly m(L^2+H^2)/12 about each axis: pitch, yaw, roll. Roll is left
 	# heavier than the box formula so she rolls slow and deep like timber.
@@ -686,17 +680,21 @@ const INTERACT: Array = [
 	{"id": "door_fwd", "pos": Vector3(0.47, 1.58, -0.44), "r": 0.30, "name": "Fore hatch"},
 	{"id": "door_aft", "pos": Vector3(0.47, 1.58, 4.72), "r": 0.30, "name": "Aft hatch"},
 	{"id": "door_wh", "pos": Vector3(-0.43, 3.87, 4.08), "r": 0.30, "name": "Wheelhouse hatch"},
-	# Small, and on the LATCH rather than over the board. A big target sitting
-	# on top of the toggles wins the crosshair from every one of them, and with
-	# the lid open you could never point at a switch at all. When it is open
-	# this moves up onto the standing lid — see interact_pos().
-	{"id": "fusebox", "pos": Vector3(1.17, 3.78, 1.235), "r": 0.10, "name": "Fuse box"},
-	{"id": "sw_cabin", "pos": Vector3(1.05, 3.78, 1.42), "r": 0.055, "name": "Cabin light"},
-	{"id": "sw_helm", "pos": Vector3(1.17, 3.78, 1.42), "r": 0.055, "name": "Wheelhouse light"},
-	{"id": "sw_beacon", "pos": Vector3(1.29, 3.78, 1.42), "r": 0.055, "name": "Nav lights"},
-	{"id": "sw_flood", "pos": Vector3(1.05, 3.78, 1.66), "r": 0.055, "name": "Floodlights"},
-	{"id": "sw_wiper", "pos": Vector3(1.17, 3.78, 1.66), "r": 0.055, "name": "Wiper"},
-	{"id": "sw_anchor", "pos": Vector3(1.29, 3.78, 1.66), "r": 0.055, "name": "Windlass (anchor)"},
+	# Flood and wiper on the dash. The other four live in the well with the
+	# cartridges — lid down, they are not a thing you can throw.
+	{"id": "fusebox", "pos": Vector3(1.14, 3.75, 1.52), "r": 0.10, "name": "Fuse well"},
+	{"id": "sw_cabin", "pos": Vector3(1.090, 3.73, 1.235), "r": 0.038, "name": "Cabin lights"},
+	{"id": "sw_helm", "pos": Vector3(1.090, 3.73, 1.305), "r": 0.038, "name": "Wheelhouse lights"},
+	{"id": "sw_beacon", "pos": Vector3(1.090, 3.73, 1.375), "r": 0.038, "name": "Nav lights"},
+	{"id": "sw_flood", "pos": Vector3(-0.56, 3.68, 0.02), "r": 0.048, "name": "Floodlights"},
+	{"id": "sw_wiper", "pos": Vector3(-0.76, 3.68, 0.02), "r": 0.048, "name": "Wiper"},
+	{"id": "sw_anchor", "pos": Vector3(1.090, 3.73, 1.445), "r": 0.038, "name": "Windlass"},
+	{"id": "fu_cabin", "pos": Vector3(1.195, 3.678, 1.235), "r": 0.026, "name": "Cabin fuse"},
+	{"id": "fu_helm", "pos": Vector3(1.195, 3.678, 1.305), "r": 0.026, "name": "Wheelhouse fuse"},
+	{"id": "fu_beacon", "pos": Vector3(1.195, 3.678, 1.375), "r": 0.026, "name": "Nav fuse"},
+	{"id": "fu_flood", "pos": Vector3(1.100, 3.678, 1.500), "r": 0.026, "name": "Flood fuse"},
+	{"id": "fu_wiper", "pos": Vector3(1.180, 3.678, 1.500), "r": 0.026, "name": "Wiper fuse"},
+	{"id": "fu_anchor", "pos": Vector3(1.195, 3.678, 1.445), "r": 0.026, "name": "Windlass fuse"},
 	{"id": "chart", "pos": Vector3(1.30, 3.72, 2.88), "r": 0.20, "name": "Chart table"},
 	{"id": "radio", "pos": Vector3(1.49, 3.94, 0.55), "r": 0.20, "name": "Radio"},
 	{"id": "stove", "pos": Vector3(1.28, 1.05, 4.10), "r": 0.30, "name": "Heater"},
@@ -775,10 +773,16 @@ func interact_pos(id: String, fallback: Vector3) -> Vector3:
 	## Where a fitting is RIGHT NOW, for aiming. Most of them never move and
 	## just hand the constant back; the ones on hinges and rails do not, and a
 	## crosshair aimed at where a thing used to be is the whole problem.
-	if id == "fusebox" and _fuse_lid != null and _fuse_lid.rotation.x < -0.9:
-		# Standing open: you close it by taking hold of the lid, which is up in
-		# the air in front of the board, not down on the latch.
-		return _fuse_lid.position + Vector3(0.0, 0.42, -0.20)
+	if id == "fusebox" and _fuse_lid != null:
+		return to_local(_fuse_lid.to_global(_fuse_latch_local))
+	if id.begins_with("sw_") and _switch_levers.has(id):
+		var piv: Node3D = _switch_levers[id]
+		if piv != null:
+			return to_local(piv.to_global(Vector3(0.0, 0.046, 0.0)))
+	if id.begins_with("fu_") and _fuse_bodies.has(id):
+		var cart: Node3D = _fuse_bodies[id]
+		if cart != null:
+			return to_local(cart.global_position)
 	# Doors swing. The handle rides the leaf; leave the aim on the empty
 	# doorway and the chart (or the stove, or the hatch) steals E.
 	match id:
@@ -804,6 +808,35 @@ func gear_wear_t() -> float:
 
 func fuse_lid() -> Node3D:
 	return _fuse_lid
+
+
+func fuse_body(id: String) -> Node3D:
+	return _fuse_bodies.get(id) as Node3D
+
+
+func circuit_live(id: String) -> bool:
+	## Toggle up AND the cartridge still in its clips. A pulled fuse is an
+	## open circuit — the lever can sit on and nothing downstream answers.
+	if not _fuse_seated(id):
+		return false
+	return switch_state(id)
+
+
+func _fuse_seated(sw_id: String) -> bool:
+	var fu := sw_id.replace("sw_", "fu_")
+	return bool(_fuse_in.get(fu, true))
+
+
+func switch_in_well(id: String) -> bool:
+	## Cabin, helm, nav, windlass: inside the box. Flood and wiper are not.
+	return id == "sw_cabin" or id == "sw_helm" or id == "sw_beacon" or id == "sw_anchor"
+
+
+func fuse_seated(id: String) -> bool:
+	## `fu_*` id, or `sw_*` (mapped). True while the cartridge is in its clips.
+	if id.begins_with("sw_"):
+		return _fuse_seated(id)
+	return bool(_fuse_in.get(id, true))
 
 
 func radar_housing() -> Node3D:
@@ -879,20 +912,13 @@ func screen_mesh(id: String) -> MeshInstance3D:
 
 
 func _mat(albedo: Color, rough: float, metal := 0.0) -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = albedo
-	m.roughness = rough
-	m.metallic = metal
-	return m
+	return BoatVisuals.material(albedo, rough, metal)
 
 
 func _wet_wood(color: Color, rough: float) -> ShaderMaterial:
 	## Hull planking that darkens and goes glossy below the waterline. The
 	## waterline is pushed every frame in _update_wetness().
-	var m := ShaderMaterial.new()
-	m.shader = load("res://shaders/wet_hull.gdshader")
-	m.set_shader_parameter("albedo", color)
-	m.set_shader_parameter("dry_roughness", rough)
+	var m := BoatVisuals.wet_hull_material(color, rough)
 	_hull_mats.append(m)
 	return m
 
@@ -1030,15 +1056,15 @@ func _build_visuals() -> void:
 	# -> roof -> wheelhouse is a loop you can actually walk.
 	_box(Vector3(1.25, ch, 0.08), Vector3(-1.175, cy, CH_Z1), Vector3.ZERO, paint)
 	_box(Vector3(1.25, ch, 0.08), Vector3(1.175, cy, CH_Z1), Vector3.ZERO, paint)
-	# Header only 0.20 deep: the opening clears 1.92 m, so a 1.74 m man walks
-	# through the door rather than through the lintel.
-	_box(Vector3(1.10, 0.20, 0.08), Vector3(0.0, CH_Y1 - 0.10, CH_Z1), Vector3.ZERO, paint)
-	_box(Vector3(1.14, 0.06, 0.10), Vector3(0.0, CH_Y0 + 0.03, CH_Z1), Vector3.ZERO, trim)
+	# Header lands on both jambs, not on the hole: 1.10 left a hairline at
+	# each stile. 0.20 deep so a 1.74 m man still walks under it.
+	_box(Vector3(1.20, 0.20, 0.08), Vector3(0.0, CH_Y1 - 0.10, CH_Z1), Vector3.ZERO, paint)
+	_box(Vector3(1.20, 0.06, 0.10), Vector3(0.0, CH_Y0 + 0.03, CH_Z1), Vector3.ZERO, trim)
 	# Forward bulkhead with a doorway cut out of it (two jambs + a header).
 	_box(Vector3(1.25, ch, 0.08), Vector3(-1.175, cy, CH_Z0), Vector3.ZERO, paint)
 	_box(Vector3(1.25, ch, 0.08), Vector3(1.175, cy, CH_Z0), Vector3.ZERO, paint)
-	_box(Vector3(1.10, 0.20, 0.08), Vector3(0.0, CH_Y1 - 0.10, CH_Z0), Vector3.ZERO, paint)
-	_box(Vector3(1.14, 0.06, 0.10), Vector3(0.0, CH_Y0 + 0.03, CH_Z0), Vector3.ZERO, trim)
+	_box(Vector3(1.20, 0.20, 0.08), Vector3(0.0, CH_Y1 - 0.10, CH_Z0), Vector3.ZERO, paint)
+	_box(Vector3(1.20, 0.06, 0.10), Vector3(0.0, CH_Y0 + 0.03, CH_Z0), Vector3.ZERO, trim)
 	# Roof of the deckhouse — the walkable upper deck.
 	# Roof / upper deck, laid in four pieces so the companionway has an opening
 	# to come up through on the port side aft. Hatch mouth 1.18 m, not 1.30.
@@ -1208,7 +1234,10 @@ func _build_visuals() -> void:
 		# Outboard face: forward hatch looks toward the bow (−Z), aft toward
 		# the stern (+Z). Hardware sits on the weather side.
 		var face: float = -1.0 if k == 0 else 1.0
-		_weathertight_leaf(piv, 1.12, 1.92, 0.56, 1.64, CABIN_LATCH.x, true,
+		# Hole is 1.10 × 1.92. The old 1.12 leaf met the hinge stile on a
+		# knife-edge — one millimetre of daylight. Overlap both jambs and
+		# the header the way a hatch actually shuts.
+		_weathertight_leaf(piv, 1.18, 1.96, 0.56, 1.66, CABIN_LATCH.x, true,
 				face, plate, batten, gasket, metal)
 		if k == 0:
 			_door_fwd = piv
@@ -1216,8 +1245,8 @@ func _build_visuals() -> void:
 			_door_aft = piv
 	# Coaming on the WEATHER face, so from the deck the opening is a hatch
 	# you walk up to, not a hole in a painted wall.
-	_hatch_coaming(0.0, CH_Z0 - 0.08, 0.68, 1.92, -1.0, metal, paint)
-	_hatch_coaming(0.0, CH_Z1 + 0.08, 0.68, 1.92, 1.0, metal, paint)
+	_hatch_coaming(0.0, CH_Z0 - 0.08, 0.66, 1.96, -1.0, metal, paint, 1.10)
+	_hatch_coaming(0.0, CH_Z1 + 0.08, 0.66, 1.96, 1.0, metal, paint, 1.10)
 
 	# Rug on the sole, down the corridor between the stairs and the bunk.
 	_box(Vector3(0.90, 0.025, 1.60), Vector3(0.20, 0.70, 2.30), Vector3.ZERO, rug_red)
@@ -1264,19 +1293,24 @@ func _build_visuals() -> void:
 	_box(Vector3(1.07, 0.50, 0.09), Vector3(1.205, 3.16, WH_Z1), Vector3.ZERO, paint)
 	_box(Vector3(0.12, wh, 0.09), Vector3(0.61, wy, WH_Z1), Vector3.ZERO, paint)
 	_box(Vector3(3.48, 0.25, 0.09), Vector3(0.0, 5.215, WH_Z1), Vector3.ZERO, paint)
-	_box(Vector3(1.14, 0.26, 0.09), Vector3(0.0, 4.96, WH_Z1), Vector3.ZERO, paint)
-	_box(Vector3(1.14, 0.06, 0.10), Vector3(0.0, WH_Y0 + 0.03, WH_Z1), Vector3.ZERO, trim)
+	_box(Vector3(1.22, 0.26, 0.09), Vector3(0.0, 4.96, WH_Z1), Vector3.ZERO, paint)
+	_box(Vector3(1.22, 0.06, 0.10), Vector3(0.0, WH_Y0 + 0.03, WH_Z1), Vector3.ZERO, trim)
 	_glass(Vector3(1.07, 1.68, 0.05), Vector3(1.205, 4.25, WH_Z1))
 
 	# Balcony hatch. Hinged starboard so it parks against the glass, not over
 	# the companionway. Inward — the balcony is a metre deep and a leaf that
 	# size would hit the aft rail.
+	# The hole in the aft bulkhead is x −0.57..0.55, y 2.91..4.83. A 1.06 × 1.88
+	# leaf centred on the hinge left a strip of daylight on the port stile and
+	# under the lintel — shut, and you could still see the balcony through it.
+	# Sit the plate AGAINST the inner face (same 85 mm as the cabin hatches)
+	# and let it land on both jambs and the header.
 	var wh_piv := Node3D.new()
-	wh_piv.position = Vector3(0.55, WH_Y0, WH_Z1 - 0.04)
+	wh_piv.position = Vector3(0.55, WH_Y0, WH_Z1 - 0.085)
 	add_child(wh_piv)
-	_weathertight_leaf(wh_piv, 1.06, 1.88, -0.53, 0.96, WH_LATCH.x, false,
+	_weathertight_leaf(wh_piv, 1.18, 1.98, -0.58, 0.99, WH_LATCH.x, false,
 			1.0, plate, batten, gasket, metal, false)
-	_hatch_coaming(0.0, WH_Z1 + 0.06, WH_Y0 + 0.05, 1.88, 1.0, metal, paint)
+	_hatch_coaming(0.0, WH_Z1 + 0.06, WH_Y0 + 0.02, 1.98, 1.0, metal, paint, 1.12)
 	# Deadlight, not a house panel: a small square port with a heavy frame.
 	_box(Vector3(0.40, 0.32, 0.018), Vector3(-0.53, 1.28, 0.044), Vector3.ZERO, metal, wh_piv)
 	_box(Vector3(0.30, 0.22, 0.012), Vector3(-0.53, 1.28, 0.052), Vector3.ZERO,
@@ -1431,14 +1465,16 @@ func _build_visuals() -> void:
 	# and there is no wedge of daylight over the leaf.
 	var slope := 0.223 / 0.30
 	var z0 := 1.55
-	var z1 := 2.75
+	var z1 := 2.77
 	var hinge_y := 1.24
 	_door_eng = Node3D.new()
 	_door_eng.position = Vector3(-0.500, hinge_y, z0)
 	add_child(_door_eng)
-	var y_bot := 0.70 - hinge_y
-	var y_hf := 2.850 - (z0 - 1.10) * slope - hinge_y - 0.012
-	var y_ha := 2.850 - (z1 - 1.10) * slope - hinge_y - 0.012
+	# Sole is 0.63; 0.70 left a kick of daylight. The soffit is the stair
+	# underside — 12 mm of air under it was a bright line from the cabin.
+	var y_bot := 0.635 - hinge_y
+	var y_hf := 2.850 - (z0 - 1.10) * slope - hinge_y - 0.002
+	var y_ha := 2.850 - (z1 - 1.10) * slope - hinge_y - 0.002
 	var z_e := z1 - z0
 	var hatch_m: StandardMaterial3D = trim.duplicate()
 	hatch_m.cull_mode = BaseMaterial3D.CULL_DISABLED
@@ -1577,6 +1613,14 @@ func _build_console(trim: Material, metal: Material) -> void:
 	_needles.append(_make_dial(face, 0.24, dial_r, "ZİNCİR",
 			["0", "35", "70"], bronze, _dial_face_mat, "m"))
 	_make_compass(face, 0.04, dial_r, bronze, _dial_face_mat)
+
+	# Flood and wiper — same 20 cm pitch as the dials, one step port of
+	# Parakete. Wheelhouse lights live on the fuse face.
+	var sw_br := _mat(Color(0.36, 0.27, 0.13), 0.40, 0.75)
+	var sw_ph := _mat(Color(0.10, 0.07, 0.05), 0.64)
+	_box(Vector3(0.32, 0.006, 0.12), Vector3(-0.66, 0.016, 0.02), Vector3.ZERO, sw_ph, face)
+	_build_toggle("sw_flood", Vector3(-0.56, 0.022, 0.00), "FLOOD", sw_br, face)
+	_build_toggle("sw_wiper", Vector3(-0.76, 0.022, 0.00), "WIPER", sw_br, face)
 
 	# --- throttle: a lever ON the console, right-hand end --------------------
 	# No freestanding pedestal — it read as a bar stool in the middle of the
@@ -2116,7 +2160,6 @@ func _build_switchboard(trim: Material, metal: Material) -> void:
 	## your right hand falls. Six brass toggles: walk up and throw them. A boat
 	## this old would not have a menu, and it does not have one here either.
 	var bronze := _mat(Color(0.36, 0.27, 0.13), 0.40, 0.75)
-	var face_mat := _mat(Color(0.115, 0.105, 0.095), 0.62)
 	var cx := 1.30
 	var cz := 1.54
 
@@ -2131,86 +2174,124 @@ func _build_switchboard(trim: Material, metal: Material) -> void:
 				0.45 + float(d) * 0.62), Vector3.ZERO, _mat(Color(0.09, 0.07, 0.05), 0.9))
 		_box(Vector3(0.03, 0.025, 0.10), Vector3(cx - 0.34, 3.44 - float(d % 2) * 0.20,
 				0.45 + float(d) * 0.62), Vector3.ZERO, bronze)
-	# The switchboard is a slate panel let INTO that top, not a stand of its own.
-	#
-	# It sits on the INBOARD half of the console, and that is not a decision
-	# about looks. The joinery runs out to x 1.62 and you cannot stand closer to
-	# it than x 0.68 — so a board spread across the full top put its outboard
-	# column a full metre from the shoulder, against an arm that is 0.55 m long
-	# with 0.34 m of lean. The solver could only stretch at it, which is exactly
-	# what "the hand is broken" looked like. Every toggle is now inside 0.62 m.
-	var bx := 1.17
-	_box(Vector3(0.42, 0.03, 0.58), Vector3(bx, 3.695, cz), Vector3.ZERO, face_mat)
-	_box(Vector3(0.46, 0.045, 0.035), Vector3(bx, 3.70, cz - 0.305), Vector3.ZERO, bronze)
-	_box(Vector3(0.46, 0.045, 0.035), Vector3(bx, 3.70, cz + 0.305), Vector3.ZERO, bronze)
+	# The well holds the cartridges and the four house switches. Flood and
+	# the wiper sit on the dash.
+	_build_fuse_box(bronze)
 
-	# The fuse-box hood over the board: a shallow steel lid, hinged on its
-	# forward edge, with a lip deep enough to clear the thrown levers. Opening
-	# it stands the lid up against the dashboard, clear of the hand.
-	var hood_mat := _mat(Color(0.170, 0.180, 0.185), 0.55, 0.55)
+
+func _build_fuse_box(bronze: Material) -> void:
+	## One steel well, one grid. Inboard column is the house toggles,
+	## outboard is the cartridges. Every row uses the same pitch.
+	const BOX_X := 1.140
+	const BOX_Z := 1.340
+	const INNER_W := 0.230
+	const PITCH := 0.070
+	const INNER_L := PITCH * 4.0 + 0.072
+	const WALL := 0.012
+	const FLOOR := 3.656
+	const RIM := 3.738
+	const LID_T := 0.008
+	const COL_SW := 1.090
+	const COL_FU := 1.195
+	const Z0 := BOX_Z - PITCH * 1.5
+	var outer_w: float = INNER_W + WALL * 2.0
+	var outer_l: float = INNER_L + WALL * 2.0
+	var hinge_z: float = BOX_Z - outer_l * 0.5
+	var wall_h: float = RIM - FLOOR
+	var wall_cy: float = FLOOR + wall_h * 0.5
+	var enamel := _mat(Color(0.38, 0.36, 0.30), 0.70)
+	var phenolic := _mat(Color(0.10, 0.07, 0.05), 0.64)
+	var copper := _mat(Color(0.58, 0.32, 0.13), 0.34, 0.90)
+	var ceramic := _mat(Color(0.84, 0.80, 0.72), 0.50)
+	var cloth := _mat(Color(0.13, 0.10, 0.08), 0.88)
+	var red_lead := _mat(Color(0.42, 0.08, 0.06), 0.72)
+	var steel := _mat(Color(0.22, 0.22, 0.23), 0.48, 0.62)
+	var gasket := _mat(Color(0.06, 0.055, 0.05), 0.94)
+	var lid_mat := _mat(Color(0.20, 0.205, 0.21), 0.46, 0.58)
+
+	_box(Vector3(INNER_W, 0.006, INNER_L), Vector3(BOX_X, FLOOR, BOX_Z), Vector3.ZERO, phenolic)
+	_box(Vector3(outer_w, wall_h, WALL), Vector3(BOX_X, wall_cy, BOX_Z - INNER_L * 0.5 - WALL * 0.5),
+			Vector3.ZERO, steel)
+	_box(Vector3(outer_w, wall_h, WALL), Vector3(BOX_X, wall_cy, BOX_Z + INNER_L * 0.5 + WALL * 0.5),
+			Vector3.ZERO, steel)
+	_box(Vector3(WALL, wall_h, INNER_L), Vector3(BOX_X - INNER_W * 0.5 - WALL * 0.5, wall_cy, BOX_Z),
+			Vector3.ZERO, steel)
+	_box(Vector3(WALL, wall_h, INNER_L), Vector3(BOX_X + INNER_W * 0.5 + WALL * 0.5, wall_cy, BOX_Z),
+			Vector3.ZERO, steel)
+	var rim_y: float = RIM - 0.002
+	var gask_y: float = RIM + 0.001
+	var rim_w: float = outer_w + 0.008
+	var frame: float = (rim_w - INNER_W) * 0.5
+	_box(Vector3(rim_w, 0.004, frame), Vector3(BOX_X, rim_y, BOX_Z - (INNER_L + frame) * 0.5),
+			Vector3.ZERO, steel)
+	_box(Vector3(rim_w, 0.004, frame), Vector3(BOX_X, rim_y, BOX_Z + (INNER_L + frame) * 0.5),
+			Vector3.ZERO, steel)
+	_box(Vector3(frame, 0.004, INNER_L), Vector3(BOX_X - (INNER_W + frame) * 0.5, rim_y, BOX_Z),
+			Vector3.ZERO, steel)
+	_box(Vector3(frame, 0.004, INNER_L), Vector3(BOX_X + (INNER_W + frame) * 0.5, rim_y, BOX_Z),
+			Vector3.ZERO, steel)
+	_box(Vector3(INNER_W + 0.010, 0.003, 0.008), Vector3(BOX_X, gask_y, BOX_Z - INNER_L * 0.5),
+			Vector3.ZERO, gasket)
+	_box(Vector3(INNER_W + 0.010, 0.003, 0.008), Vector3(BOX_X, gask_y, BOX_Z + INNER_L * 0.5),
+			Vector3.ZERO, gasket)
+	_box(Vector3(0.008, 0.003, INNER_L), Vector3(BOX_X - INNER_W * 0.5, gask_y, BOX_Z),
+			Vector3.ZERO, gasket)
+	_box(Vector3(0.008, 0.003, INNER_L), Vector3(BOX_X + INNER_W * 0.5, gask_y, BOX_Z),
+			Vector3.ZERO, gasket)
+
+	_box(Vector3(0.012, 0.006, INNER_L - 0.05), Vector3(COL_FU + 0.028, FLOOR + 0.010, BOX_Z),
+			Vector3.ZERO, copper)
+	_cyl(0.006, 0.006, 0.08, Vector3(COL_FU + 0.028, FLOOR - 0.036, Z0 - 0.02),
+			Vector3.ZERO, red_lead)
+	_cyl(0.011, 0.011, 0.014, Vector3(COL_FU + 0.028, FLOOR + 0.012, Z0 - 0.02),
+			Vector3.ZERO, steel)
+	_stamp("12V", Vector3(BOX_X, FLOOR + 0.006, Z0 - 0.048), 16)
+
 	_fuse_lid = Node3D.new()
-	_fuse_lid.position = Vector3(bx, 3.715, cz - 0.315)
+	_fuse_lid.position = Vector3(BOX_X, RIM, hinge_z)
 	add_child(_fuse_lid)
-	var hood_top := _box_node(Vector3(0.48, 0.022, 0.65), Vector3(0.0, 0.105, 0.325), hood_mat)
-	_fuse_lid.add_child(hood_top)
-	var hood_f := _box_node(Vector3(0.48, 0.105, 0.022), Vector3(0.0, 0.052, 0.011), hood_mat)
-	_fuse_lid.add_child(hood_f)
-	var hood_a := _box_node(Vector3(0.48, 0.105, 0.022), Vector3(0.0, 0.052, 0.639), hood_mat)
-	_fuse_lid.add_child(hood_a)
-	var hood_l := _box_node(Vector3(0.022, 0.105, 0.65), Vector3(-0.229, 0.052, 0.325), hood_mat)
-	_fuse_lid.add_child(hood_l)
-	var hood_r := _box_node(Vector3(0.022, 0.105, 0.65), Vector3(0.229, 0.052, 0.325), hood_mat)
-	_fuse_lid.add_child(hood_r)
-	var latch := _box_node(Vector3(0.06, 0.03, 0.035), Vector3(0.0, 0.095, 0.63),
-			_mat(Color(0.36, 0.27, 0.13), 0.4, 0.7))
-	_fuse_lid.add_child(latch)
+	var lid_w: float = outer_w + 0.008
+	var lid_l: float = outer_l + 0.006
+	_fuse_latch_local = Vector3(0.0, LID_T + 0.004, lid_l - 0.018)
+	_box(Vector3(lid_w, LID_T, lid_l), Vector3(0.0, LID_T * 0.5, lid_l * 0.5),
+			Vector3.ZERO, lid_mat, _fuse_lid)
+	_box(Vector3(lid_w - 0.010, 0.003, lid_l - 0.010), Vector3(0.0, LID_T + 0.001, lid_l * 0.5),
+			Vector3.ZERO, enamel, _fuse_lid)
+	var lip_d := 0.006
+	var lip_y := -lip_d * 0.5
+	_box(Vector3(INNER_W - 0.010, lip_d, 0.005), Vector3(0.0, lip_y, WALL + 0.008),
+			Vector3.ZERO, lid_mat, _fuse_lid)
+	_box(Vector3(INNER_W - 0.010, lip_d, 0.005), Vector3(0.0, lip_y, lid_l - WALL - 0.008),
+			Vector3.ZERO, lid_mat, _fuse_lid)
+	_box(Vector3(0.005, lip_d, INNER_L - 0.014), Vector3(-(INNER_W * 0.5 - 0.010), lip_y, lid_l * 0.5),
+			Vector3.ZERO, lid_mat, _fuse_lid)
+	_box(Vector3(0.005, lip_d, INNER_L - 0.014), Vector3(INNER_W * 0.5 - 0.010, lip_y, lid_l * 0.5),
+			Vector3.ZERO, lid_mat, _fuse_lid)
+	_box(Vector3(0.040, 0.010, 0.024), _fuse_latch_local, Vector3.ZERO, bronze, _fuse_lid)
+	_box(Vector3(0.012, 0.014, 0.008), Vector3(0.0, 0.000, lid_l - 0.004),
+			Vector3.ZERO, bronze, _fuse_lid)
+	for hx in [-0.05, 0.05]:
+		_cyl(0.006, 0.006, 0.018, Vector3(BOX_X + hx, RIM, hinge_z),
+				Vector3(0.0, 0.0, 90.0), bronze)
 
-	# Six toggles, two rows of three. The lever of each carries its own state.
-	var ids: Array[String] = ["sw_cabin", "sw_helm", "sw_beacon",
-			"sw_flood", "sw_wiper", "sw_anchor"]
-	var names: Array[String] = ["CABIN", "HELM", "NAV", "FLOOD", "WIPER", "ANCHOR"]
-	for i in 6:
-		var col := i % 3
-		var row: int = i / 3
-		var sx := bx - 0.12 + float(col) * 0.12
-		var sz := cz - 0.12 + float(row) * 0.24
-		var sy := 3.712
-		# Escutcheon, and the toggle standing up out of it.
-		_box(Vector3(0.075, 0.012, 0.075), Vector3(sx, sy - 0.012, sz), Vector3.ZERO, bronze)
-		var piv := Node3D.new()
-		piv.position = Vector3(sx, sy, sz)
-		add_child(piv)
-		_cyl(0.011, 0.008, 0.050, Vector3(0.0, 0.025, 0.0), Vector3.ZERO, bronze, piv)
-		var tip := MeshInstance3D.new()
-		var tm := SphereMesh.new()
-		tm.radius = 0.012
-		tm.height = 0.024
-		tm.material = bronze
-		tip.mesh = tm
-		tip.position = Vector3(0.0, 0.052, 0.0)
-		tip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		piv.add_child(tip)
-		_switch_levers[ids[i]] = piv
-		# Tell-tale beside each: green burning, red dark. You can read the whole
-		# board at a glance from the wheel without walking over to it.
-		var led_mat := _mat(Color(0.09, 0.09, 0.09), 0.30)
-		led_mat.emission_enabled = true
-		led_mat.emission = Color(1.0, 0.16, 0.10)
-		led_mat.emission_energy_multiplier = 1.1
-		_box(Vector3(0.026, 0.008, 0.026), Vector3(sx, sy - 0.006, sz + 0.048),
-				Vector3.ZERO, bronze)
-		var led := MeshInstance3D.new()
-		var lm := SphereMesh.new()
-		lm.radius = 0.0085
-		lm.height = 0.017
-		lm.material = led_mat
-		led.mesh = lm
-		led.position = Vector3(sx, sy + 0.006, sz + 0.048)
-		led.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		add_child(led)
-		_switch_leds[ids[i]] = led_mat
-		# Engraved plate for each circuit.
-		_console_label(names[i], Vector3(sx, sy - 0.008, sz + 0.092), 34)
+	var sw_ids: Array[String] = ["sw_cabin", "sw_helm", "sw_beacon", "sw_anchor"]
+	var fu_ids: Array[String] = ["fu_cabin", "fu_helm", "fu_beacon", "fu_anchor"]
+	var names: Array[String] = ["CABIN", "WH LTS", "NAV", "WINDLASS"]
+	var amps: Array[String] = ["10A", "5A", "10A", "40A"]
+	for i in 4:
+		var rz: float = Z0 + float(i) * PITCH
+		_place_cartridge(fu_ids[i], Vector3(COL_FU, 3.676, rz), bronze, ceramic)
+		_stamp(amps[i], Vector3(COL_FU + 0.022, 3.682, rz), 12)
+		_stamp(names[i], Vector3(COL_SW - 0.038, 3.668, rz), 12)
+		_cyl(0.0028, 0.0028, 0.048, Vector3((COL_SW + COL_FU) * 0.5, 3.664, rz),
+				Vector3(0.0, 0.0, 90.0), cloth)
+		_build_toggle(sw_ids[i], Vector3(COL_SW, 3.688, rz), "", bronze, null, true)
+	# Dash circuits still have a cartridge. They sit on the lid, not in the
+	# grid — the well is four rows, and those two switches are at the helm.
+	_place_cartridge("fu_flood", Vector3(-0.035, -0.014, 0.20), bronze, ceramic, _fuse_lid)
+	_place_cartridge("fu_wiper", Vector3(0.035, -0.014, 0.20), bronze, ceramic, _fuse_lid)
+	_stamp("FLOOD 15A", Vector3(-0.035, -0.006, 0.20), 10, _fuse_lid)
+	_stamp("WIPER 5A", Vector3(0.035, -0.006, 0.20), 10, _fuse_lid)
 
 
 func _worn_letter(color: Color, wear: float, flake_seed: float) -> ShaderMaterial:
@@ -2272,6 +2353,98 @@ func _transom_glyph(parent: Node3D, ch: String, pos: Vector3, tilt_z: float,
 	parent.add_child(mi)
 
 
+func _place_cartridge(id: String, pos: Vector3, bronze: Material, ceramic: Material,
+		parent: Node3D = null) -> void:
+	_fuse_in[id] = true
+	_box(Vector3(0.011, 0.009, 0.014), pos + Vector3(0.0, -0.006, -0.015),
+			Vector3.ZERO, bronze, parent)
+	_box(Vector3(0.011, 0.009, 0.014), pos + Vector3(0.0, -0.006, 0.015),
+			Vector3.ZERO, bronze, parent)
+	var cart := Node3D.new()
+	cart.position = pos
+	cart.set_meta("rest_y", pos.y)
+	if parent == null:
+		add_child(cart)
+	else:
+		parent.add_child(cart)
+	_cyl(0.0055, 0.0055, 0.030, Vector3.ZERO, Vector3(90.0, 0.0, 0.0), ceramic, cart)
+	_cyl(0.007, 0.007, 0.006, Vector3(0.0, 0.0, -0.014),
+			Vector3(90.0, 0.0, 0.0), bronze, cart)
+	_cyl(0.007, 0.007, 0.006, Vector3(0.0, 0.0, 0.014),
+			Vector3(90.0, 0.0, 0.0), bronze, cart)
+	_fuse_bodies[id] = cart
+
+
+func _build_toggle(id: String, pos: Vector3, caption: String, bronze: Material,
+		parent: Node3D = null, compact := false) -> void:
+	## One brass toggle, its jewel and the ink under it. `pos` is the pivot
+	## in the parent's frame (or the boat's). The lever grows along local +Y
+	## so the same part sits on a flat face or on the raked dash.
+	## `compact` is the well: jewel toward the fuse, name already on the row.
+	var base := Vector3(0.036, 0.007, 0.032) if compact else Vector3(0.050, 0.008, 0.044)
+	_box(base, pos + Vector3(0.0, -0.012, 0.0), Vector3.ZERO, bronze, parent)
+	var piv := Node3D.new()
+	piv.position = pos
+	if parent == null:
+		add_child(piv)
+	else:
+		parent.add_child(piv)
+	_cyl(0.010, 0.007, 0.044, Vector3(0.0, 0.022, 0.0), Vector3.ZERO, bronze, piv)
+	var tip := MeshInstance3D.new()
+	var tm := SphereMesh.new()
+	tm.radius = 0.011
+	tm.height = 0.022
+	tm.material = bronze
+	tip.mesh = tm
+	tip.position = Vector3(0.0, 0.046, 0.0)
+	tip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	piv.add_child(tip)
+	_switch_levers[id] = piv
+	var led_mat := _mat(Color(0.18, 0.14, 0.10), 0.16)
+	led_mat.emission_enabled = true
+	led_mat.emission = Color(1.0, 0.70, 0.28)
+	led_mat.emission_energy_multiplier = 0.0
+	var jx: Vector3 = pos + (Vector3(0.024, 0.002, 0.0) if compact \
+			else Vector3(-0.038, 0.002, 0.0))
+	_box(Vector3(0.014, 0.005, 0.014), jx + Vector3(0.0, -0.008, 0.0),
+			Vector3.ZERO, bronze, parent)
+	var led := MeshInstance3D.new()
+	var lm := SphereMesh.new()
+	lm.radius = 0.0055
+	lm.height = 0.011
+	lm.material = led_mat
+	led.mesh = lm
+	led.position = jx
+	led.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if parent == null:
+		add_child(led)
+	else:
+		parent.add_child(led)
+	_switch_leds[id] = led_mat
+	if caption != "":
+		_box(Vector3(0.062, 0.003, 0.012), pos + Vector3(0.0, -0.014, 0.036),
+				Vector3.ZERO, bronze, parent)
+		_stamp(caption, pos + Vector3(0.0, -0.010, 0.036), 16, parent)
+
+
+func _stamp(text: String, pos: Vector3, size: int, parent: Node3D = null) -> void:
+	## Ink in the brass, not a caption floating over it.
+	var l := Label3D.new()
+	l.text = text
+	l.font_size = size
+	l.pixel_size = 0.00034
+	l.modulate = Color(0.18, 0.12, 0.06)
+	l.shaded = true
+	l.double_sided = false
+	l.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
+	l.position = pos
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	if parent == null:
+		add_child(l)
+	else:
+		parent.add_child(l)
+
+
 func _console_label(text: String, pos: Vector3, size: int) -> void:
 	var l := Label3D.new()
 	l.text = text
@@ -2289,14 +2462,19 @@ func _console_label(text: String, pos: Vector3, size: int) -> void:
 func toggle_switch(id: String, by_hand := true) -> void:
 	## One switch, one circuit. Called from the E handler when you throw a
 	## toggle by hand; the number keys reach the same fields.
-	# Sealed board: a closed fuse box does not take a finger.
-	if id.begins_with("sw_") and by_hand and not fusebox_open:
+	# Cartridges, and the four house toggles, live under the lid.
+	if id.begins_with("fu_") or switch_in_well(id):
+		if by_hand and not fusebox_open:
+			return
+	if id.begins_with("fu_"):
+		_fuse_in[id] = not bool(_fuse_in.get(id, true))
+		_boat_audio.play_hinge(Vector3(1.14, 3.68, 1.36))
 		return
 	match id:
 		"stove": stove_on = not stove_on
 		"fusebox":
 			fusebox_open = not fusebox_open
-			_hinge_sound(Vector3(1.30, 3.72, 1.54))
+			_boat_audio.play_hinge(Vector3(1.14, 3.74, 1.36))
 		"sw_cabin": light_cabin = not light_cabin
 		"sw_helm": light_helm = not light_helm
 		"sw_beacon": light_beacon = not light_beacon
@@ -2307,21 +2485,21 @@ func toggle_switch(id: String, by_hand := true) -> void:
 				tackle.toggle()
 		"door_fwd":
 			door_fwd_open = not door_fwd_open
-			_hinge_sound(Vector3(0.0, 1.30, DOOR_Z0))
+			_boat_audio.play_hinge(Vector3(0.0, 1.30, DOOR_Z0))
 		"door_aft":
 			door_aft_open = not door_aft_open
-			_hinge_sound(Vector3(0.0, 1.30, DOOR_Z1))
+			_boat_audio.play_hinge(Vector3(0.0, 1.30, DOOR_Z1))
 		"door_wh":
 			door_wh_open = not door_wh_open
-			_hinge_sound(Vector3(0.0, 3.55, WH_DOOR_Z))
+			_boat_audio.play_hinge(Vector3(0.0, 3.55, WH_DOOR_Z))
 		"door_eng":
 			door_eng_open = not door_eng_open
-			_hinge_sound(Vector3(-0.515, 1.24, 2.15))
+			_boat_audio.play_hinge(Vector3(-0.515, 1.24, 2.15))
 			if _engine_room != null:
 				_engine_room.call("set_door", door_eng_open)
 		"locker":
 			locker_open = not locker_open
-			_hinge_sound(Vector3(-1.30, 1.50, 0.36))
+			_boat_audio.play_hinge(Vector3(-1.30, 1.50, 0.36))
 		"divegear":
 			# Only ever from the locker, and only with the door open — you do
 			# not pull a wetsuit through a steel panel.
@@ -2998,83 +3176,13 @@ func _build_helm(trim: Material, metal: Material) -> void:
 	_wheel.add_child(hub)
 
 
-func _local_xform(pos: Vector3, rot_deg: Vector3) -> Transform3D:
-	var e := Vector3(deg_to_rad(rot_deg.x), deg_to_rad(rot_deg.y), deg_to_rad(rot_deg.z))
-	return Transform3D(Basis.from_euler(e), pos)
-
-
-func _can_batch(mat: Material, parent: Node3D) -> bool:
-	if not _batching or parent != null:
-		return false
-	if mat is StandardMaterial3D:
-		return true
-	# Wet hull is world-space; the rest of the shaders read MODEL VERTEX
-	# (glass rain, worn letters) and a merge would smear them across the boat.
-	return mat is ShaderMaterial and _hull_mats.has(mat)
-
-
 func _emit_mesh(mesh: Mesh, pos: Vector3, rot_deg: Vector3, mat: Material,
 		parent: Node3D, shadows := true) -> void:
-	if _can_batch(mat, parent):
-		if not _mesh_batch.has(mat):
-			_mesh_batch[mat] = []
-		(_mesh_batch[mat] as Array).append({
-			"mesh": mesh,
-			"xform": _local_xform(pos, rot_deg),
-			"shadow": shadows,
-		})
-		return
-	var mi := MeshInstance3D.new()
-	if mesh is PrimitiveMesh:
-		(mesh as PrimitiveMesh).material = mat
-	else:
-		mesh.surface_set_material(0, mat)
-	mi.mesh = mesh
-	mi.position = pos
-	mi.rotation_degrees = rot_deg
-	if not shadows:
-		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	if parent == null:
-		add_child(mi)
-	else:
-		parent.add_child(mi)
+	_mesh_batcher.emit(mesh, pos, rot_deg, mat, parent, shadows, _hull_mats)
 
 
 func _flush_mesh_batch() -> void:
-	_batching = false
-	for mat: Material in _mesh_batch:
-		var items: Array = _mesh_batch[mat]
-		if items.is_empty():
-			continue
-		if items.size() == 1:
-			var one: Dictionary = items[0]
-			var mi1 := MeshInstance3D.new()
-			var mesh: Mesh = one["mesh"]
-			if mesh is PrimitiveMesh:
-				(mesh as PrimitiveMesh).material = mat
-			else:
-				mesh.surface_set_material(0, mat)
-			mi1.mesh = mesh
-			mi1.transform = one["xform"]
-			if not one["shadow"]:
-				mi1.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			add_child(mi1)
-			continue
-		var st := SurfaceTool.new()
-		st.begin(Mesh.PRIMITIVE_TRIANGLES)
-		var any_shadow := false
-		for it: Dictionary in items:
-			if it["shadow"]:
-				any_shadow = true
-			st.append_from(it["mesh"], 0, it["xform"])
-		var combined: ArrayMesh = st.commit()
-		var mi := MeshInstance3D.new()
-		mi.mesh = combined
-		mi.material_override = mat
-		if not any_shadow:
-			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		add_child(mi)
-	_mesh_batch.clear()
+	_mesh_batcher.flush()
 
 
 func _cyl(r_bot: float, r_top: float, h: float, pos: Vector3, rot_deg: Vector3,
@@ -3105,20 +3213,24 @@ func _dog(piv: Node3D, pos: Vector3, iron: Material, face := 1.0) -> void:
 
 
 func _hatch_coaming(x: float, z: float, y0: float, h: float, face: float,
-		metal: Material, paint: Material) -> void:
+		metal: Material, paint: Material, opening_w := 1.10) -> void:
 	## Frame standing proud of the bulkhead on the deck side, so the hatch
 	## is a thing you walk up to. House doors sit in the wall; these sit on it.
+	## Uprights land ON the jambs: inner faces match `opening_w`, not a
+	## narrower hole that left a strip of daylight beside the leaf.
 	var y_mid := y0 + h * 0.5
 	var sill := y0 + 0.07
-	_box(Vector3(1.28, 0.16, 0.10), Vector3(x, sill, z), Vector3.ZERO, paint)
-	_box(Vector3(0.12, h + 0.08, 0.10), Vector3(x - 0.60, y_mid, z), Vector3.ZERO, paint)
-	_box(Vector3(0.12, h + 0.08, 0.10), Vector3(x + 0.60, y_mid, z), Vector3.ZERO, paint)
-	_box(Vector3(1.32, 0.12, 0.10), Vector3(x, y0 + h + 0.04, z), Vector3.ZERO, paint)
+	var stile := opening_w * 0.5 + 0.06
+	var frame_w := opening_w + 0.24
+	_box(Vector3(frame_w, 0.16, 0.10), Vector3(x, sill, z), Vector3.ZERO, paint)
+	_box(Vector3(0.12, h + 0.08, 0.10), Vector3(x - stile, y_mid, z), Vector3.ZERO, paint)
+	_box(Vector3(0.12, h + 0.08, 0.10), Vector3(x + stile, y_mid, z), Vector3.ZERO, paint)
+	_box(Vector3(frame_w + 0.04, 0.12, 0.10), Vector3(x, y0 + h + 0.04, z), Vector3.ZERO, paint)
 	# Iron corners, so the frame reads as a hatch even at a glance.
 	for sx in [-1.0, 1.0]:
-		_box(Vector3(0.05, 0.05, 0.12), Vector3(x + sx * 0.60, sill, z + face * 0.02),
+		_box(Vector3(0.05, 0.05, 0.12), Vector3(x + sx * stile, sill, z + face * 0.02),
 				Vector3.ZERO, metal)
-		_box(Vector3(0.05, 0.05, 0.12), Vector3(x + sx * 0.60, y0 + h, z + face * 0.02),
+		_box(Vector3(0.05, 0.05, 0.12), Vector3(x + sx * stile, y0 + h, z + face * 0.02),
 				Vector3.ZERO, metal)
 
 
@@ -3392,178 +3504,13 @@ func _play_ign_click() -> void:
 		_ign_click.play()
 
 
-func _build_door_sound() -> void:
-	var st: AudioStream = load("res://assets/audio/door.mp3")
-	if st == null:
-		return
-	for i in 4:
-		var p := AudioStreamPlayer3D.new()
-		p.stream = st
-		p.volume_db = -7.0
-		p.unit_size = 1.6
-		p.max_distance = 22.0
-		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
-		add_child(p)
-		_door_snd.append(p)
-
-
-func _hinge_sound(where: Vector3) -> void:
-	## Round-robin so a second door does not cut the first one off.
-	if _door_snd.is_empty():
-		return
-	var p: AudioStreamPlayer3D = _door_snd[_door_voice]
-	_door_voice = (_door_voice + 1) % _door_snd.size()
-	p.position = where
-	p.pitch_scale = randf_range(0.94, 1.07)
-	p.play()
-
-
-func _build_hull_creak() -> void:
-	## Timber working. Lives in the bilge so the cabin hears it first — that
-	## is the sound of being inside her, not another weather loop on deck.
-	for path: String in [
-		"res://assets/audio/hull_creak.mp3",
-		"res://assets/audio/hull_creak_2.mp3",
-		"res://assets/audio/hull_creak_3.mp3",
-	]:
-		var s: AudioStream = load(path)
-		if s != null:
-			_creak_light.append(s)
-	var hv: AudioStream = load("res://assets/audio/hull_creak_heavy.mp3")
-	if hv != null:
-		_creak_heavy.append(hv)
-	if _creak_light.is_empty() and _creak_heavy.is_empty():
-		return
-	for _i in 2:
-		var p := AudioStreamPlayer3D.new()
-		p.position = Vector3(0.0, 0.28, 0.70)
-		p.volume_db = -10.0
-		p.unit_size = 3.4
-		p.max_distance = 24.0
-		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
-		add_child(p)
-		_hull_creak.append(p)
-
-
-func _pick_creak(pool: Array[AudioStream]) -> AudioStream:
-	if pool.is_empty():
-		return null
-	if pool.size() == 1:
-		return pool[0]
-	var st: AudioStream = pool[randi() % pool.size()]
-	if st == _creak_last:
-		st = pool[randi() % pool.size()]
-	return st
-
-
-func _play_hull_creak(heavy: bool, amt: float) -> void:
-	if _hull_creak.is_empty():
-		return
-	var st: AudioStream = _pick_creak(_creak_heavy if heavy else _creak_light)
-	if st == null:
-		st = _pick_creak(_creak_light if heavy else _creak_heavy)
-	if st == null:
-		return
-	_creak_last = st
-	var p: AudioStreamPlayer3D = _hull_creak[_hull_creak_voice]
-	_hull_creak_voice = (_hull_creak_voice + 1) % _hull_creak.size()
-	p.stream = st
-	p.pitch_scale = randf_range(0.86, 1.06) if heavy else randf_range(0.90, 1.12)
-	var lin := lerpf(0.32, 1.0, clampf(amt, 0.0, 1.0))
-	if heavy:
-		lin *= 1.15
-	p.volume_db = linear_to_db(maxf(lin, 0.0001))
-	p.play()
-	var hold := st.get_length()
-	if hold <= 0.05:
-		hold = 2.0
-	_creak_cd = hold * 0.55 + randf_range(0.6, 1.8)
-
-
-func _tick_hull_creak(delta: float, slammed: bool) -> void:
-	if _hull_creak.is_empty():
-		return
-	_creak_cd -= delta
-	var heel := absf(asin(clampf(global_basis.x.y, -1.0, 1.0)))
-	var d_heel := 0.0
-	if _heel_ready:
-		d_heel = absf(heel - _prev_heel) / maxf(delta, 0.001)
-	_prev_heel = heel
-	_heel_ready = true
-	var w: Vector3 = global_basis.inverse() * angular_velocity
-	var work := d_heel * 2.4 + absf(w.z) * 1.8 + absf(w.x) * 1.15 + heel * 0.55
-	var wx := weather as WeatherScript
-	var heavy_sea := false
-	if wx != null:
-		heavy_sea = wx.storm or wx.wind_speed > 16.5
-	if slammed:
-		_play_hull_creak(true, clampf(0.7 + work * 0.25, 0.7, 1.0))
-		return
-	if _creak_cd > 0.0:
-		return
-	var thresh := 0.38 if heavy_sea else 0.58
-	if work < thresh:
-		return
-	var chance := clampf((work - thresh) * 0.55, 0.08, 0.58)
-	if heavy_sea:
-		chance = minf(chance * 1.4, 0.72)
-	if randf() > chance:
-		_creak_cd = 0.16
-		return
-	var use_heavy := heavy_sea and (work > 0.82 or heel > 0.20 or randf() < 0.42)
-	_play_hull_creak(use_heavy, clampf(0.42 + work * 0.42, 0.4, 1.0))
-
-
-func _build_helm_sound() -> void:
-	## The recording is a ratchet winding. It lives on the wheel so it is
-	## loud at the helm and a mutter from the cabin.
-	var rec: AudioStream = load("res://assets/audio/helm_wheel.mp3")
-	if rec == null:
-		return
-	if rec is AudioStreamMP3:
-		(rec as AudioStreamMP3).loop = true
-	_helm_snd = AudioStreamPlayer3D.new()
-	_helm_snd.stream = rec
-	_helm_snd.position = Vector3(0.0, 3.72, 0.28)
-	_helm_snd.volume_db = -80.0
-	_helm_snd.unit_size = 1.4
-	_helm_snd.max_distance = 7.0
-	_helm_snd.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
-	add_child(_helm_snd)
-
-
-func _tick_helm_sound(delta: float) -> void:
-	if _helm_snd == null or _wheel == null:
-		return
-	var wz: float = _wheel.rotation.z
-	var rate := 0.0
-	if _wheel_ready:
-		rate = absf(angle_difference(wz, _prev_wheel_z)) / maxf(delta, 0.001)
-	_prev_wheel_z = wz
-	_wheel_ready = true
-	var turning := helm_engaged and rate > 0.10
-	var tgt := clampf((rate - 0.10) / 1.6, 0.0, 1.0) if turning else 0.0
-	var k := 1.0 - exp(-10.0 * delta)
-	if turning:
-		if not _helm_snd.playing:
-			_helm_snd.play()
-		_helm_snd.volume_db = lerpf(_helm_snd.volume_db,
-				linear_to_db(maxf(0.035 + tgt * 0.055, 0.0001)), k)
-		_helm_snd.pitch_scale = lerpf(_helm_snd.pitch_scale, lerpf(0.93, 1.07, tgt), k)
-	else:
-		_helm_snd.volume_db = lerpf(_helm_snd.volume_db, -48.0, 1.0 - exp(-7.0 * delta))
-		if _helm_snd.volume_db < -36.0 and _helm_snd.playing:
-			_helm_snd.stop()
-			_helm_snd.volume_db = -80.0
-
-
 func _build_engine_sound() -> void:
 	## Diesel under the aft sole. Own bus with a low-pass so timber muffles
 	## it in the rooms; on deck it is the exhaust, not a speaker in your ear.
 	_ensure_engine_bus()
 	_starter_snd = AudioStreamPlayer3D.new()
 	_starter_snd.position = Vector3(0.0, 0.42, 3.70)
-	_starter_snd.stream = _wav_starter()
+	_starter_snd.stream = BoatAudio.starter()
 	_starter_snd.bus = "Engine"
 	_starter_snd.unit_size = 2.4
 	_starter_snd.max_distance = 14.0
@@ -3583,7 +3530,7 @@ func _build_engine_sound() -> void:
 		motor_rec.loop = true
 		_engine_snd.stream = motor_rec
 	else:
-		_engine_snd.stream = _wav_idle()
+		_engine_snd.stream = BoatAudio.diesel_idle()
 	_engine_snd.bus = "Engine"
 	_engine_snd.unit_size = 2.8
 	_engine_snd.max_distance = 26.0
@@ -3595,7 +3542,7 @@ func _build_engine_sound() -> void:
 	_ign_click = AudioStreamPlayer3D.new()
 	_ign_click.position = Vector3(0.50, 3.62, 0.06)
 	var ign_rec: AudioStream = load("res://assets/audio/ignition.mp3")
-	_ign_click.stream = ign_rec if ign_rec != null else _wav_click()
+	_ign_click.stream = ign_rec if ign_rec != null else BoatAudio.ignition_click()
 	_ign_click.bus = "Master"
 	_ign_click.unit_size = 1.6
 	_ign_click.max_distance = 8.0
@@ -3621,105 +3568,12 @@ func _ensure_engine_bus() -> void:
 		_eng_lp = AudioServer.get_bus_effect(idx, 0) as AudioEffectLowPassFilter
 
 
-func _wav_click() -> AudioStreamWAV:
-	var rate := 22050
-	var n := int(rate * 0.06)
-	var s := PackedFloat32Array()
-	s.resize(n)
-	var lp := 0.0
-	for i in n:
-		var t := float(i) / float(n)
-		var raw := (randf() * 2.0 - 1.0) * (1.0 - t) * (1.0 - t) * 0.45
-		lp = lp * 0.7 + raw * 0.3
-		s[i] = lp
-	return _pcm(s, rate, false)
-
-
-func _wav_starter() -> AudioStreamWAV:
-	var rate := 22050
-	var n := int(rate * 2.4)
-	var s := PackedFloat32Array()
-	s.resize(n)
-	var lp := 0.0
-	for i in n:
-		var t := float(i) / float(rate)
-		var spin := 8.5 + t * 1.6
-		var pulse := pow(0.5 + 0.5 * sin(t * TAU * spin), 3.2)
-		var grind := (randf() * 2.0 - 1.0) * 0.35 + sin(t * TAU * 42.0) * 0.12
-		lp = lp * 0.82 + grind * pulse * 0.18
-		s[i] = clampf(lp, -0.7, 0.7)
-	return _pcm(s, rate, false)
-
-
-func _wav_idle() -> AudioStreamWAV:
-	## A wooden boat's diesel: low thump, no hiss. The loop is long so the
-	## chug does not read as a sample. Highs are cooked out here; the bus
-	## low-pass only decides how much timber is in the way.
-	var rate := 22050
-	var n := int(rate * 2.6)
-	var s := PackedFloat32Array()
-	s.resize(n)
-	var brown := 0.0
-	var lp := 0.0
-	for i in n:
-		var t := float(i) / float(rate)
-		brown = brown * 0.96 + (randf() * 2.0 - 1.0) * 0.04
-		var fire := 0.5 + 0.5 * sin(t * TAU * 23.5)
-		fire *= fire * 0.38
-		var sub := sin(t * TAU * 11.75) * 0.28
-		var mid := sin(t * TAU * 47.0) * 0.08
-		var raw := sub + fire + mid + brown * 0.40
-		lp = lp * 0.90 + raw * 0.10
-		s[i] = clampf(lp * 0.92, -0.85, 0.85)
-	return _pcm(s, rate, true)
-
-
-func _pcm(samples: PackedFloat32Array, rate: int, loop: bool) -> AudioStreamWAV:
-	var w := AudioStreamWAV.new()
-	w.format = AudioStreamWAV.FORMAT_16_BITS
-	w.mix_rate = rate
-	w.stereo = false
-	var n := samples.size()
-	var data := PackedByteArray()
-	data.resize(n * 2)
-	for i in n:
-		data.encode_s16(i * 2, int(clampf(samples[i], -1.0, 1.0) * 32767.0))
-	w.data = data
-	if loop:
-		w.loop_mode = AudioStreamWAV.LOOP_FORWARD
-		w.loop_begin = 0
-		w.loop_end = n
-	return w
-
-
 func _drop_mesh(r: float) -> SphereMesh:
-	var m := SphereMesh.new()
-	m.radius = r
-	m.height = r * 2.1
-	m.radial_segments = 8
-	m.rings = 4
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(0.72, 0.82, 0.86, 0.45)
-	mat.vertex_color_use_as_albedo = true
-	mat.distance_fade_mode = BaseMaterial3D.DISTANCE_FADE_PIXEL_ALPHA
-	mat.distance_fade_min_distance = 16.0
-	mat.distance_fade_max_distance = 2.2
-	m.material = mat
-	return m
+	return BoatVisuals.water_drop_mesh(r)
 
 
 func _spray_fade() -> GradientTexture1D:
-	var g := Gradient.new()
-	g.offsets = PackedFloat32Array([0.0, 0.45, 1.0])
-	g.colors = PackedColorArray([
-		Color(0.82, 0.9, 0.92, 0.7),
-		Color(0.7, 0.8, 0.82, 0.28),
-		Color(0.55, 0.62, 0.64, 0.0)])
-	var t := GradientTexture1D.new()
-	t.gradient = g
-	return t
+	return BoatVisuals.spray_fade()
 
 
 func _build_water_fx() -> void:
@@ -3935,7 +3789,7 @@ func _process(delta: float) -> void:
 		# Four turns lock to lock, the way a cable-and-quadrant helm feels.
 		_wheel.rotation.z = lerp_angle(_wheel.rotation.z, _helm * 4.2,
 				1.0 - exp(-5.0 * delta))
-	_tick_helm_sound(delta)
+	_boat_audio.tick_helm(delta, _wheel, helm_engaged)
 
 	# --- doors ---------------------------------------------------------------
 	# Shut is 0; open swings the leaf back against its own bulkhead. The blocker
@@ -3951,22 +3805,23 @@ func _process(delta: float) -> void:
 			var te: float = 1.92 if door_eng_open else 0.0
 			_door_eng.rotation.y = lerpf(_door_eng.rotation.y, te, 1.0 - exp(-6.0 * delta))
 		if _fuse_lid != null:
-			var tf2: float = -1.85 if fusebox_open else 0.0
-			_fuse_lid.rotation.x = lerpf(_fuse_lid.rotation.x, tf2, 1.0 - exp(-7.0 * delta))
+			# About 70°. The old 106° flung a deep hood off the console.
+			var tf2: float = -1.22 if fusebox_open else 0.0
+			_fuse_lid.rotation.x = lerpf(_fuse_lid.rotation.x, tf2, 1.0 - exp(-8.0 * delta))
 		door_blockers.clear()
 		if absf(_door_fwd.rotation.y) < 0.9:
-			door_blockers.append(AABB(Vector3(-0.55, 0.68, DOOR_Z0 - 0.02),
-					Vector3(1.10, 1.92, 0.16)))
+			door_blockers.append(AABB(Vector3(-0.58, 0.63, DOOR_Z0 - 0.02),
+					Vector3(1.16, 1.98, 0.16)))
 		if absf(_door_aft.rotation.y) < 0.9:
-			door_blockers.append(AABB(Vector3(-0.55, 0.68, DOOR_Z1 - 0.14),
-					Vector3(1.10, 1.92, 0.16)))
+			door_blockers.append(AABB(Vector3(-0.58, 0.63, DOOR_Z1 - 0.14),
+					Vector3(1.16, 1.98, 0.16)))
 	# What the open fuse lid hides. Swept from its hinge: it stands up and leans
 	# forward, so it covers a slab roughly 0.6 m tall just forward of the board.
 	aim_blockers.clear()
-	if _fuse_lid != null and _fuse_lid.rotation.x < -0.9:
+	if _fuse_lid != null and _fuse_lid.rotation.x < -0.6:
 		var hp: Vector3 = _fuse_lid.position
-		aim_blockers.append(AABB(Vector3(hp.x - 0.25, hp.y + 0.02, hp.z - 0.32),
-				Vector3(0.50, 0.62, 0.36)))
+		aim_blockers.append(AABB(Vector3(hp.x - 0.13, hp.y + 0.01, hp.z - 0.04),
+				Vector3(0.26, 0.50, 0.28)))
 	if _locker_door != null:
 		var tl: float = -2.05 if locker_open else 0.0
 		_locker_door.rotation.y = lerpf(_locker_door.rotation.y, tl,
@@ -3986,8 +3841,8 @@ func _process(delta: float) -> void:
 		var tw: float = 2.90 if door_wh_open else 0.0
 		_door_wh.rotation.y = lerpf(_door_wh.rotation.y, tw, 1.0 - exp(-6.0 * delta))
 		if absf(_door_wh.rotation.y) < 0.9:
-			door_blockers.append(AABB(Vector3(-0.55, 2.91, WH_DOOR_Z - 0.08),
-					Vector3(1.10, 1.92, 0.16)))
+			door_blockers.append(AABB(Vector3(-0.62, 2.91, WH_DOOR_Z - 0.10),
+					Vector3(1.20, 1.98, 0.20)))
 
 	for id: String in _switch_levers:
 		var piv: Node3D = _switch_levers[id]
@@ -3996,11 +3851,22 @@ func _process(delta: float) -> void:
 		piv.rotation.x = lerpf(piv.rotation.x, 0.34 if switch_state(id) else -0.34,
 				1.0 - exp(-16.0 * delta))
 		var lm2: StandardMaterial3D = _switch_leds[id]
-		var son := switch_state(id)
-		lm2.emission = Color(0.22, 1.0, 0.34) if son else Color(1.0, 0.16, 0.10)
-		# They go out with everything else when the supply drops.
-		lm2.emission_energy_multiplier = (2.4 if son else 1.0) \
+		var live := circuit_live(id)
+		lm2.emission = Color(1.0, 0.70, 0.28)
+		# Blind glass when the row is open. The only glow is a live circuit,
+		# and it rides the same sagging supply as the lamps.
+		lm2.emission_energy_multiplier = (2.0 if live else 0.0) \
 				* (0.12 if _blackout > 0.0 else (0.55 + 0.45 * _supply))
+	for fu: String in _fuse_bodies:
+		var cart: Node3D = _fuse_bodies[fu]
+		if cart == null:
+			continue
+		var seated := bool(_fuse_in.get(fu, true))
+		var rest: float = float(cart.get_meta("rest_y", 3.676))
+		var ty := rest if seated else rest + 0.032
+		cart.position.y = lerpf(cart.position.y, ty, 1.0 - exp(-14.0 * delta))
+	if tackle != null:
+		tackle.set("gypsy_powered", _fuse_seated("sw_anchor"))
 
 	if _windlass != null and tackle != null:
 		# Turns on the cable that is actually running: metres a second off the
@@ -4054,7 +3920,7 @@ func _process(delta: float) -> void:
 			_sounder_mat.set_shader_parameter("depth_hist", _depth_hist)
 			_sounder_mat.set_shader_parameter("head", _depth_head)
 		_sounder_mat.set_shader_parameter("depth_now", here)
-		_sounder_mat.set_shader_parameter("lit", (1.0 if light_helm else 0.35) * on)
+		_sounder_mat.set_shader_parameter("lit", (1.0 if circuit_live("sw_helm") else 0.35) * on)
 		_sounder_mat.set_shader_parameter("power", _supply)
 
 	if _chart_mat != null and not _chart_tex_set and ocean != null:
@@ -4083,7 +3949,7 @@ func _process(delta: float) -> void:
 			# about where she is, because they are reading the same two numbers.
 			_radar_mat.set_shader_parameter("boat_uv", Vector2(cu, cv))
 			_radar_mat.set_shader_parameter("boat_head", hdg)
-			_radar_mat.set_shader_parameter("lit", (1.0 if light_helm else 0.30) * on)
+			_radar_mat.set_shader_parameter("lit", (1.0 if circuit_live("sw_helm") else 0.30) * on)
 			_radar_mat.set_shader_parameter("power", _supply)
 		if _chart_pin != null:
 			_chart_pin.position = Vector3(1.05 + cu * 0.50, 3.712, 2.63 + cv * 0.50)
@@ -4137,14 +4003,15 @@ func _update_lantern(delta: float) -> void:
 	# glass and rain state ride along to both glass materials.
 	# The sweep phase runs on whether the wiper is ON, so it does not jump when
 	# you switch it: the blade picks up from where it parked.
-	if wiper_on:
+	var wiper_live := circuit_live("sw_wiper")
+	if wiper_live:
 		_wiper_phase += delta * WIPER_RATE
 	var w_ang := 0.0
-	if wiper_on:
+	if wiper_live:
 		w_ang = sin(_wiper_phase) * 1.02
 	# The arm and the dry fan share this angle. Off, it eases to port so the
 	# helm is not a steel bar; on, it locks to the shader.
-	if wiper_on:
+	if wiper_live:
 		_wiper_pose = w_ang
 	else:
 		_wiper_pose = lerpf(_wiper_pose, -1.08, 1.0 - exp(-6.0 * delta))
@@ -4165,7 +4032,7 @@ func _update_lantern(delta: float) -> void:
 	else:
 		_glass_wet = maxf(rain_now, _glass_wet - delta * 0.038)
 	if _front_glass_mat != null:
-		ShaderSet.param(_front_glass_mat, &"wiper_on", 1 if wiper_on else 0)
+		ShaderSet.param(_front_glass_mat, &"wiper_on", 1 if wiper_live else 0)
 		ShaderSet.param(_front_glass_mat, &"wiper_ang", w_ang)
 		ShaderSet.param(_front_glass_mat, &"wiper_phase", _wiper_phase)
 		ShaderSet.param(_front_glass_mat, &"wiper_rate", WIPER_RATE)
@@ -4181,47 +4048,51 @@ func _update_lantern(delta: float) -> void:
 	var n := 0.90 + 0.06 * sin(_t * 6.7) + 0.035 * sin(_t * 19.4 + 1.1)
 	n *= (0.55 + 0.45 * _supply) * (0.10 if _blackout > 0.0 else 1.0)
 	_flicker = lerpf(_flicker, n, 1.0 - exp(-12.0 * delta))
+	var cabin_live := circuit_live("sw_cabin")
+	var helm_live := circuit_live("sw_helm")
+	var flood_live := circuit_live("sw_flood")
+	var beacon_live := circuit_live("sw_beacon")
 	if _cabin_lamp != null:
 		_cabin_lamp.light_energy = lerpf(_cabin_lamp.light_energy,
-				(1.7 * _flicker) if light_cabin else 0.0, 1.0 - exp(-9.0 * delta))
+				(1.7 * _flicker) if cabin_live else 0.0, 1.0 - exp(-9.0 * delta))
 	if _helm_lamp != null:
 		_helm_lamp.light_energy = lerpf(_helm_lamp.light_energy,
-				(1.2 * _flicker) if light_helm else 0.0, 1.0 - exp(-9.0 * delta))
+				(1.2 * _flicker) if helm_live else 0.0, 1.0 - exp(-9.0 * delta))
 	# Phosphor is paint, not a filament — it does not ride the helm switch.
 	if _dial_ink != null:
 		_dial_ink.emission_energy_multiplier = 1.45 + 0.18 * sin(_t * 0.55)
 	if _chart_lamp != null:
 		_chart_lamp.light_energy = lerpf(_chart_lamp.light_energy,
-				(7.5 * _flicker) if light_helm else 0.0, 1.0 - exp(-9.0 * delta))
+				(7.5 * _flicker) if helm_live else 0.0, 1.0 - exp(-9.0 * delta))
 	if _lit_window != null:
-		_lit_window.emission_energy_multiplier = 2.2 * _flicker if light_cabin else 0.0
-	var flood_e := (42.0 * _flicker) if light_flood else 0.0
+		_lit_window.emission_energy_multiplier = 2.2 * _flicker if cabin_live else 0.0
+	var flood_e := (42.0 * _flicker) if flood_live else 0.0
 	for fl: SpotLight3D in _floods:
 		fl.light_energy = lerpf(fl.light_energy, flood_e, 1.0 - exp(-7.0 * delta))
 	if _flood_lens_mat != null:
-		_flood_lens_mat.emission_energy_multiplier = (8.0 * _flicker) if light_flood else 0.0
+		_flood_lens_mat.emission_energy_multiplier = (8.0 * _flicker) if flood_live else 0.0
 	if _flood_beam_mat != null:
 		var haze := 1.0
 		var wr3 := weather as WeatherScript
 		if wr3 != null:
 			haze = 1.0 + clampf(wr3.rain_amount, 0.0, 1.0) * 0.6
 		_flood_beam_mat.set_shader_parameter("intensity",
-				(1.35 * _flicker) if light_flood else 0.0)
+				(1.35 * _flicker) if flood_live else 0.0)
 		_flood_beam_mat.set_shader_parameter("haze", haze)
 	if _helm_glow != null:
-		_helm_glow.emission_energy_multiplier = 2.2 * _flicker if light_helm else 0.0
+		_helm_glow.emission_energy_multiplier = 2.2 * _flicker if helm_live else 0.0
 
 	if _beacon != null:
-		var on := (1.0 * _flicker) if light_beacon else 0.0
+		var on := (1.0 * _flicker) if beacon_live else 0.0
 		_beacon.light_energy = lerpf(_beacon.light_energy, on * 4.8, 1.0 - exp(-10.0 * delta))
 		if _beacon_mat != null:
 			_beacon_mat.emission_energy_multiplier = _beacon.light_energy * 1.8
-	var nav_e := (3.2 * _flicker) if light_beacon else 0.0
+	var nav_e := (3.2 * _flicker) if beacon_live else 0.0
 	for i in _nav_spots.size():
 		_nav_spots[i].light_energy = lerpf(_nav_spots[i].light_energy, nav_e,
 				1.0 - exp(-10.0 * delta))
 	for nm: StandardMaterial3D in _nav_mats:
-		nm.emission_energy_multiplier = (4.5 * _flicker) if light_beacon else 0.0
+		nm.emission_energy_multiplier = (4.5 * _flicker) if beacon_live else 0.0
 
 
 func weather_openness(world_pos: Vector3) -> float:
@@ -4348,7 +4219,9 @@ func _build_dive_locker() -> void:
 	add_child(_locker_door)
 	var leaf := MeshInstance3D.new()
 	var lm := BoxMesh.new()
-	lm.size = Vector3(0.028, Y1 - Y0 - 0.02, 0.48)
+	# Overlap the carcass, do not sit inside it. −0.02 left a bright line
+	# at the head and the kick.
+	lm.size = Vector3(0.028, Y1 - Y0 + 0.02, 0.50)
 	leaf.mesh = lm
 	leaf.material_override = steel
 	leaf.position = Vector3(0.0, 0.0, 0.245)
@@ -4994,7 +4867,10 @@ func _physics_process(delta: float) -> void:
 		_prev_wh_valid = false
 		_com_vy_valid = false
 		return
-	_tick_hull_creak(delta, slammed)
+	var weather_state := weather as WeatherScript
+	var heavy_sea := weather_state != null \
+			and (weather_state.storm or weather_state.wind_speed > 16.5)
+	_boat_audio.tick_hull(delta, global_basis, angular_velocity, heavy_sea, slammed)
 
 
 func _run_aground() -> void:

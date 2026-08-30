@@ -43,6 +43,9 @@ var _chain_mi: MultiMeshInstance3D
 var _anchor_mi: Node3D
 var _link_mat: ShaderMaterial
 var chain_rate := 0.0
+## The gypsy is on the windlass fuse. Pulled, VEERING/WEIGHING freeze —
+## the hook stays where it is, the drum does not turn.
+var gypsy_powered := true
 var _rumble := 0.0
 var _scope_target := -1.0
 var _drop_xz := Vector2.ZERO
@@ -210,17 +213,18 @@ func _physics_process(delta: float) -> void:
 				# never coming taut.
 				if _scope_target < 0.0:
 					_scope_target = minf(anchor_pos.distance_to(rl) * 1.12 + 2.0, MAX_CHAIN)
-				if chain_out < _scope_target:
+				if gypsy_powered and chain_out < _scope_target:
 					chain_out = minf(chain_out + VEER_RATE * delta, _scope_target)
-				else:
+				elif gypsy_powered:
 					state = State.SET
 		State.SET:
 			_rumble = 0.0
 			if not planted:
 				_fall(delta, rl)
 		State.WEIGHING:
-			chain_out = maxf(chain_out - WEIGH_RATE * delta, 0.0)
-			_rumble = 1.0
+			if gypsy_powered:
+				chain_out = maxf(chain_out - WEIGH_RATE * delta, 0.0)
+			_rumble = 1.0 if gypsy_powered else 0.0
 			var to_a := anchor_pos - rl
 			var d := to_a.length()
 			if d > chain_out:
