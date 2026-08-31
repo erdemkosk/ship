@@ -23,6 +23,9 @@ başlar. Komut satırı probe/ekran görüntüsü bayraklarında kart atlanır.
 | Fare tekerleği | Zoom (serbest modda hız) |
 | F | Kamera modu: takip → FPS (teknede otur) → serbest |
 | Fare | FPS modunda bakış doğrudan fareyi izler (ESC: çık) |
+| I | Sırttaki güverte çantasını tek elle öne al / yeniden omuzla |
+| Yön tuşları | Çanta açıkken sağ işaret parmağıyla dört fiziksel yuvadan birini seç |
+| E | Seçili eşyayı al; elde eşya varken seçili boş yuvaya geri bırak |
 | Q / E | Serbest kamerada alçal / yüksel (Shift: hızlı) |
 | Tab | Ayar panelini gizle/göster |
 | `"` | FPS sayacını gizle/göster |

@@ -8,6 +8,7 @@ const BoatAudio := preload("res://scripts/boat_audio_factory.gd")
 const BoatAudioControllerScript := preload("res://scripts/boat_audio_controller.gd")
 const BoatVisuals := preload("res://scripts/boat_visual_factory.gd")
 const BoatMeshBatcherScript := preload("res://scripts/boat_mesh_batcher.gd")
+const DeckBagScript := preload("res://scripts/deck_bag.gd")
 
 # Hull bottom + deck probes. Deck samples (y > 0) only matter when inverted —
 # they keep a capsized boat floating instead of falling through.
@@ -223,6 +224,7 @@ var _depth_head := 0
 var _depth_t := 0.0
 var _radio_set: Node3D
 var _radio_hand: Node3D
+var _deck_bag: Node3D
 var _cord: Array[MeshInstance3D] = []
 var radio_held := false
 ## True while the viewmodel is driving the handset. The cord still follows;
@@ -315,6 +317,11 @@ func _ready() -> void:
 	_build_rain_shields()
 	_mesh_batcher = BoatMeshBatcherScript.new(self)
 	_build_visuals()
+	# The quick-access bag is worn on the player, not left as furniture.  It
+	# remains a child for ownership/save-state, while its own top-level transform
+	# follows the camera during the shoulder-to-lap motion.
+	_deck_bag = DeckBagScript.new()
+	add_child(_deck_bag)
 	_dress_steel()
 	_build_motor()
 	_engine_room = (load("res://scripts/engine_room.gd") as GDScript).new()
@@ -712,6 +719,15 @@ const INTERACT: Array = [
 
 func radio_handset() -> Node3D:
 	return _radio_hand
+
+
+func deck_bag_node() -> Node3D:
+	return _deck_bag
+
+
+func update_deck_bag_pose(delta: float, camera: Camera3D, amount: float) -> void:
+	if _deck_bag != null and _deck_bag.has_method("update_camera_pose"):
+		_deck_bag.call("update_camera_pose", delta, camera, amount)
 
 
 func helm_wheel() -> Node3D:

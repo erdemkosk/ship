@@ -19,6 +19,8 @@ const PROFILES := {
 			"min_hands": 1, "body_commit": 0.62, "gaze_weight": 0.40},
 	"handset": {"motion": "carry", "mass_kg": 0.45, "force_n": 7.0,
 			"min_hands": 1, "body_commit": 0.12, "gaze_weight": 0.30},
+	"shoulder_bag": {"motion": "carry", "mass_kg": 6.5, "force_n": 28.0,
+			"min_hands": 1, "body_commit": 0.68, "gaze_weight": 0.15},
 	"crank": {"motion": "rotary", "mass_kg": 7.0, "force_n": 52.0,
 			"min_hands": 1, "body_commit": 0.82, "gaze_weight": 0.30},
 	"heavy_lift": {"motion": "lift", "mass_kg": 14.0, "force_n": 120.0,

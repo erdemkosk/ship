@@ -26,6 +26,13 @@ func _enter_tree() -> void:
 	_add_action("dive", [KEY_CTRL, KEY_C])
 	# Hold to look at the dive watch on your left wrist.
 	_add_action("watch", [KEY_B])
+	# Body-worn deck bag: one press brings it round, the next shoulders it.
+	_add_action("backpack", [KEY_I])
+	# Once the bag is in the lap, the arrow keys move the physical pointing
+	# finger between its four loops. They intentionally share keys with walking;
+	# boat_camera consumes them while the bag has focus.
+	_add_action("bag_previous", [KEY_LEFT, KEY_UP])
+	_add_action("bag_next", [KEY_RIGHT, KEY_DOWN])
 	# The circuits. Every one of these is also a physical switch under the fuse
 	# box lid — these are the shorthand the status panel prints beside each row,
 	# and the panel is lying if they are not bound.
@@ -179,6 +186,16 @@ func _ready() -> void:
 			_pull_device(rig, "sounder")
 		elif arg == "--hold-radio":
 			_hold_radio(boat)
+		elif arg == "--open-bag":
+			_open_bag_later(rig)
+		elif arg == "--bag-take-shot":
+			_bag_take_shot(rig)
+		elif arg == "--bag-return-shot":
+			_bag_return_shot(rig)
+		elif arg == "--bag-cycle-test":
+			_bag_cycle_test(rig, boat)
+		elif arg == "--bag-item-test":
+			_bag_item_test(rig, boat)
 		elif arg == "--probe-engine":
 			_probe_engine(boat)
 		elif arg == "--drift-test":
@@ -838,6 +855,135 @@ func _pull_device(rig: Node3D, id: String) -> void:
 func _hold_radio(boat: RigidBody3D) -> void:
 	await get_tree().create_timer(1.5).timeout
 	boat.set("radio_held", true)
+
+
+func _open_bag_later(rig: Node3D) -> void:
+	## Repeatable visual review: enter first person, remove the developer panel,
+	## then let the exact I-path settle before the generic screenshot timer fires.
+	await get_tree().create_timer(0.45).timeout
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	await get_tree().create_timer(0.20).timeout
+	rig.call("set_bag_open", true)
+
+
+func _bag_take_shot(rig: Node3D) -> void:
+	## Visual route for the second half of the loop: select slot one, take its
+	## real model, and let the bag finish travelling back to the shoulder.
+	await get_tree().create_timer(0.45).timeout
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("_bag_selected", 0)
+	await get_tree().create_timer(0.20).timeout
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.90).timeout
+	rig.call("_activate_bag_selection")
+
+
+func _bag_return_shot(rig: Node3D) -> void:
+	## Leaves the item hovering at the empty loop immediately before E places it.
+	await get_tree().create_timer(0.45).timeout
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("_bag_selected", 0)
+	await get_tree().create_timer(0.20).timeout
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.90).timeout
+	rig.call("_activate_bag_selection")
+	await get_tree().create_timer(0.65).timeout
+	rig.call("set_bag_open", true)
+
+
+func _bag_cycle_test(rig: Node3D, boat: RigidBody3D) -> void:
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	await get_tree().create_timer(0.35).timeout
+	var opened: bool = bool(rig.call("set_bag_open", true))
+	await get_tree().create_timer(0.95).timeout
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var arms: Node = rig.get("_arms")
+	var claims: Dictionary = arms.get("_claim")
+	var focus_open := float(rig.get("_bag_focus"))
+	var hand_open := str(claims.get("L", "")) == "deckbag"
+	var visible_open := bag != null and bag.visible
+	var grip_eval: Dictionary = arms.call("_grip_evaluation", "L", "deckbag")
+	var wrist_break := rad_to_deg(float(grip_eval.get("wrist_break", PI)))
+	var closed: bool = bool(rig.call("set_bag_open", false))
+	await get_tree().create_timer(0.78).timeout
+	claims = arms.get("_claim")
+	var focus_closed := float(rig.get("_bag_focus"))
+	var hand_closed := str(claims.get("L", "")) != "deckbag"
+	var hidden_closed := bag != null and not bag.visible
+	var complete := opened and closed and focus_open > 0.99 and hand_open \
+			and visible_open and focus_closed < 0.01 and hand_closed and hidden_closed
+	complete = complete and wrist_break < 3.0
+	print("[bag-cycle] open=%.2f hand=%s visible=%s wrist=%.1fdeg natural_f=%s natural_p=%s close=%.2f released=%s hidden=%s complete=%s" % [
+			focus_open, hand_open, visible_open, wrist_break,
+			str(grip_eval.get("fingers", Vector3.ZERO)),
+			str(grip_eval.get("palm", Vector3.ZERO)), focus_closed, hand_closed,
+			hidden_closed, complete])
+	if not complete:
+		push_error("deck bag shoulder cycle incomplete")
+	get_tree().quit()
+
+
+func _bag_item_test(rig: Node3D, boat: RigidBody3D) -> void:
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("_bag_selected", 0)
+	await get_tree().create_timer(0.35).timeout
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var arms: Node = rig.get("_arms")
+	var pointer_report: Dictionary = arms.get("_bag_hand_report")
+	var pointer_wrist := rad_to_deg(float(pointer_report.get("wrist_break", PI)))
+	var pointer_ok := str(arms.get("_bag_hand_mode")) == "point" \
+			and pointer_wrist < 12.0
+	var taken := bool(rig.call("_activate_bag_selection"))
+	await get_tree().create_timer(0.78).timeout
+	var active_after_take := bag.call("active_item_node") as Node3D
+	var closed_after_take := not bool(rig.get("_bag_open"))
+	var empty_after_take := not bool(bag.call("slot_occupied", 0))
+	var hold_after_take := str(arms.get("_bag_hand_mode")) == "hold"
+	var take_ok := taken and active_after_take != null \
+			and empty_after_take and closed_after_take and hold_after_take
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	var preview_ok := int(rig.get("_bag_selected")) == 0 \
+			and int(bag.get("_preview_slot")) == 0
+	var placed := bool(rig.call("_activate_bag_selection"))
+	await get_tree().create_timer(0.16).timeout
+	var place_ok := placed and bag.call("active_item_node") == null \
+			and bool(bag.call("slot_occupied", 0)) \
+			and str(arms.get("_bag_hand_mode")) == "point"
+	var complete := pointer_ok and take_ok and preview_ok and place_ok
+	print("[bag-item] point=%s wrist=%.1fdeg take=%s closes=%s empty=%s hold=%s preview=%s place=%s restored=%s complete=%s" % [
+			pointer_ok, pointer_wrist, taken, closed_after_take, empty_after_take,
+			hold_after_take, preview_ok, placed, place_ok, complete])
+	if not complete:
+		push_error("deck bag take/return cycle incomplete")
+	get_tree().quit()
 
 
 func _probe_engine(boat: RigidBody3D) -> void:
@@ -1646,6 +1792,8 @@ func _process(_delta: float) -> void:
 			goal = _look_boat.to_global(Vector3(1.28, 0.95, 4.10))
 		"locker":
 			goal = _look_boat.to_global(Vector3(-1.44, 1.40, 0.36))
+		"deckbag":
+			goal = _look_boat.to_global(Vector3(1.61, 1.62, 0.84))
 		"stairs":
 			goal = _look_boat.to_global(Vector3(-1.10, 1.65, 2.30))
 		"stairfoot":

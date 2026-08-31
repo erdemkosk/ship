@@ -100,6 +100,11 @@ var _dbg := 0
 ## our own phase so the two arms stay opposite and start/stop without a snap.
 var _stride := 0.0
 var _gait := 0.0
+## The bag's right hand is a continuous body gesture, not a ship fitting: it
+## either points at a physical slot or grips the item that has left that slot.
+var _bag_hand_target: Node3D
+var _bag_hand_mode := ""
+var _bag_hand_report := {}
 
 
 func debug_frames(n: int) -> void:
@@ -124,6 +129,8 @@ func set_active(on: bool) -> void:
 		# them open.
 		_cam.near = 0.05 if _active else 0.10
 	if not _active:
+		_bag_hand_target = null
+		_bag_hand_mode = ""
 		_watch_driver.force_lower()
 		for side: String in ["L", "R"]:
 			_unlock_held(str(_claim.get(side, "")))
@@ -230,6 +237,36 @@ func can_offer(id: String) -> bool:
 	if gate != "" and not bool(boat.call("switch_state", gate)):
 		return false
 	return _pick_hand(id, str(spec.get("preferred", "")), MAX_REACH_ASSIST) != ""
+
+
+func set_body_hold(id: String, on: bool, side := "L") -> bool:
+	## Body-worn gear does not begin at a world fitting under the crosshair. The
+	## shoulder motion places the object; this claims the hand that bears its
+	## weight and lets the ordinary grip solver follow the real handle.
+	if not on:
+		var owner := _owner_of(id)
+		if owner != "":
+			_release(owner)
+		return true
+	if _device_of(id) == null or GripMap.spec_for(id).is_empty():
+		return false
+	if _owner_of(id) == side:
+		return true
+	if _claim.get(side, "") != "":
+		_release(side)
+	_take(side, id)
+	return true
+
+
+func set_bag_hand(target: Node3D, mode := "") -> void:
+	## Camera supplies the real slot/item node after the bag has been posed. A
+	## stale world-space point would visibly swim when the vessel rolls.
+	_bag_hand_target = target
+	_bag_hand_mode = mode if target != null else ""
+	if target == null:
+		_bag_hand_report = {}
+	if target != null and _claim.get("R", "") != "":
+		_release("R")
 
 
 func plan_world_grasp(contact: Vector3, fingers := Vector3.ZERO,
@@ -376,11 +413,11 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		if _claim["L"] == "" and not _watch_up():
 			if _can_take("L", "helm"):
 				_take("L", "helm")
-		if _claim["R"] == "" and _inspect == "":
+		if _claim["R"] == "" and _inspect == "" and _bag_hand_target == null:
 			if _can_take("R", "telegraph"):
 				_take("R", "telegraph")
 	elif engaged == "telegraph":
-		if _claim["R"] == "":
+		if _claim["R"] == "" and _bag_hand_target == null:
 			if _can_take("R", "telegraph"):
 				_take("R", "telegraph")
 	else:
@@ -396,6 +433,8 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 			rig.set_contact_target("L", null)
 			_last_grip["L"] = _watch_driver.drive(_cam, rig)
 			_rest_t["L"] = 0.0
+		elif side == "R" and _bag_hand_target != null:
+			_drive_bag_hand(delta)
 		else:
 			_drive(side, delta)
 	_finish(delta)
@@ -445,8 +484,10 @@ func _drop_instruments() -> void:
 func _locked(side: String) -> bool:
 	if side == "L" and _watch_up():
 		return true
+	if side == "R" and _bag_hand_target != null:
+		return true
 	var id: String = _claim[side]
-	return id == "radio"
+	return id in ["radio", "deckbag"]
 
 
 func _begin(id: String, spec: Dictionary = {}, allow_reach_assist := false) -> bool:
@@ -680,7 +721,7 @@ func _asked_axes(id: String, side: String) -> Dictionary:
 	spec = GripMap.oriented_at_contact(spec, local_contact)
 	var device := _device_of(id)
 	var db: Basis = device.global_basis if device != null else Basis.IDENTITY
-	if boat != null and not _is_camera_held(id):
+	if boat != null and not _is_camera_held(id) and not _camera_space(id):
 		db = (boat as Node3D).get_global_transform_interpolated().basis \
 				* boat.global_basis.inverse() * db
 	return {
@@ -700,7 +741,7 @@ func _side_contact(id: String, side: String) -> Vector3:
 	spec = GripMap.oriented_at_contact(spec, local_contact)
 	var local: Transform3D = GripMap.local_frame(spec, local_contact)
 	var p: Vector3 = device.global_transform * local.origin
-	if boat != null and not _is_camera_held(id):
+	if boat != null and not _is_camera_held(id) and not _camera_space(id):
 		p = (boat as Node3D).get_global_transform_interpolated() \
 				* (boat.global_transform.affine_inverse() * p)
 	return p
@@ -708,6 +749,38 @@ func _side_contact(id: String, side: String) -> Vector3:
 
 func _peek_contact(id: String) -> Vector3:
 	return _side_contact(id, "R")
+
+
+func _drive_bag_hand(_delta: float) -> void:
+	if _bag_hand_target == null or not is_instance_valid(_bag_hand_target):
+		_bag_hand_target = null
+		_bag_hand_mode = ""
+		_rest_hand("R")
+		return
+	rig.set_contact_target("R", null)
+	var object_point := _bag_hand_target.global_position
+	var contact := object_point
+	var axes: Dictionary
+	var pose := "power"
+	if _bag_hand_mode == "point":
+		# Build the extended index backwards from the selected object. The palm is
+		# one finger-length away on the natural shoulder-to-slot line, so the
+		# fingertip lands on the object without asking the wrist to kink sideways.
+		var at_slot: Dictionary = rig.natural_axes("R", object_point)
+		var finger: Vector3 = at_slot.get("fingers", -_cam.global_basis.z)
+		contact = object_point - finger.normalized() * 0.105
+		axes = rig.natural_axes("R", contact)
+		axes["fingers"] = (object_point - contact).normalized()
+		pose = "point"
+	else:
+		# The item origin is authored at its grip zone.  A natural frame keeps the
+		# wrist straight across all four different silhouettes; the power pose
+		# supplies the actual cylindrical wrap.
+		axes = rig.natural_axes("R", contact)
+	_last_grip["R"] = contact
+	_rest_t["R"] = 0.0
+	_bag_hand_report = rig.consider("R", contact, axes["fingers"], axes["palm"])
+	rig.grip("R", contact, axes["fingers"], axes["palm"], 1.0, pose, 1.0, false)
 
 
 func _drive(side: String, delta: float) -> void:
@@ -724,7 +797,11 @@ func _drive(side: String, delta: float) -> void:
 		rig.set_held_attachment(side, _device_of(id), g.transform)
 	else:
 		rig.clear_held_attachment(side)
-	rig.set_contact_target(side, _device_of(id))
+	# The bag's device bounds include the entire half-metre canvas body. Feeding
+	# that to the generic finger collision solver makes it open the hand to avoid
+	# the bag instead of closing round the narrow top handle. Its dedicated pose
+	# is authored to that handle, so it deliberately bypasses whole-object bounds.
+	rig.set_contact_target(side, null if _camera_space(id) else _device_of(id))
 	var hold := 1.0
 	if id == "helm":
 		hold = _helm_driver.ride(side, delta, boat, _device_of("helm"), g)
@@ -737,7 +814,7 @@ func _drive(side: String, delta: float) -> void:
 	# however far the boat moved that tick — centimetres in a seaway — and the
 	# hand shimmers between two positions. Remapping the grip through the same
 	# interpolated frame the camera uses puts hand and eye on one timeline.
-	if boat != null and not held_in_view:
+	if boat != null and not held_in_view and not _camera_space(id):
 		xf = (boat as Node3D).get_global_transform_interpolated() \
 				* (boat.global_transform.affine_inverse() * xf)
 	# A hand starts clear of the fitting, closes as the palm arrives, makes the
@@ -847,6 +924,10 @@ func _is_camera_held(id: String) -> bool:
 		return false
 	var frame: Dictionary = spec.get("held_frame", {})
 	return not frame.is_empty() and _held_active(spec, frame)
+
+
+func _camera_space(id: String) -> bool:
+	return bool(GripMap.spec_for(id).get("camera_space", false))
 
 
 func _unlock_held(id: String) -> void:

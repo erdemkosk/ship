@@ -100,6 +100,14 @@ const POSES := {
 		"middle": [0.56, 0.78, 0.70], "ring": [0.60, 0.82, 0.74],
 		"pinky": [0.50, 0.66, 0.60],
 	},
+	# A narrow fabric handle under load. Unlike a door handle the long fingers
+	# close fully beneath the strap; leaving them half open makes a six-kilo bag
+	# look as if it is hanging from the wrist by magic.
+	"bag_handle": {
+		"thumb": [0.54, 0.66, 0.46], "index": [0.84, 1.04, 0.94],
+		"middle": [0.92, 1.12, 1.02], "ring": [0.98, 1.18, 1.08],
+		"pinky": [1.02, 1.22, 1.12],
+	},
 	# Precision pinch: thumb and index meet; unused fingers are curled safely
 	# away instead of floating open through the key or cartridge.
 	"pinch": {

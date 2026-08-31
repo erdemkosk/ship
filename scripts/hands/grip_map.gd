@@ -122,6 +122,23 @@ const ENTRIES := {
 			"lock_property": "radio_pose_locked",
 		},
 	},
+	"deckbag": {
+		"node": "deck_bag_node",
+		"kind": Kind.MODE,
+		"pose": "bag_handle",
+		"behavior": "shoulder_bag",
+		"preferred": "L",
+		# A loaded fabric handle is not a rigid machine control.  Keep the palm on
+		# the real handle but allow the grasp solver to align the wrist with the
+		# approaching forearm; the curled finger pose supplies the wrap around it.
+		"welded": false,
+		# The bag owns its shoulder-to-lap camera arc.  The hand follows this
+		# authored handle and must not be remapped through the boat interpolation.
+		"camera_space": true,
+		"pos": Vector3(0.0, 0.292, 0.0),
+		"fingers": Vector3(0.0, -1.0, 0.0),
+		"palm": Vector3(0.0, 0.0, -1.0),
+	},
 	"radar": {
 		"node": "radar_housing",
 		"kind": Kind.GESTURE,
@@ -407,6 +424,8 @@ static func validation_error(spec: Dictionary) -> String:
 
 
 static func welded(spec: Dictionary) -> bool:
+	if spec.has("welded"):
+		return bool(spec.get("welded", false))
 	var k: int = int(spec.get("kind", Kind.GESTURE))
 	return k == Kind.MODE or k == Kind.HOLD or bool(spec.get("on_rim", false))
 

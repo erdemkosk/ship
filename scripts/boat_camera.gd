@@ -108,6 +108,14 @@ var _blink := 0.0
 var _blink_wait := 4.0
 var _blink_tween: Tween
 var _blink_again := false
+var _camera_attrs: CameraAttributesPractical
+## The deck bag is body-worn. I swings it from the right shoulder into the
+## lap; the continuous amount drives body weight, focus and the real 3D prop.
+var _bag_open := false
+var _bag_focus := 0.0
+var _bag_saved_yaw := 0.0
+var _bag_saved_pitch := 0.0
+var _bag_selected := 0
 
 
 func _ready() -> void:
@@ -120,6 +128,12 @@ func _ready() -> void:
 	_cam.current = true
 	_cam.top_level = true  # free of rig transform; we place it explicitly
 	_cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_camera_attrs = CameraAttributesPractical.new()
+	_camera_attrs.dof_blur_far_enabled = false
+	_camera_attrs.dof_blur_far_distance = 0.82
+	_camera_attrs.dof_blur_far_transition = 0.48
+	_camera_attrs.dof_blur_amount = 0.0
+	_cam.attributes = _camera_attrs
 	# Measured IK rig + per-hand grip claims (scripts/hands/).
 	_arms = (load("res://scripts/hands/hands.gd") as GDScript).new()
 	add_child(_arms)
@@ -215,6 +229,8 @@ func _start_catalog_interaction(id: String, spec: Dictionary) -> bool:
 
 
 func set_mode(m: int) -> void:
+	if m != Mode.FPS:
+		_reset_deck_bag()
 	mode = m
 	free_mode = mode == Mode.FREE
 	match mode:
@@ -274,6 +290,23 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if get_tree().get_first_node_in_group("main_menu") != null:
 		return
+	if event.is_action_pressed("backpack"):
+		set_bag_open(not _bag_open)
+		get_viewport().set_input_as_handled()
+		return
+	if mode == Mode.FPS and _bag_open and _bag_focus > 0.58:
+		if event.is_action_pressed("bag_previous"):
+			_shift_bag_selection(-1)
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_pressed("bag_next"):
+			_shift_bag_selection(1)
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_pressed("use"):
+			_activate_bag_selection()
+			get_viewport().set_input_as_handled()
+			return
 	if event.is_action_pressed("ui_cancel"):
 		if _panel_open() and _panel != null and is_instance_valid(_panel):
 			var pc: CanvasItem = _panel.get("_panel") as CanvasItem
@@ -291,6 +324,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		# Panel up: the pointer is for the sliders, not for looking around.
 		if _panel_open():
 			return
+		if mode == Mode.FPS and _bag_focus > 0.03:
+			return # the neck and eyes are committed to the bag in the lap
 		if mode == Mode.FPS and _chart_t > 0.0 and _chart_t < 1.0:
 			return                      # leaning in; the camera is driving
 		if mode == Mode.FPS:
@@ -336,6 +371,139 @@ func _unhandled_input(event: InputEvent) -> void:
 				dist = clampf(dist * 1.1, 7.0, 60.0)
 
 
+func set_bag_open(open: bool) -> bool:
+	## Public for the repeatable screenshot route as well as the I binding.
+	if mode != Mode.FPS or target == null:
+		return false
+	if open and (_panel_open() or _flag(_walker, "swimming") \
+			or _flag(_walker, "on_sea_ladder")):
+		return false
+	if _bag_open == open:
+		return true
+	_bag_open = open
+	if open:
+		_bag_saved_yaw = yaw
+		_bag_saved_pitch = pitch
+		# A six-kilo bag cannot pass through hands already planted on the ship.
+		target.set("helm_engaged", false)
+		target.set("telegraph_engaged", false)
+		target.set("chart_engaged", false)
+		if _flag(target, "radio_held"):
+			target.set("radio_held", false)
+		if _arms != null and _arms.has_method("set_body_hold"):
+			_arms.set_body_hold("deckbag", true, "L")
+		var bag := _deck_bag()
+		if bag != null and bag.call("active_item_node") != null:
+			var empty := int(bag.call("first_empty_slot"))
+			if empty >= 0:
+				_bag_selected = empty
+	else:
+		var bag := _deck_bag()
+		if bag != null:
+			bag.call("set_preview_slot", -1)
+	return true
+
+
+func _deck_bag() -> Node3D:
+	if target == null or not target.has_method("deck_bag_node"):
+		return null
+	return target.call("deck_bag_node") as Node3D
+
+
+func _shift_bag_selection(direction: int) -> void:
+	var bag := _deck_bag()
+	if bag == null:
+		return
+	var count := int(bag.call("slot_count"))
+	if count <= 0:
+		return
+	_bag_selected = posmod(_bag_selected + direction, count)
+
+
+func _activate_bag_selection() -> bool:
+	## E has two symmetrical meanings: remove what the index finger indicates,
+	## or insert the carried object into the indicated empty loop.
+	var bag := _deck_bag()
+	if bag == null or _bag_focus < 0.82:
+		return false
+	var active := bag.call("active_item_node") as Node3D
+	if active == null:
+		if not bool(bag.call("slot_occupied", _bag_selected)):
+			return false
+		active = bag.call("take_slot", _bag_selected) as Node3D
+		if active == null:
+			return false
+		if _arms != null and _arms.has_method("set_bag_hand"):
+			_arms.set_bag_hand(active, "hold")
+		set_bag_open(false)
+		return true
+	if bool(bag.call("slot_occupied", _bag_selected)):
+		return false
+	if _arms != null and _arms.has_method("set_bag_hand"):
+		_arms.set_bag_hand(null, "")
+	return bool(bag.call("place_active_in_slot", _bag_selected))
+
+
+func _refresh_bag_hand() -> void:
+	if _arms == null or not _arms.has_method("set_bag_hand"):
+		return
+	var bag := _deck_bag()
+	if bag == null:
+		_arms.set_bag_hand(null, "")
+		return
+	var active := bag.call("active_item_node") as Node3D
+	if active != null:
+		_arms.set_bag_hand(active, "hold")
+	elif _bag_open and _bag_focus > 0.58:
+		_arms.set_bag_hand(bag.call("slot_target", _bag_selected) as Node3D, "point")
+	else:
+		_arms.set_bag_hand(null, "")
+
+
+func _reset_deck_bag() -> void:
+	_bag_open = false
+	_bag_focus = 0.0
+	if _arms != null and _arms.has_method("set_body_hold"):
+		_arms.set_body_hold("deckbag", false, "L")
+	if _arms != null and _arms.has_method("set_bag_hand"):
+		_arms.set_bag_hand(null, "")
+	var bag := _deck_bag()
+	if bag != null:
+		bag.call("set_preview_slot", -1)
+	if target != null and _cam != null and target.has_method("update_deck_bag_pose"):
+		target.update_deck_bag_pose(0.0, _cam, 0.0)
+	if _camera_attrs != null:
+		_camera_attrs.dof_blur_far_enabled = false
+		_camera_attrs.dof_blur_amount = 0.0
+
+
+func _update_deck_bag(delta: float) -> void:
+	if _bag_open and (_flag(_walker, "swimming") \
+			or _flag(_walker, "on_sea_ladder")):
+		_bag_open = false
+	var goal := 1.0 if _bag_open else 0.0
+	var duration := 0.78 if _bag_open else 0.62
+	_bag_focus = move_toward(_bag_focus, goal, delta / duration)
+	if _arms != null and _arms.has_method("set_body_hold"):
+		if _bag_open:
+			_arms.set_body_hold("deckbag", true, "L")
+		elif _bag_focus <= 0.035:
+			_arms.set_body_hold("deckbag", false, "L")
+	if _camera_attrs != null:
+		var blur := smoothstep(0.18, 0.86, _bag_focus)
+		_camera_attrs.dof_blur_far_enabled = blur > 0.01
+		_camera_attrs.dof_blur_far_distance = lerpf(2.4, 0.82, blur)
+		_camera_attrs.dof_blur_far_transition = lerpf(1.6, 0.42, blur)
+		_camera_attrs.dof_blur_amount = 0.18 * blur
+	var bag := _deck_bag()
+	if bag != null:
+		var active := bag.call("active_item_node") as Node3D
+		var preview := -1
+		if active != null and _bag_open and _bag_focus > 0.58 \
+				and not bool(bag.call("slot_occupied", _bag_selected)):
+			preview = _bag_selected
+		bag.call("set_preview_slot", preview)
+
 func _process(delta: float) -> void:
 	match mode:
 		Mode.FPS:
@@ -380,6 +548,7 @@ func _process_follow(delta: float) -> void:
 func _process_fps(delta: float) -> void:
 	if target == null:
 		return
+	_update_deck_bag(delta)
 	# Physics interpolation is on project-wide, so the boat's MESH is drawn at a
 	# smoothly interpolated transform while `global_transform` still reports the
 	# last physics tick. Reading the raw transform pins the eye to 60 Hz inside a
@@ -410,7 +579,7 @@ func _process_fps(delta: float) -> void:
 	var eye: Vector3 = _walker.eye_local()
 
 	var cand := {}
-	if engaged != "chart":
+	if engaged != "chart" and _bag_focus < 0.08:
 		# Ray against a sphere per fitting, nearest hit wins. It used to score by
 		# alignment alone, which meant a big target behind a small one could take
 		# the aim off it — you could be looking straight down a switch and get
@@ -492,11 +661,11 @@ func _process_fps(delta: float) -> void:
 		_last_aim = str(cand["id"]) if not cand.is_empty() else ""
 	if _reticle != null:
 		_reticle.set("aim_target", 0.0 if cand.is_empty() else 1.0)
-		_reticle.visible = mode == Mode.FPS
+		_reticle.visible = mode == Mode.FPS and _bag_focus < 0.08
 
 	var candidate_spec: Dictionary = HandGripMap.spec_for(str(cand.get("id", ""))) \
 			if not cand.is_empty() else {}
-	if Input.is_action_just_pressed("use"):
+	if Input.is_action_just_pressed("use") and _bag_focus < 0.08:
 		if cand.is_empty() and engaged == "" and _flag(target, "radio_held"):
 			# Holding the handset with nothing else under the crosshair: E puts
 			# it back on its hook. You should not have to hunt for the cradle
@@ -532,7 +701,19 @@ func _process_fps(delta: float) -> void:
 				else ("chart" if target.get("chart_engaged") else ""))
 
 	if _prompt != null:
-		if _walker.get("on_sea_ladder"):
+		if _bag_focus > 0.65:
+			var bag := _deck_bag()
+			var active := bag.call("active_item_node") as Node3D if bag != null else null
+			var slot_no := _bag_selected + 1
+			if active == null:
+				var label := str(bag.call("slot_label", _bag_selected)) if bag != null else ""
+				_prompt.text = "←/→ — choose   ·   %d: %s   ·   E — take   ·   I — shoulder" % [slot_no, label]
+			elif bag != null and not bool(bag.call("slot_occupied", _bag_selected)):
+				_prompt.text = "←/→ — choose   ·   %d: empty   ·   E — place   ·   I — shoulder" % slot_no
+			else:
+				_prompt.text = "←/→ — choose   ·   %d: occupied   ·   find an empty slot" % slot_no
+			_prompt.visible = true
+		elif _walker.get("on_sea_ladder"):
 			_prompt.text = "W/S — climb   ·   SPACE — let go"
 			_prompt.visible = true
 		elif _walker.get("swimming"):
@@ -626,16 +807,20 @@ func _process_fps(delta: float) -> void:
 					+ r2 * Input.get_axis("boat_left", "boat_right")
 			if wish.length() > 1.0:
 				wish = wish.normalized()
+			wish *= 0.0 if _bag_focus > 0.55 else lerpf(1.0, 0.28, _bag_focus)
 		# Raw stick as well as the deck-projected heading: in the water and on
 		# the rungs "forward" is not a direction on the deck plane.
 		var axes := Vector2.ZERO
 		if not _panel_open():
 			axes = Vector2(Input.get_axis("boat_left", "boat_right"),
 					Input.get_axis("boat_backward", "boat_forward"))
+			axes *= 0.0 if _bag_focus > 0.55 else lerpf(1.0, 0.28, _bag_focus)
 		_walker.update(delta, target, wish,
-				Input.is_action_just_pressed("jump") and not _panel_open(),
+				Input.is_action_just_pressed("jump") and not _panel_open() \
+						and _bag_focus < 0.08,
 				look_fwd, axes,
-				Input.is_action_pressed("jump") and not _panel_open(),
+				Input.is_action_pressed("jump") and not _panel_open() \
+						and _bag_focus < 0.08,
 				Input.is_action_pressed("dive") and not _panel_open())
 		_tick_stair_step()
 
@@ -666,6 +851,11 @@ func _process_fps(delta: float) -> void:
 	var amp := walking * 0.022
 	eye_l.y += sin(_bob * 2.0) * amp
 	eye_l.x += sin(_bob) * amp * 0.9
+	# Counter-lean as six kilos travel round the right shoulder.  It is strongest
+	# in the middle of the swing and settles once the weight is supported in lap.
+	var bag_load_arc := sin(_bag_focus * PI)
+	eye_l.x -= bag_load_arc * 0.026
+	eye_l.y -= _bag_focus * 0.012 + bag_load_arc * 0.010
 
 	# A long hand reach moves the person, not only the arm. hands.gd publishes
 	# the camera-local share of the same lean used by IK; convert it into the
@@ -697,7 +887,17 @@ func _process_fps(delta: float) -> void:
 	# Lean a fraction of her heel into the view. Full deck roll is sickening and
 	# a dead-level horizon feels like standing on a photograph; a third of it,
 	# capped, reads as being aboard.
-	if engaged == "chart" and _chart_t < 1.0:
+	if _bag_focus > 0.001:
+		# Eyes follow the weight into the lap, then return to exactly the heading
+		# they left when the bag goes back over the shoulder.
+		var look_amount := smoothstep(0.0, 0.72, _bag_focus)
+		var bag_pitch := lerpf(_bag_saved_pitch, -0.48, look_amount)
+		var bk := 1.0 - exp(-9.5 * delta)
+		yaw = lerp_angle(yaw, _bag_saved_yaw, bk)
+		pitch = lerpf(pitch, bag_pitch, bk)
+		_look_yaw = yaw
+		_look_pitch = pitch
+	elif engaged == "chart" and _chart_t < 1.0:
 		# Turn the head onto the paper. Only while leaning in — once you are
 		# there the mouse is yours again, so you can glance up at the window
 		# without having to stand off the table first.
@@ -747,15 +947,21 @@ func _process_fps(delta: float) -> void:
 	_was_ladder = on_lad
 
 	var heel := asin(clampf(xf.basis.x.y, -1.0, 1.0))
-	_roll = lerpf(_roll, clampf(heel * 0.24, -0.09, 0.09), 1.0 - exp(-6.0 * delta))
+	var bag_roll := bag_load_arc * 0.025
+	_roll = lerpf(_roll, clampf(heel * 0.24 + bag_roll, -0.11, 0.11),
+			1.0 - exp(-6.0 * delta))
 	_cam.global_basis = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) \
 			* Basis(Vector3.BACK, _roll)
+	if target.has_method("update_deck_bag_pose"):
+		target.update_deck_bag_pose(delta, _cam, _bag_focus)
+	_refresh_bag_hand()
 	if _arms != null:
 		if _arms.has_method("set_watch"):
 			# B is a HOLD: the arm is up while the button is, gone when it is
 			# not. No toggle to forget about with your hand across the view.
 			_arms.set_watch(
-					Input.is_action_pressed("watch") and not _panel_open(),
+					Input.is_action_pressed("watch") and not _panel_open() \
+							and _bag_focus < 0.08,
 					float(weather.get("time_of_day")) if weather != null else 12.0,
 					float(_walker.get("swim_depth")))
 		if _arms.has_method("set_sea_ladder"):
@@ -1343,13 +1549,6 @@ func _inum(obj: Object, key: String) -> int:
 	if typeof(v) == TYPE_FLOAT:
 		return int(v)
 	return 0
-
-
-
-
-
-
-
 
 
 
