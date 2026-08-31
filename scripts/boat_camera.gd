@@ -176,6 +176,44 @@ func _on_hand_action_contact(id: String) -> void:
 	InteractionActions.execute(target, id, spec)
 
 
+func _start_catalog_interaction(id: String, spec: Dictionary) -> bool:
+	## One admission/dispatch route for every catalog entry. Modes and full-body
+	## special drivers declare their result as data; authored actions only begin
+	## a hand gesture here and commit later in _on_hand_action_contact().
+	if spec.is_empty():
+		return false
+	var kind := int(spec.get("kind", HandGripMap.Kind.GESTURE))
+	var accepted := false
+	if kind != HandGripMap.Kind.SPECIAL and _arms != null:
+		_arms.boat = target
+		accepted = bool(_arms.notify_use(id, true))
+	if str(spec.get("action", "")) != "":
+		return accepted
+	if kind == HandGripMap.Kind.MODE:
+		if accepted:
+			var property := str(spec.get("mode_property", ""))
+			if property != "":
+				target.set(property, true)
+		return accepted
+	if kind != HandGripMap.Kind.SPECIAL:
+		return false
+	match str(spec.get("special", "")):
+		"mode":
+			var property := str(spec.get("mode_property", ""))
+			if property != "":
+				target.set(property, true)
+			return true
+		"ladder":
+			_walker.grab_sea_ladder(target)
+			return true
+		"wear":
+			target.toggle_switch("divegear")
+			if _arms != null and _arms.has_method("face_gesture"):
+				_arms.face_gesture("wear")
+			return true
+	return false
+
+
 func set_mode(m: int) -> void:
 	mode = m
 	free_mode = mode == Mode.FREE
@@ -456,6 +494,8 @@ func _process_fps(delta: float) -> void:
 		_reticle.set("aim_target", 0.0 if cand.is_empty() else 1.0)
 		_reticle.visible = mode == Mode.FPS
 
+	var candidate_spec: Dictionary = HandGripMap.spec_for(str(cand.get("id", ""))) \
+			if not cand.is_empty() else {}
 	if Input.is_action_just_pressed("use"):
 		if cand.is_empty() and engaged == "" and _flag(target, "radio_held"):
 			# Holding the handset with nothing else under the crosshair: E puts
@@ -472,11 +512,10 @@ func _process_fps(delta: float) -> void:
 		elif _arms != null and _arms.inspecting_id() != "":
 			_arms.boat = target
 			_arms.notify_use(_arms.inspecting_id())
-		elif not cand.is_empty() and str(cand["id"]) == "ignition" \
-				and target.has_method("toggle_switch"):
-			if _arms != null:
-				_arms.boat = target
-				_arms.notify_use("ignition")
+		elif not cand.is_empty() and str(candidate_spec.get("action", "")) != "":
+			# Physical controls outrank releasing the current station. This lets
+			# the free hand turn the key or a switch while the other stays planted.
+			_start_catalog_interaction(str(cand["id"]), candidate_spec)
 		elif engaged == "helm":
 			target.set("helm_engaged", false)
 			_walker.spawn_at(target.HELM_STAND)
@@ -487,42 +526,7 @@ func _process_fps(delta: float) -> void:
 			target.set("chart_engaged", false)
 			_walker.spawn_at(target.CHART_STAND)
 		elif not cand.is_empty():
-			var iid := str(cand["id"])
-			var hand_accepted := false
-			if _arms != null:
-				_arms.boat = target
-				hand_accepted = bool(_arms.notify_use(iid, true))
-			match iid:
-				"helm":
-					if hand_accepted:
-						target.set("helm_engaged", true)
-				"telegraph":
-					if hand_accepted:
-						target.set("telegraph_engaged", true)
-				"chart":
-					target.set("chart_engaged", true)
-				"radio", "radar", "sounder":
-					pass
-				"sea_ladder":
-					_walker.grab_sea_ladder(target)
-				"locker":
-					pass # committed by the hand at contact
-				"divegear":
-					target.toggle_switch("divegear")
-					if _arms != null and _arms.has_method("face_gesture"):
-						_arms.face_gesture("wear")
-				"windlass":
-					pass # committed by the hand at contact
-				"lights":
-					if target.has_method("toggle_lights"):
-						target.toggle_lights()
-				_:
-					# Authored fittings commit from action_contact, after the fingers land.
-					var cid := str(cand["id"])
-					if (cid.begins_with("sw_") or cid.begins_with("door_")
-							or cid.begins_with("fu_")
-							or cid == "fusebox" or cid == "stove"):
-						pass # committed by the hand at contact
+			_start_catalog_interaction(str(cand["id"]), candidate_spec)
 		engaged = "helm" if target.get("helm_engaged") \
 				else ("telegraph" if target.get("telegraph_engaged") \
 				else ("chart" if target.get("chart_engaged") else ""))

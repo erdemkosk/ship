@@ -24,6 +24,8 @@ const LADDER_DRIVER := preload("res://scripts/hands/ladder_hand_driver.gd")
 const WATCH_DRIVER := preload("res://scripts/hands/watch_hand_driver.gd")
 const FACE_DRIVER := preload("res://scripts/hands/face_hand_driver.gd")
 const SWIM_DRIVER := preload("res://scripts/hands/swim_hand_driver.gd")
+const INTERACTION_BEHAVIOR := preload("res://scripts/hands/interaction_behavior.gd")
+const HELD_OBJECT_FRAMER := preload("res://scripts/hands/held_object_framer.gd")
 
 ## Fired at the exact contact phase of a hand-authored interaction.  The camera
 ## owns gameplay intent; the hand owns when flesh actually reaches the control.
@@ -60,6 +62,23 @@ var _gesture: Dictionary = {"L": null, "R": null}
 ## middle of the view, which reads as an arm stuck to the door it just opened.
 var _rest_t := {"L": 1.0, "R": 1.0}
 var _last_grip := {"L": Vector3.ZERO, "R": Vector3.ZERO}
+## The chosen side is sticky per fitting. A competing arm must beat it by a
+## meaningful quality margin, not by one noisy millimetre on a rolling boat.
+var _selection_side := {}
+var _grasp_quality := {}
+var _multi_required := {}
+var _multi_contact := {}
+var _held_blend_time := {}
+## A carried prop cannot remain in a physics-interpolated RigidBody hierarchy:
+## its logical transform is correct, but the renderer applies the parent's
+## previous/current physics blend once more and it swims through the palm.
+## Preserve its scene ownership and temporarily reparent it under the exact
+## camera/body node which also owns the rendered arms.
+var _held_space_state := {}
+## Local-space visual hulls for persistent held objects. They are measured from
+## the live meshes once, so a future weapon/tool cannot escape the camera just
+## because its origin happens to be on screen.
+var _held_point_cache := {}
 ## Both hands on the boarding ladder. Not a claim like the others: there is no
 ## device node to parent a grip to, the rungs are boat.gd constants, and BOTH
 ## hands are on it at once and alternate — which is the only thing that makes a
@@ -106,6 +125,8 @@ func set_active(on: bool) -> void:
 		_cam.near = 0.05 if _active else 0.10
 	if not _active:
 		_watch_driver.force_lower()
+		for side: String in ["L", "R"]:
+			_unlock_held(str(_claim.get(side, "")))
 		if boat != null:
 			# Leaving first person parks whatever the powered rails hold.
 			boat.call("set_radar_pull", 0.0)
@@ -140,7 +161,38 @@ func body_lean_local() -> Vector3:
 		return Vector3.ZERO
 	# The rest remains in the shoulders/waist model. Capping the eye travel
 	# prevents a far fitting from pulling the camera through its own bulkhead.
-	return (rig.lean() * (0.56 * phase)).limit_length(0.27)
+	var body_commit := 0.0
+	for side: String in ["L", "R"]:
+		var held_id := str(_claim.get(side, ""))
+		if held_id != "":
+			var profile := INTERACTION_BEHAVIOR.profile(GripMap.spec_for(held_id))
+			body_commit = maxf(body_commit, float(profile.get("body_commit", 0.0)))
+	return (rig.lean() * ((0.56 + body_commit * 0.18) * phase)).limit_length(0.30)
+
+
+func grasp_quality(id: String) -> Dictionary:
+	## Runtime audit surface for tests/debug UI: planner score plus the live
+	## per-phalanx contact result for whichever hand currently owns the object.
+	var report: Dictionary = (_grasp_quality.get(id, {}) as Dictionary).duplicate(true)
+	var side := _owner_of(id)
+	if side != "":
+		report["finger_contact"] = rig.finger_contact_report(side)
+	return report
+
+
+func held_frame_report(id: String) -> Dictionary:
+	## Debug/test surface expressed in normalized camera space. `visible` means
+	## the complete object hull and palm allowance fit inside its authored frame.
+	var spec := GripMap.spec_for(id)
+	var frame: Dictionary = spec.get("held_frame", {})
+	var device := _device_of(id)
+	if frame.is_empty() or device == null or _cam == null:
+		return {}
+	var view_size := _cam.get_viewport().get_visible_rect().size
+	var aspect := view_size.x / maxf(view_size.y, 1.0)
+	var local_xf := _cam.global_transform.affine_inverse() * device.global_transform
+	return HELD_OBJECT_FRAMER.report(local_xf, frame, _cam.fov, aspect,
+			_held_visual_points(id, device, frame))
 
 
 func notify_use(id: String, allow_reach_assist := false) -> bool:
@@ -233,6 +285,8 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		# Ahead of everything, including the swimming test: wiping the glass is
 		# a thing you do precisely when you are in the water.
 		rig.set_visible_hands(true)
+		rig.set_contact_target("L", null)
+		rig.set_contact_target("R", null)
 		var face_result: Dictionary = _face_driver.drive(delta, _cam, rig)
 		for side: String in face_result.get("contacts", {}):
 			_last_grip[side] = face_result["contacts"][side]
@@ -247,6 +301,8 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 	if _ladder_driver.is_active() and _active and boat != null:
 		rig.set_visible_hands(true)
 		_claim = {"L": "", "R": ""}
+		rig.set_contact_target("L", null)
+		rig.set_contact_target("R", null)
 		_inspect = ""
 		for side: String in ["L", "R"]:
 			_last_grip[side] = _ladder_driver.drive(side, delta, boat, rig)
@@ -256,9 +312,12 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 	if swimming and _active:
 		rig.set_visible_hands(true)
 		_claim = {"L": "", "R": ""}
+		rig.set_contact_target("L", null)
+		rig.set_contact_target("R", null)
 		_inspect = ""
 		_swim_driver.advance(delta)
 		if _watch_up():
+			rig.set_contact_target("L", null)
 			_last_grip["L"] = _watch_driver.drive(_cam, rig)
 			_rest_t["L"] = 0.0
 		else:
@@ -334,6 +393,7 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		if _claim[side] == "":
 			_rest_t[side] = minf(_rest_t[side] + delta, 1.0)
 		if side == "L" and _watch_up():
+			rig.set_contact_target("L", null)
 			_last_grip["L"] = _watch_driver.drive(_cam, rig)
 			_rest_t["L"] = 0.0
 		else:
@@ -358,8 +418,11 @@ func _take(side: String, id: String) -> void:
 
 
 func _release(side: String) -> void:
+	var old_id := str(_claim.get(side, ""))
 	_claim[side] = ""
 	_gesture[side] = null
+	if _owner_of(old_id) == "":
+		_unlock_held(old_id)
 	rig.set_reach_assist(side, 0.0)
 	rig.release(side)
 
@@ -391,6 +454,9 @@ func _begin(id: String, spec: Dictionary = {}, allow_reach_assist := false) -> b
 		spec = GripMap.spec_for(id)
 	if spec.is_empty() or rig == null or not rig.is_ready():
 		return false
+	var behavior := INTERACTION_BEHAVIOR.profile(spec)
+	if int(behavior.get("min_hands", 1)) >= 2:
+		return _begin_two_hand(id, spec, allow_reach_assist)
 	# A toggle hold (currently the handset) is returned by touching the object
 	# that is already in the hand.  Keep the claim until the return gesture has
 	# reached contact; otherwise it teleports to its cradle before the fingers
@@ -417,6 +483,31 @@ func _begin(id: String, spec: Dictionary = {}, allow_reach_assist := false) -> b
 	_take(side, id)
 	if float(spec.get("gesture", 0.0)) > 0.0:
 		_start_gesture(side, id, spec, false)
+	return true
+
+
+func _begin_two_hand(id: String, spec: Dictionary,
+		allow_reach_assist: bool) -> bool:
+	## Heavy runtime interactables reserve both arms and commit only after both
+	## palms have independently passed the same anatomical/path checks.
+	if _locked("L") or _locked("R"):
+		return false
+	var assist_cap := MAX_REACH_ASSIST if allow_reach_assist else 0.0
+	var candidates := {
+		"L": _planned_candidate("L", id, assist_cap, 2),
+		"R": _planned_candidate("R", id, assist_cap, 2),
+	}
+	for side: String in ["L", "R"]:
+		if not GRASP_PLANNER.candidate_ok(candidates[side], rig.WRIST_CONE):
+			return false
+	for side: String in ["L", "R"]:
+		var needed := float((candidates[side] as Dictionary).get("required_assist", 0.0))
+		rig.set_reach_assist(side, needed)
+		_take(side, id)
+		if float(spec.get("gesture", 0.0)) > 0.0:
+			_start_gesture(side, id, spec, false)
+	_multi_required[id] = 2
+	_multi_contact[id] = {}
 	return true
 
 
@@ -466,7 +557,15 @@ func _tick_gestures(delta: float) -> void:
 					_release(side)
 				continue
 			gs.fired = true
-			action_contact.emit(gs.id)
+			var required := int(_multi_required.get(gs.id, 1))
+			if required > 1:
+				var contacts: Dictionary = _multi_contact.get(gs.id, {})
+				contacts[side] = true
+				_multi_contact[gs.id] = contacts
+				if contacts.size() >= required:
+					action_contact.emit(gs.id)
+			else:
+				action_contact.emit(gs.id)
 			# The callback is synchronous and may deliberately release this hand.
 			if _gesture[side] == null:
 				continue
@@ -505,6 +604,9 @@ func _tick_gestures(delta: float) -> void:
 				rig.set_reach_assist(side, 0.0)
 			else:
 				_release(side)
+			if _owner_of(gs.id) == "":
+				_multi_required.erase(gs.id)
+				_multi_contact.erase(gs.id)
 
 
 func _gesture_is(side: String, id: String) -> bool:
@@ -535,7 +637,8 @@ func _evaluate_grip_frame(side: String, id: String, contact: Vector3,
 			asked["fingers"], asked["palm"], false, not GripMap.welded(spec))
 
 
-func _planned_candidate(side: String, id: String, assist_cap: float) -> Dictionary:
+func _planned_candidate(side: String, id: String, assist_cap: float,
+		side_count := 1) -> Dictionary:
 	## Sample the actual palm path, not only its endpoint. New interactables get
 	## this automatically from their contact frame and approach distance.
 	var goal: Vector3 = _side_contact(id, side)
@@ -544,7 +647,8 @@ func _planned_candidate(side: String, id: String, assist_cap: float) -> Dictiona
 	var spec: Dictionary = GripMap.spec_for(id)
 	return GRASP_PLANNER.sample_candidate(rig, side, goal, asked["fingers"],
 			asked["palm"], approach, assist_cap, false, not GripMap.welded(spec),
-			0.15 if _claim.get(side, "") in ["helm", "telegraph"] else 0.0)
+			0.15 if _claim.get(side, "") in ["helm", "telegraph"] else 0.0,
+			{"boat": boat, "spec": spec, "side_count": side_count})
 
 
 func _pick_hand(id: String, preferred := "", reach_slack := 0.0) -> String:
@@ -555,8 +659,19 @@ func _pick_hand(id: String, preferred := "", reach_slack := 0.0) -> String:
 		"R": _planned_candidate("R", id, reach_slack),
 	}
 	var choice: Dictionary = GRASP_PLANNER.choose(candidates, rig.WRIST_CONE,
-			{"L": _locked("L"), "R": _locked("R")}, preferred)
-	return str(choice.get("side", ""))
+			{"L": _locked("L"), "R": _locked("R")}, preferred,
+			str(_selection_side.get(id, "")), 0.18)
+	var side := str(choice.get("side", ""))
+	if side != "":
+		_selection_side[id] = side
+		_grasp_quality[id] = {
+			"side": side,
+			"score": choice.get("score", INF),
+			"quality": choice.get("quality", 0.0),
+			"breakdown": choice.get("quality_breakdown", {}),
+			"path_blocked": choice.get("path_blocked", false),
+		}
+	return side
 
 
 func _asked_axes(id: String, side: String) -> Dictionary:
@@ -565,7 +680,7 @@ func _asked_axes(id: String, side: String) -> Dictionary:
 	spec = GripMap.oriented_at_contact(spec, local_contact)
 	var device := _device_of(id)
 	var db: Basis = device.global_basis if device != null else Basis.IDENTITY
-	if boat != null:
+	if boat != null and not _is_camera_held(id):
 		db = (boat as Node3D).get_global_transform_interpolated().basis \
 				* boat.global_basis.inverse() * db
 	return {
@@ -585,7 +700,7 @@ func _side_contact(id: String, side: String) -> Vector3:
 	spec = GripMap.oriented_at_contact(spec, local_contact)
 	var local: Transform3D = GripMap.local_frame(spec, local_contact)
 	var p: Vector3 = device.global_transform * local.origin
-	if boat != null:
+	if boat != null and not _is_camera_held(id):
 		p = (boat as Node3D).get_global_transform_interpolated() \
 				* (boat.global_transform.affine_inverse() * p)
 	return p
@@ -600,10 +715,16 @@ func _drive(side: String, delta: float) -> void:
 	if id == "":
 		_rest_hand(side)
 		return
+	var held_in_view := _drive_held_object(id, side, delta)
 	var g := _grip_node(id, side)
 	if g == null:
 		_release(side)
 		return
+	if held_in_view and _owner_of(id) == side:
+		rig.set_held_attachment(side, _device_of(id), g.transform)
+	else:
+		rig.clear_held_attachment(side)
+	rig.set_contact_target(side, _device_of(id))
 	var hold := 1.0
 	if id == "helm":
 		hold = _helm_driver.ride(side, delta, boat, _device_of("helm"), g)
@@ -616,7 +737,7 @@ func _drive(side: String, delta: float) -> void:
 	# however far the boat moved that tick — centimetres in a seaway — and the
 	# hand shimmers between two positions. Remapping the grip through the same
 	# interpolated frame the camera uses puts hand and eye on one timeline.
-	if boat != null:
+	if boat != null and not held_in_view:
 		xf = (boat as Node3D).get_global_transform_interpolated() \
 				* (boat.global_transform.affine_inverse() * xf)
 	# A hand starts clear of the fitting, closes as the palm arrives, makes the
@@ -670,10 +791,152 @@ func _drive(side: String, delta: float) -> void:
 	rig.grip(side, xf.origin, fingers, palm, 1.0, pose, hold, not welded)
 
 
+func _drive_held_object(id: String, side: String, delta: float) -> bool:
+	var spec := GripMap.spec_for(id)
+	if int(spec.get("kind", GripMap.Kind.GESTURE)) != GripMap.Kind.HOLD:
+		return false
+	var frame: Dictionary = spec.get("held_frame", {})
+	if frame.is_empty() or _cam == null:
+		return false
+	var active := _held_active(spec, frame)
+	var lock_property := str(frame.get("lock_property", ""))
+	if lock_property != "" and boat != null:
+		boat.set(lock_property, active)
+	if not active:
+		_held_blend_time.erase(id)
+		_restore_held_render_space(id)
+		return false
+	# A two-hand carried object has one carrier transform. The second palm reads
+	# its own grip from that same transform; it must not move the prop a second
+	# time using a mirrored camera anchor.
+	if _owner_of(id) != side:
+		return true
+	var device := _device_of(id)
+	if device == null:
+		return false
+	_enter_held_render_space(id, side, device)
+	var view_size := _cam.get_viewport().get_visible_rect().size
+	var aspect := view_size.x / maxf(view_size.y, 1.0)
+	var points := _held_visual_points(id, device, frame)
+	var target_local := HELD_OBJECT_FRAMER.solve_local(frame, side, _cam.fov,
+			aspect, points)
+	# Smooth relative to the eye. World-space smoothing lags behind a rolling
+	# vessel and is exactly what makes a held prop wander toward a screen edge.
+	var camera_inverse := _cam.global_transform.affine_inverse()
+	var current_local := camera_inverse * device.global_transform
+	var blend_time := float(_held_blend_time.get(id, 0.0)) + delta
+	_held_blend_time[id] = blend_time
+	# Ease the pickup from its world fitting, then become a true viewmodel. Once
+	# settled, a fast head turn must not leave hand or muzzle behind for a frame.
+	var amount := 1.0 if blend_time >= float(frame.get("settle_time", 0.48)) \
+			else 1.0 - exp(-maxf(float(frame.get("smoothing", 18.0)), 1.0) * delta)
+	var placed_local := current_local.interpolate_with(target_local, amount)
+	device.global_transform = _cam.global_transform * placed_local
+	return true
+
+
+func _held_active(spec: Dictionary, frame: Dictionary) -> bool:
+	var property := str(frame.get("active_property",
+			spec.get("toggle_property", "")))
+	return true if property == "" else _on(boat, property)
+
+
+func _is_camera_held(id: String) -> bool:
+	var spec := GripMap.spec_for(id)
+	if int(spec.get("kind", GripMap.Kind.GESTURE)) != GripMap.Kind.HOLD:
+		return false
+	var frame: Dictionary = spec.get("held_frame", {})
+	return not frame.is_empty() and _held_active(spec, frame)
+
+
+func _unlock_held(id: String) -> void:
+	if id == "":
+		return
+	_held_blend_time.erase(id)
+	_restore_held_render_space(id)
+	if boat == null:
+		return
+	var frame: Dictionary = GripMap.spec_for(id).get("held_frame", {})
+	var lock_property := str(frame.get("lock_property", ""))
+	if lock_property != "":
+		boat.set(lock_property, false)
+
+
+func _enter_held_render_space(id: String, side: String, device: Node3D) -> void:
+	if _held_space_state.has(id):
+		return
+	var world := device.global_transform
+	_held_space_state[id] = {
+		"device": device,
+		"parent": device.get_parent(),
+		"index": device.get_index(),
+		"top_level": device.top_level,
+		"interpolation": device.physics_interpolation_mode,
+	}
+	var mount: Node3D = rig.held_mount(side)
+	device.reparent(mount, true)
+	device.top_level = false
+	device.global_transform = world
+	device.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	device.reset_physics_interpolation()
+
+
+func _restore_held_render_space(id: String) -> void:
+	if not _held_space_state.has(id):
+		return
+	var state: Dictionary = _held_space_state[id]
+	_held_space_state.erase(id)
+	var device: Node3D = state.get("device") as Node3D
+	if device == null or not is_instance_valid(device):
+		return
+	var world := device.global_transform
+	var original_parent: Node = state.get("parent") as Node
+	if original_parent != null and is_instance_valid(original_parent):
+		device.reparent(original_parent, true)
+		var original_index := int(state.get("index", -1))
+		if original_index >= 0:
+			original_parent.move_child(device,
+					mini(original_index, original_parent.get_child_count() - 1))
+	device.top_level = bool(state.get("top_level", false))
+	device.global_transform = world
+	device.physics_interpolation_mode = int(state.get("interpolation",
+			Node.PHYSICS_INTERPOLATION_MODE_INHERIT))
+	device.reset_physics_interpolation()
+
+
+func _held_visual_points(id: String, device: Node3D,
+		frame: Dictionary) -> Array[Vector3]:
+	var cache_key := "%s:%s" % [id, device.get_instance_id()]
+	if _held_point_cache.has(cache_key):
+		return _held_point_cache[cache_key] as Array[Vector3]
+	var points: Array[Vector3] = []
+	var to_device := device.global_transform.affine_inverse()
+	var stack: Array[Node] = [device]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		for child: Node in node.get_children():
+			stack.append(child)
+		if not (node is MeshInstance3D):
+			continue
+		var mesh_node := node as MeshInstance3D
+		if mesh_node.mesh == null:
+			continue
+		var bounds := mesh_node.get_aabb()
+		for corner in 8:
+			points.append(to_device * (mesh_node.global_transform
+					* bounds.get_endpoint(corner)))
+	points.append(frame.get("focus_point", Vector3.ZERO) as Vector3)
+	if points.size() == 1:
+		points.append(Vector3.ZERO)
+	_held_point_cache[cache_key] = points
+	return points
+
+
 func _rest_hand(side: String) -> void:
 	## Idle hang in the lower corners. Standing, they just sit there. Walking,
 	## they swing opposite each other — right forward with the left foot —
 	## the way a body does, not a HUD bob.
+	rig.set_contact_target(side, null)
 	var out: float = 1.0 if side == "R" else -1.0
 	var c: Transform3D = _cam.global_transform
 	var ph: float = _gait + (0.0 if side == "R" else PI)

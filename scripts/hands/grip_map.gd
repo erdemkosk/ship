@@ -2,6 +2,8 @@ extends RefCounted
 class_name GripMap
 
 const INTERACTION_MOTION := preload("res://scripts/hands/interaction_motion.gd")
+const INTERACTION_BEHAVIOR := preload("res://scripts/hands/interaction_behavior.gd")
+const HELD_OBJECT_FRAMER := preload("res://scripts/hands/held_object_framer.gd")
 ## The object's side of a hold. Hands do not invent a grip — they read this.
 ##
 ## A grip is a frame in the DEVICE's local space:
@@ -14,7 +16,7 @@ const INTERACTION_MOTION := preload("res://scripts/hands/interaction_motion.gd")
 ## To add an interactable: one entry here (or a Grip child already on the
 ## node). Do not add a branch in hands.gd.
 
-enum Kind { MODE, HOLD, GESTURE }
+enum Kind { MODE, HOLD, GESTURE, SPECIAL }
 
 const KNOB_R := 0.032
 const HELM_RIM := 0.29
@@ -29,6 +31,7 @@ const SWITCH := {
 	"node_uses_id": true,
 	"kind": Kind.GESTURE,
 	"pose": "point",
+	"behavior": "toggle",
 	"action": "toggle",
 	"handed": true,
 	"gesture": 0.64,
@@ -45,6 +48,8 @@ const ENTRIES := {
 		"node": "helm_wheel",
 		"kind": Kind.MODE,
 		"pose": "rim",
+		"behavior": "mode",
+		"mode_property": "helm_engaged",
 		"preferred": "L",
 		"on_rim": true,
 	},
@@ -52,6 +57,8 @@ const ENTRIES := {
 		"node": "throttle_lever",
 		"kind": Kind.MODE,
 		"pose": "power",
+		"behavior": "mode",
+		"mode_property": "telegraph_engaged",
 		"preferred": "R",
 		"pos": Vector3(0.0, 0.33, 0.0),
 		"fingers": Vector3(0.0, -0.35, -0.94),
@@ -64,10 +71,13 @@ const ENTRIES := {
 		"node": "ignition_key",
 		"kind": Kind.GESTURE,
 		"pose": "key",
+		"behavior": "rotary_key",
 		"action": "toggle",
 		"preferred": "R",
 		"gesture": 0.92,
 		"contact_at": 0.36,
+		"follow_motion": {"type": "hinge", "angle": 0.62,
+				"min_time": 0.05, "timeout": 0.16},
 		"approach": 0.075,
 		"drops_instruments": true,
 		"pos": Vector3(0.0, 0.020, 0.052),
@@ -78,6 +88,7 @@ const ENTRIES := {
 		"node": "radio_handset",
 		"kind": Kind.HOLD,
 		"pose": "handset",
+		"behavior": "handset",
 		"action": "radio",
 		"toggle_property": "radio_held",
 		"toggle": true,
@@ -91,11 +102,31 @@ const ENTRIES := {
 		# component so pickup does not begin with a 66° wrist break.
 		"fingers": Vector3(0.12, -0.85, -0.51),
 		"palm": Vector3(-1.0, 0.0, 0.0),
+		# Persistent holds live in camera space after contact. The same contract is
+		# used by future torches, weapons and tools: all visible geometry plus the
+		# gripping hand stays inside the safe frame and outside the reticle lane.
+		"held_frame": {
+			# Deliberately inside the theoretical frustum clamp. The solved shoulder
+			# and wrist may contribute a few millimetres after IK; this reserve keeps
+			# the hand/object weld inside the frame even during a sharp head turn.
+			"anchor": Vector3(0.070, -0.125, -0.275),
+			"device_x": Vector3(0.94, 0.19, -0.28),
+			"device_z": Vector3(0.11, -0.90, -0.42),
+			"focus_point": Vector3(0.026, -0.004, 0.012),
+			"safe_margin": Vector2(0.05, 0.06),
+			"hand_radius": Vector2(0.035, 0.045),
+			"center_keepout": 0.18,
+			"depth_range": Vector2(0.24, 0.52),
+			"mirror_left": true,
+			"smoothing": 18.0,
+			"lock_property": "radio_pose_locked",
+		},
 	},
 	"radar": {
 		"node": "radar_housing",
 		"kind": Kind.GESTURE,
 		"pose": "hook",
+		"behavior": "linear_pull",
 		"action": "rail",
 		"gesture": 0.76,
 		"contact_at": 0.34,
@@ -111,6 +142,7 @@ const ENTRIES := {
 		"node": "sounder_housing",
 		"kind": Kind.GESTURE,
 		"pose": "hook",
+		"behavior": "linear_pull",
 		"action": "rail",
 		"gesture": 0.76,
 		"contact_at": 0.34,
@@ -126,6 +158,7 @@ const ENTRIES := {
 		"node": "stove_switch",
 		"kind": Kind.GESTURE,
 		"pose": "point",
+		"behavior": "toggle",
 		"action": "toggle",
 		"gesture": 0.62,
 		"contact_at": 0.40,
@@ -140,6 +173,7 @@ const ENTRIES := {
 		"node": "windlass_node",
 		"kind": Kind.GESTURE,
 		"pose": "power",
+		"behavior": "crank",
 		"action": "tackle",
 		"action_property": "tackle",
 		"gesture": 0.84,
@@ -155,6 +189,7 @@ const ENTRIES := {
 		"node": "fuse_lid",
 		"kind": Kind.GESTURE,
 		"pose": "pinch",
+		"behavior": "hinge_light",
 		"action": "toggle",
 		"gesture": 0.86,
 		"contact_at": 0.38,
@@ -177,6 +212,7 @@ const ENTRIES := {
 		"node": "locker_door",
 		"kind": Kind.GESTURE,
 		"pose": "handle",
+		"behavior": "hinge_medium",
 		"action": "toggle",
 		"gesture": 0.90,
 		"contact_at": 0.36,
@@ -194,6 +230,7 @@ const ENTRIES := {
 		"node_uses_id": true,
 		"kind": Kind.GESTURE,
 		"pose": "pinch",
+		"behavior": "pinch_pull",
 		"action": "toggle",
 		"gesture": 0.72,
 		"contact_at": 0.40,
@@ -210,6 +247,7 @@ const ENTRIES := {
 		"node_uses_id": true,
 		"kind": Kind.GESTURE,
 		"pose": "handle",
+		"behavior": "hinge_medium",
 		"action": "toggle",
 		"gesture": 0.92,
 		"contact_at": 0.34,
@@ -230,6 +268,7 @@ const ENTRIES := {
 		"node_uses_id": true,
 		"kind": Kind.GESTURE,
 		"pose": "handle",
+		"behavior": "hinge_medium",
 		"action": "toggle",
 		"gesture": 0.92,
 		"contact_at": 0.34,
@@ -250,6 +289,7 @@ const ENTRIES := {
 		"node_uses_id": true,
 		"kind": Kind.GESTURE,
 		"pose": "handle",
+		"behavior": "hinge_medium",
 		"action": "toggle",
 		"gesture": 0.92,
 		"contact_at": 0.34,
@@ -269,6 +309,7 @@ const ENTRIES := {
 		"node": "engine_door",
 		"kind": Kind.GESTURE,
 		"pose": "hook",
+		"behavior": "hinge_medium",
 		"action": "toggle",
 		"gesture": 0.90,
 		"contact_at": 0.36,
@@ -280,6 +321,22 @@ const ENTRIES := {
 		"pos": Vector3(-0.07, -0.08, 1.10),
 		"fingers": _DOOR_F,
 		"palm": _DOOR_P,
+	},
+	"chart": {
+		"kind": Kind.SPECIAL,
+		"behavior": "chart",
+		"special": "mode",
+		"mode_property": "chart_engaged",
+	},
+	"sea_ladder": {
+		"kind": Kind.SPECIAL,
+		"behavior": "climb",
+		"special": "ladder",
+	},
+	"divegear": {
+		"kind": Kind.SPECIAL,
+		"behavior": "wear",
+		"special": "wear",
 	},
 }
 
@@ -305,10 +362,20 @@ static func spec_for(id: String) -> Dictionary:
 static func validation_error(spec: Dictionary) -> String:
 	## Fail closed.  A malformed frame must never become an identity transform
 	## that sends a hand to the device origin and still fires gameplay.
+	var behavior_error := INTERACTION_BEHAVIOR.validation_error(spec)
+	if behavior_error != "":
+		return behavior_error
+	if int(spec.get("kind", Kind.GESTURE)) == Kind.SPECIAL:
+		return "" if str(spec.get("special", "")) != "" else "missing special driver"
 	if str(spec.get("node", "")) == "":
 		return "missing device accessor"
 	if str(spec.get("pose", "")) == "":
 		return "missing finger profile"
+	if int(spec.get("kind", Kind.GESTURE)) == Kind.HOLD:
+		var frame_error := HELD_OBJECT_FRAMER.validation_error(
+				spec.get("held_frame", {}) as Dictionary)
+		if frame_error != "":
+			return frame_error
 	if not bool(spec.get("on_rim", false)):
 		var f: Vector3 = spec.get("fingers", Vector3.ZERO)
 		var p: Vector3 = spec.get("palm", Vector3.ZERO)
@@ -318,8 +385,11 @@ static func validation_error(spec: Dictionary) -> String:
 			return "finger and palm axes are nearly parallel"
 	var duration := float(spec.get("gesture", 0.0))
 	if duration > 0.0:
-		if str(spec.get("action", "")) == "":
+		var action := str(spec.get("action", ""))
+		if action == "":
 			return "gesture has no gameplay action"
+		if action not in ["toggle", "radio", "rail", "tackle"]:
+			return "unsupported gameplay action"
 		var contact := float(spec.get("contact_at", -1.0))
 		if contact < 0.10 or contact > 0.80:
 			return "contact phase outside gesture"
@@ -327,6 +397,12 @@ static func validation_error(spec: Dictionary) -> String:
 	var motion_error := INTERACTION_MOTION.validation_error(follow)
 	if motion_error != "":
 		return motion_error
+	if not follow.is_empty():
+		var physical_motion := str(INTERACTION_BEHAVIOR.profile(spec).get("motion", ""))
+		var follow_type := str(follow.get("type", ""))
+		if physical_motion != follow_type \
+				and not (physical_motion == "rotary" and follow_type == "hinge"):
+			return "follow motion disagrees with physical behavior"
 	return ""
 
 

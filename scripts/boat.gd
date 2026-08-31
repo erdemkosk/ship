@@ -2480,8 +2480,8 @@ func _console_label(text: String, pos: Vector3, size: int) -> void:
 
 
 func toggle_switch(id: String, by_hand := true) -> void:
-	## One switch, one circuit. Called from the E handler when you throw a
-	## toggle by hand; the number keys reach the same fields.
+	## One switch, one circuit. Hand use arrives from action_contact after the
+	## fingers land; number-key shortcuts reach the same fields without a hand.
 	# Cartridges, and the four house toggles, live under the lid.
 	if id.begins_with("fu_") or switch_in_well(id):
 		if by_hand and not fusebox_open:
@@ -3075,7 +3075,11 @@ func _update_radio(delta: float) -> void:
 	var a := RADIO_ANCHOR
 	# Onto the handset's own tail, in the handset's frame — a fixed world offset
 	# left the cord entering the side of it once you turned to face the window.
-	var b: Vector3 = _radio_hand.position + _radio_hand.basis * Vector3(0.0, -0.012, 0.108)
+	# A held handset is temporarily top-level so the RigidBody's render
+	# interpolation cannot move it inside the palm. Always derive the cord end in
+	# boat space; Node3D.position is world-like while top_level is enabled.
+	var radio_local := global_transform.affine_inverse() * _radio_hand.global_transform
+	var b: Vector3 = radio_local.origin + radio_local.basis * Vector3(0.0, -0.012, 0.108)
 	var n := _cord.size()
 	for i in n:
 		var t0 := float(i) / float(n)

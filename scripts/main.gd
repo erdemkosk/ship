@@ -2,6 +2,9 @@ extends Node3D
 ## Wires the scene together and registers input actions in code
 ## (no hard-coded keys elsewhere; rebindable via InputMap).
 
+const HandGripMap := preload("res://scripts/hands/grip_map.gd")
+const HeldObjectFramer := preload("res://scripts/hands/held_object_framer.gd")
+
 var _screenshot_path := ""
 var _look_at_target := ""
 var _look_rig: Node3D
@@ -162,6 +165,12 @@ func _ready() -> void:
 			_interaction_contract_test()
 		elif arg == "--interaction-action-test":
 			_interaction_action_test(boat)
+		elif arg == "--input-interaction-test":
+			_input_interaction_test(rig, boat)
+		elif arg == "--catalog-integrity-test":
+			_catalog_integrity_test(rig, boat)
+		elif arg == "--held-framing-test":
+			_held_framing_test(rig, boat)
 		elif arg == "--helm-driver-test":
 			_helm_driver_test(rig, boat)
 		elif arg == "--pull-radar":
@@ -309,6 +318,10 @@ func _grip_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	var arms: Node = rig.get("_arms")
 	arms.set("boat", boat)
 	var hr: Node = arms.get("rig")
+	var contact_ids: Array[String] = []
+	var record_contact := func(contact_id: String) -> void:
+		contact_ids.append(contact_id)
+	arms.connect("action_contact", record_contact)
 	var cases: Array = [
 		["radar", Vector3(0.76, 2.91, 0.64)],
 		["sounder", Vector3(0.76, 2.91, 0.64)],
@@ -345,6 +358,7 @@ func _grip_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 				rig.set("pitch", asin(clampf(d.y, -1.0, 1.0)))
 			await get_tree().create_timer(0.08).timeout
 		var offered: bool = bool(arms.call("can_offer", id))
+		var contacts_before := contact_ids.count(id)
 		var accepted: bool = bool(arms.call("notify_use", id, true))
 		if offered != accepted:
 			push_error("reach promise mismatch for %s: offered=%s accepted=%s" % [
@@ -358,13 +372,24 @@ func _grip_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 		if not accepted:
 			for eval_side in ["L", "R"]:
 				var fail_ev: Dictionary = arms.call("_grip_evaluation", eval_side, id)
+				var fail_plan: Dictionary = arms.call("_planned_candidate",
+						eval_side, id, float(arms.MAX_REACH_ASSIST))
 				print("[grip-eval] %s/%s reach=%s left=%.3f elbow=%.1f wrist=%.1f twist=%.1f" % [
 					id, eval_side, fail_ev.get("reachable", false),
 					float(fail_ev.get("leftover", -1.0)),
 					rad_to_deg(float(fail_ev.get("elbow_angle", 0.0))),
 					rad_to_deg(float(fail_ev.get("wrist_break", 0.0))),
 					rad_to_deg(float(fail_ev.get("palm_twist", 0.0)))])
+				print("  plan blocked=%s load=%.2f quality=%.2f" % [
+						fail_plan.get("path_blocked", false),
+						float(fail_plan.get("load_cost", INF)),
+						float(fail_plan.get("quality", 0.0))])
 		await get_tree().create_timer(0.50).timeout
+		var action_name := str(HandGripMap.spec_for(id).get("action", ""))
+		if accepted and action_name != "" and contact_ids.count(id) <= contacts_before:
+			push_error("%s was accepted but never emitted hand contact" % id)
+		if id == "ignition" and accepted and int(boat.get("engine")) == 0:
+			push_error("ignition hand reached the key but did not start the engine action")
 		var tested_body_lean: Vector3 = rig.get("_reach_body_lean")
 		if id in ["fusebox", "windlass"] and tested_body_lean.length() < 0.06:
 			push_error("%s was assisted without visible upper-body travel" % id)
@@ -541,6 +566,7 @@ func _grasp_planner_test(rig: Node3D, boat: RigidBody3D) -> void:
 	boat.set("telegraph_engaged", false)
 	await get_tree().create_timer(2.0).timeout
 	var cam: Camera3D = rig.get("_cam")
+	var planner := preload("res://scripts/hands/grasp_planner.gd")
 	var cases := [
 		["player_right_of_object", Vector3(-0.30, -0.20, -0.46), "L", "R"],
 		["player_left_of_object", Vector3(0.30, -0.20, -0.46), "R", "L"],
@@ -555,6 +581,22 @@ func _grasp_planner_test(rig: Node3D, boat: RigidBody3D) -> void:
 		if (choice.get("path", []) as Array).size() != 4:
 			push_error("grasp planner/%s did not validate the whole approach" % tc[0])
 		var ev: Dictionary = choice.get("end", {})
+		var quality: Dictionary = choice.get("quality_breakdown", {})
+		for quality_key in ["reach", "cross_body", "elbow", "shoulder",
+				"wrist", "torso", "gaze", "load", "path", "quality"]:
+			if not quality.has(quality_key):
+				push_error("grasp quality omitted '%s'" % quality_key)
+		# An equal alternative must not steal the selected hand inside the
+		# hysteresis margin.
+		var left := choice.duplicate(true)
+		left["side"] = "L"
+		var right := choice.duplicate(true)
+		right["side"] = "R"
+		var sticky: Dictionary = planner.choose({"L": left, "R": right},
+				float((arms.get("rig") as Node).WRIST_CONE),
+				{"L": false, "R": false}, "R", "L", 0.18)
+		if str(sticky.get("side", "")) != "L":
+			push_error("grasp hysteresis changed hands inside its margin")
 		print("[grasp-planner] %-23s hand=%s preferred=%s score=%.3f cross=%.3f elbow=%.1f wrist=%.1f twist=%.1f samples=%d" % [
 				tc[0], side, tc[3], float(choice.get("score", INF)),
 				float(ev.get("cross", INF)), rad_to_deg(float(ev.get("elbow_angle", 0.0))),
@@ -567,6 +609,8 @@ func _grasp_planner_test(rig: Node3D, boat: RigidBody3D) -> void:
 func _interaction_contract_test() -> void:
 	## Pure contract test; no hand skeleton or ship fitting is involved.
 	var motion := preload("res://scripts/hands/interaction_motion.gd")
+	var behavior := preload("res://scripts/hands/interaction_behavior.gd")
+	var planner := preload("res://scripts/hands/grasp_planner.gd")
 	var device := Node3D.new()
 	var hinge := {"type": "hinge", "angle": 0.74,
 			"min_time": 0.05, "timeout": 0.15}
@@ -589,6 +633,20 @@ func _interaction_contract_test() -> void:
 		push_error("motion contract did not release at completed travel")
 	if motion.validation_error(linear) != "":
 		push_error("valid linear motion contract was rejected")
+	var heavy := {"behavior": "heavy_lift", "span": true, "pose": "power"}
+	if is_finite(float(behavior.load_cost(heavy, 1))) \
+			or not is_finite(float(behavior.load_cost(heavy, 2))):
+		push_error("heavy load contract did not require two hands")
+	var unsafe := {"behavior": "crank", "pose": "pinch"}
+	if str(behavior.validation_error(unsafe)) == "":
+		push_error("high-force fingertip contract was accepted")
+	var blocker := AABB(Vector3(-0.1, -0.1, -0.1), Vector3(0.2, 0.2, 0.2))
+	var path_entry: float = planner._segment_aabb_entry(
+			Vector3(-1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), blocker)
+	var path_miss: float = planner._segment_aabb_entry(
+			Vector3(-1.0, 1.0, 0.0), Vector3(1.0, 1.0, 0.0), blocker)
+	if path_entry < 0.40 or path_entry > 0.50 or path_miss >= 0.0:
+		push_error("approach collision sweep failed entry/miss contract")
 	print("[interaction-motion] hinge=%.3f linear=%.3f minimum=true release=true" % [
 			hinge_progress, linear_progress])
 	device.free()
@@ -622,6 +680,83 @@ func _interaction_action_test(boat: RigidBody3D) -> void:
 			or tackle == null or int(tackle.get("state")) == tackle_before:
 		push_error("child interaction action failed")
 	print("[interaction-action] radio=true rail=true toggle=true gate=true child=true")
+	get_tree().quit()
+
+
+func _input_interaction_test(rig: Node3D, boat: RigidBody3D) -> void:
+	## Exercise the camera's common player route while the helm mode owns a hand,
+	## then require authored contact and the engine mutation. This catches the
+	## legacy precedence bug where "leave helm" swallowed ignition use.
+	rig.set_mode(1)
+	await get_tree().create_timer(2.2).timeout
+	boat.set("helm_engaged", true)
+	var walker: RefCounted = rig.get("_walker")
+	walker.call("spawn_at", Vector3(0.12, 2.91, 0.52))
+	var arms: Node = rig.get("_arms")
+	var contacts: Array[String] = []
+	arms.connect("action_contact", func(id: String) -> void: contacts.append(id))
+	if not bool(arms.call("can_offer", "ignition")):
+		push_error("input interaction setup could not offer ignition")
+	var accepted: bool = bool(rig.call("_start_catalog_interaction", "ignition",
+			HandGripMap.spec_for("ignition")))
+	if not accepted:
+		push_error("camera route rejected offered ignition while helm was engaged")
+	await get_tree().create_timer(0.75).timeout
+	var finger_report: Dictionary = (arms.get("rig") as Node).call(
+			"finger_contact_report", "R")
+	if int(finger_report.get("samples", 0)) < 15:
+		push_error("finger solver did not evaluate every ignition phalanx")
+	if int(finger_report.get("touches", 0)) < 1:
+		push_error("ignition grip closed without any phalanx contact")
+	if not contacts.has("ignition"):
+		push_error("E accepted ignition without reaching hand contact")
+	if int(boat.get("engine")) == 0:
+		push_error("ignition contact did not execute its gameplay action")
+	print("[input-interaction] offered=true routed=%s contact=%s engine=%s fingers=%d touch=%d penetration=%d nearest=%.3f quality=%.2f" % [
+			accepted,
+			contacts.has("ignition"), boat.get("engine"),
+			int(finger_report.get("samples", 0)),
+			int(finger_report.get("touches", 0)),
+			int(finger_report.get("penetrations", 0)),
+			float(finger_report.get("nearest", INF)),
+			float(finger_report.get("quality", 0.0))])
+	get_tree().quit()
+
+
+func _catalog_integrity_test(rig: Node3D, boat: RigidBody3D) -> void:
+	## Every advertised INTERACT entry must declare its physical behavior and
+	## either a live grip device or an explicit full-body special driver.
+	var arms: Node = rig.get("_arms")
+	arms.set("boat", boat)
+	var seen := {}
+	var authored := 0
+	var special := 0
+	for item: Dictionary in boat.INTERACT:
+		var id := str(item.get("id", ""))
+		if id == "" or seen.has(id):
+			push_error("interaction catalog has empty/duplicate id '%s'" % id)
+			continue
+		seen[id] = true
+		var spec := HandGripMap.spec_for(id)
+		if spec.is_empty():
+			push_error("INTERACT '%s' bypasses GripMap" % id)
+			continue
+		var error := HandGripMap.validation_error(spec)
+		if error != "":
+			push_error("INTERACT '%s' has invalid contract: %s" % [id, error])
+		var kind := int(spec.get("kind", HandGripMap.Kind.GESTURE))
+		if kind == HandGripMap.Kind.SPECIAL:
+			special += 1
+			continue
+		authored += 1
+		if arms.call("_device_of", id) == null:
+			push_error("INTERACT '%s' has no live grip device" % id)
+		if not (arms.get("rig") as Node).call("has_pose", str(spec.get("pose", ""))):
+			push_error("INTERACT '%s' has no finger pose" % id)
+		if kind == HandGripMap.Kind.GESTURE and str(spec.get("action", "")) == "":
+			push_error("gesture '%s' can reach contact without an action" % id)
+	print("[catalog-integrity] total=%d authored=%d special=%d complete=true" % [
+			seen.size(), authored, special])
 	get_tree().quit()
 
 
@@ -888,13 +1023,116 @@ func _radio_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.6).timeout
 	var arms: Node = rig.get("_arms")
 	arms.set("boat", boat)
-	arms.call("notify_use", "radio")
+	# This helper photographs the carried pose, not reach admission at whichever
+	# helm spawn the test happened to inherit. Mirror a loaded/equipped radio;
+	# Hands then claims it through the same passive state synchronisation used by
+	# save restore and scripted pickup.
+	boat.set("radio_held", true)
+	await get_tree().create_timer(0.8).timeout
+	if not bool(boat.get("radio_pose_locked")):
+		push_error("radio screenshot route did not acquire the held pose")
 	for i in 4:
 		await get_tree().create_timer(0.7).timeout
 		rig.set("pitch", [-0.10, 0.10, -0.30, 0.0][i])
 		rig.set("yaw", _as_f(rig.get("yaw")) + [0.0, 0.22, -0.30, 0.10][i])
 		await get_tree().create_timer(0.25).timeout
 		await _shot(dir, "radio%d" % i)
+	get_tree().quit()
+
+
+func _held_framing_test(rig: Node3D, boat: RigidBody3D) -> void:
+	## First exercise a future long tool at hostile anchors/aspect ratios, then
+	## verify the real radio and palm remain framed while the player looks around.
+	var tool_frame := {
+		"anchor": Vector3(0.72, -0.34, -0.48),
+		"device_x": Vector3(1.0, 0.0, 0.0),
+		"device_z": Vector3(0.0, -0.12, -0.99),
+		"focus_point": Vector3(0.0, 0.0, 0.08),
+		"safe_margin": Vector2(0.06, 0.07),
+		"hand_radius": Vector2(0.045, 0.055),
+		# A generic tool may intentionally sit nearer the sight line than the
+		# cheek-held radio; the contract, not a code branch, chooses that lane.
+		"center_keepout": 0.12,
+		"depth_range": Vector2(0.34, 0.75),
+		"mirror_left": true,
+	}
+	var tool_points: Array[Vector3] = []
+	for x in [-0.045, 0.045]:
+		for y in [-0.065, 0.065]:
+			for z in [-0.34, 0.16]:
+				tool_points.append(Vector3(x, y, z))
+	for aspect in [4.0 / 3.0, 16.0 / 9.0, 21.0 / 9.0]:
+		for side in ["L", "R"]:
+			var solved := HeldObjectFramer.solve_local(tool_frame, side, 70.0,
+					aspect, tool_points)
+			var report := HeldObjectFramer.report(solved, tool_frame, 70.0,
+					aspect, tool_points)
+			if not bool(report.get("visible", false)) \
+					or not bool(report.get("center_clear", false)):
+				push_error("held framing failed synthetic %s at %.3f: %s" % [
+						side, aspect, report])
+
+	rig.set_mode(1)
+	await get_tree().create_timer(2.2).timeout
+	var arms: Node = rig.get("_arms")
+	arms.set("boat", boat)
+	boat.set("radio_held", true)
+	await get_tree().create_timer(1.2).timeout
+	for look in [Vector2(-0.18, -0.22), Vector2(0.14, 0.28), Vector2.ZERO]:
+		rig.set("pitch", look.x)
+		rig.set("yaw", _as_f(rig.get("yaw")) + look.y)
+		await get_tree().create_timer(0.35).timeout
+		var live: Dictionary = arms.call("held_frame_report", "radio")
+		if not bool(live.get("visible", false)) \
+				or not bool(live.get("center_clear", false)):
+			push_error("held framing lost live radio: %s" % live)
+		var claims: Dictionary = arms.get("_claim")
+		var radio_side := "L" if str(claims.get("L", "")) == "radio" else "R"
+		var weld: Dictionary = arms.get("rig").call("held_attachment_report",
+				radio_side)
+		if not bool(weld.get("welded", false)) \
+				or float(weld.get("position_error", INF)) > 0.0005 \
+				or float(weld.get("render_position_error", INF)) > 0.0005 \
+				or float(weld.get("angle_error", INF)) > deg_to_rad(0.05):
+			push_error("held object slipped in the solved palm: %s" % weld)
+	# Sample the transition itself, not merely the settled endpoints. This is the
+	# regression for a handset visibly swimming through closed fingers while the
+	# camera is moving.
+	var max_weld_position_error := 0.0
+	var max_render_position_error := 0.0
+	var max_weld_angle_error := 0.0
+	for sample in 36:
+		rig.set("yaw", _as_f(rig.get("yaw")) + sin(float(sample) * 0.71) * 0.032)
+		rig.set("pitch", sin(float(sample) * 0.43) * 0.20)
+		await get_tree().process_frame
+		var moving_claims: Dictionary = arms.get("_claim")
+		var moving_side := "L" if str(moving_claims.get("L", "")) == "radio" else "R"
+		var moving_weld: Dictionary = arms.get("rig").call(
+				"held_attachment_report", moving_side)
+		max_weld_position_error = maxf(max_weld_position_error,
+				float(moving_weld.get("position_error", INF)))
+		max_render_position_error = maxf(max_render_position_error,
+				float(moving_weld.get("render_position_error", INF)))
+		max_weld_angle_error = maxf(max_weld_angle_error,
+				float(moving_weld.get("angle_error", INF)))
+	if max_weld_position_error > 0.0005 or max_render_position_error > 0.0005 \
+			or max_weld_angle_error > deg_to_rad(0.05):
+		push_error("held weld drifted during camera motion: logical=%.6f render=%.6f angle=%.4f" % [
+				max_weld_position_error, max_render_position_error,
+				rad_to_deg(max_weld_angle_error)])
+	if not bool(boat.get("radio_pose_locked")):
+		push_error("held framing did not transfer radio pose ownership to hands")
+	var final_report: Dictionary = arms.call("held_frame_report", "radio")
+	print("[held-framing] synthetic=6 radio_visible=%s center_clear=%s max_ndc=%s weld_pos=%.6f render_pos=%.6f weld_deg=%.4f" % [
+		final_report.get("visible", false), final_report.get("center_clear", false),
+		final_report.get("max_ndc", Vector2.ZERO), max_weld_position_error,
+		max_render_position_error, rad_to_deg(max_weld_angle_error)])
+	var handset: Node3D = boat.call("radio_handset") as Node3D
+	boat.set("radio_held", false)
+	await get_tree().create_timer(0.8).timeout
+	if handset == null or handset.get_parent() != boat \
+			or bool(boat.get("radio_pose_locked")):
+		push_error("held radio did not restore its boat hierarchy on release")
 	get_tree().quit()
 
 

@@ -18,6 +18,7 @@ extends Node3D
 ## what previously drove every held object seven centimetres into the hand.
 
 const ARM_PATH := "res://assets/wrad_arms/arms.glb"
+const FINGER_CONTACT_SOLVER := preload("res://scripts/hands/finger_contact_solver.gd")
 
 const CHAINS := {
 	"R": {"root": "bicep.r", "mid": "forearm.r", "end": "wrist.r"},
@@ -152,10 +153,24 @@ var _weight := {"R": 0.0, "L": 0.0}
 var _want := {"R": 0.0, "L": 0.0}
 var _pose := {"R": "open", "L": "open"}
 var _pose_amt := {"R": 0.0, "L": 0.0}
+var _contact_target := {"R": null, "L": null}
+var _contact_bounds := {"R": AABB(), "L": AABB()}
+## Persistent carried props are seated from the FINAL solved palm, after torso
+## lag and wrist alignment. Without this last weld the prop follows the camera
+## target while the wrist follows the body solver and visibly swims in fingers.
+var _held_attachment := {"R": {}, "L": {}}
+var _held_attachment_report := {"R": {}, "L": {}}
+var _held_bone_mount := {}
+var _finger_scales := {"R": {}, "L": {}}
+var _finger_report := {"R": {}, "L": {}}
 var _lean := Vector3.ZERO
 var _lean_want := Vector3.ZERO
 var _lean_samples := 0
 var _lean_limit_want := MAX_LEAN
+var _torso_yaw := 0.0
+var _torso_yaw_want := 0.0
+var _torso_samples := 0
+var _balance_offset := 0.0
 ## Per-hand, short-lived upper-body reach supplied by hands.gd when the player
 ## has deliberately aimed at a valid fitting. It is cleared on release.
 var _reach_assist := {"L": 0.0, "R": 0.0}
@@ -229,6 +244,20 @@ func setup(cam: Camera3D) -> void:
 
 func is_ready() -> bool:
 	return _ready_ok
+
+
+func held_mount(side: String) -> Node3D:
+	## A BoneAttachment is the only hierarchy that shares not merely the camera
+	## transform but the final rendered wrist bone. A prop parented here cannot
+	## acquire a different interpolation phase from the fingers around it.
+	if _held_bone_mount.has(side) and is_instance_valid(_held_bone_mount[side]):
+		return _held_bone_mount[side] as Node3D
+	var mount := BoneAttachment3D.new()
+	mount.name = "HeldMount" + side
+	mount.bone_name = str(CHAINS[side]["end"])
+	skeleton.add_child(mount)
+	_held_bone_mount[side] = mount
+	return mount
 
 
 func has_pose(pose: String) -> bool:
@@ -308,6 +337,16 @@ func evaluate(side: String, contact: Vector3) -> Dictionary:
 	var arm_dir: Vector3 = arm_vec.normalized() if arm_vec.length_squared() > 1e-8 \
 			else Vector3.DOWN
 	var shoulder_raise := maxf(arm_dir.dot(Vector3.UP) - 0.52, 0.0)
+	var view_forward := -camera.global_basis.z
+	var horizontal_arm := Vector3(arm_vec.x, 0.0, arm_vec.z)
+	var horizontal_view := Vector3(view_forward.x, 0.0, view_forward.z)
+	var torso_twist := 0.0
+	if horizontal_arm.length_squared() > 1e-6 and horizontal_view.length_squared() > 1e-6:
+		torso_twist = horizontal_view.normalized().angle_to(horizontal_arm.normalized())
+	var balance_offset := Vector2(base_vec.x, base_vec.z).length() \
+			* clampf(comfort_lean / maxf(d, 0.01), 0.0, 1.0) \
+			+ maxf(-lat, 0.0) * 0.28
+	var gaze_occlusion := _gaze_occlusion(sh, contact)
 	return {
 		"distance": d,
 		"reach": reach,
@@ -319,6 +358,9 @@ func evaluate(side: String, contact: Vector3) -> Dictionary:
 		"elbow_angle": elbow,
 		"elbow_cost": elbow_cost,
 		"shoulder_raise": shoulder_raise,
+		"torso_twist": torso_twist,
+		"balance_offset": balance_offset,
+		"gaze_occlusion": gaze_occlusion,
 		"reachable": leftover < 0.025,
 		"wrist_break": 0.0,
 		"comfortable": leftover < 0.025 and maxf(-lat, 0.0) < 0.08,
@@ -389,6 +431,52 @@ func natural_axes(side: String, contact: Vector3) -> Dictionary:
 func release(side: String) -> void:
 	_want[side] = 0.0
 	_pose[side] = "open"
+	_contact_target[side] = null
+	_finger_scales[side] = {}
+	_finger_report[side] = {}
+	clear_held_attachment(side)
+
+
+func set_held_attachment(side: String, device: Node3D,
+		grip_in_device: Transform3D) -> void:
+	if device == null or not is_instance_valid(device):
+		clear_held_attachment(side)
+		return
+	_held_attachment[side] = {
+		"device": device,
+		"grip_in_device": grip_in_device,
+	}
+
+
+func clear_held_attachment(side: String) -> void:
+	_held_attachment[side] = {}
+	_held_attachment_report[side] = {}
+
+
+func held_attachment_report(side: String) -> Dictionary:
+	return (_held_attachment_report.get(side, {}) as Dictionary).duplicate(true)
+
+
+func set_contact_target(side: String, device: Node3D) -> void:
+	if _contact_target.get(side) == device:
+		return
+	_contact_target[side] = device
+	_finger_scales[side] = {}
+	_finger_report[side] = {}
+	if device != null:
+		_contact_bounds[side] = FINGER_CONTACT_SOLVER.device_bounds(device)
+
+
+func finger_contact_report(side: String) -> Dictionary:
+	return (_finger_report.get(side, {}) as Dictionary).duplicate(true)
+
+
+func approach_origin(side: String) -> Vector3:
+	## Stable free-hand start used for path planning. Reading a stale wrist after
+	## a teleport or a released moving device would invent a collision sweep
+	## across half the vessel.
+	var out := 1.0 if side == "R" else -1.0
+	return camera.global_transform * Vector3(out * 0.18, -0.30, -0.28)
 
 
 func set_pose(side: String, pose: String, amount := 1.0) -> void:
@@ -419,10 +507,17 @@ func update(delta: float) -> void:
 	_lean_samples = 0
 	_lean_limit_want = MAX_LEAN
 	_lag.position = _lean
+	var torso_goal := _torso_yaw_want / float(_torso_samples) \
+			if _torso_samples > 0 else 0.0
+	_torso_yaw = lerp_angle(_torso_yaw, clampf(torso_goal,
+			deg_to_rad(-28.0), deg_to_rad(28.0)), k)
+	_torso_yaw_want = 0.0
+	_torso_samples = 0
 	var fwd: Vector3 = -camera.global_basis.z
 	var cam_pitch: float = asin(clampf(fwd.y, -1.0, 1.0))
 	var follow: float = FOLLOW_DOWN if cam_pitch < 0.0 else FOLLOW_UP
 	_lag.rotation.x = -cam_pitch * (1.0 - follow)
+	_lag.rotation.y = _torso_yaw
 	# Bone first, then the pose: BoneAttachment3D follows the bone that is
 	# set when the skeleton advances. Switching after advance left the case
 	# on the old bone for a frame (and, worse, applied the other bone's
@@ -434,6 +529,76 @@ func update(delta: float) -> void:
 	for side in _pose:
 		_apply_fingers(side)
 	skeleton.advance(delta)
+	_seat_held_objects()
+	for side: String in ["L", "R"]:
+		var device: Node3D = _contact_target.get(side) as Node3D
+		if device == null or not is_instance_valid(device) or _pose_amt[side] < 0.12:
+			continue
+		var wrist_bone: int = _end_bone[side]
+		if not _wrist.solved.has(wrist_bone):
+			continue
+		# Finger poses are pre-modifier, while the wrist/arm solution lives in
+		# WristAlign. Map the posed finger chains through that solved wrist.
+		var pre_wrist := skeleton.get_bone_global_pose(wrist_bone)
+		var pose_to_world: Transform3D = skeleton.global_transform \
+				* (_wrist.solved[wrist_bone] as Transform3D) \
+				* pre_wrist.affine_inverse()
+		var result := FINGER_CONTACT_SOLVER.solve(skeleton, _fingers[side],
+				device, _contact_bounds[side], _finger_scales[side],
+				pose_to_world, delta)
+		_finger_scales[side] = result["scales"]
+		_finger_report[side] = result
+
+
+func _seat_held_objects() -> void:
+	## IK targets express intent; WristAlign.solved is the hand the player
+	## actually sees. Reconstruct its semantic palm frame and make the object's
+	## authored Grip exactly coincident with it every frame.
+	for side: String in ["L", "R"]:
+		var attachment: Dictionary = _held_attachment.get(side, {})
+		if attachment.is_empty():
+			continue
+		var device: Node3D = attachment.get("device") as Node3D
+		var wrist_bone: int = _end_bone.get(side, -1)
+		if device == null or not is_instance_valid(device) or wrist_bone < 0 \
+				or not _wrist.solved.has(wrist_bone):
+			clear_held_attachment(side)
+			continue
+		var solved_wrist: Transform3D = _wrist.solved[wrist_bone] as Transform3D
+		var wrist: Transform3D = skeleton.global_transform * solved_wrist
+		var wrist_basis := wrist.basis.orthonormalized()
+		var semantic_basis := (wrist_basis *
+				(_sem_inv[side] as Basis).inverse()).orthonormalized()
+		var palm_position := wrist.origin + wrist_basis \
+				* (_palm_local[side] as Vector3)
+		var palm_frame := Transform3D(semantic_basis, palm_position)
+		var grip_in_device: Transform3D = attachment.get("grip_in_device",
+				Transform3D.IDENTITY)
+		device.global_transform = palm_frame * grip_in_device.affine_inverse()
+		var seated_grip := device.global_transform * grip_in_device
+		# What the renderer will consume can differ from global_transform when a
+		# prop is still inheriting physics interpolation from a moving RigidBody.
+		var rendered_grip := device.get_global_transform_interpolated() \
+				* grip_in_device
+		var rendered_wrist := skeleton.get_global_transform_interpolated() \
+				* solved_wrist
+		var rendered_wrist_basis := rendered_wrist.basis.orthonormalized()
+		var rendered_semantic_basis := (rendered_wrist_basis *
+				(_sem_inv[side] as Basis).inverse()).orthonormalized()
+		var rendered_palm_frame := Transform3D(rendered_semantic_basis,
+				rendered_wrist.origin + rendered_wrist_basis
+				* (_palm_local[side] as Vector3))
+		var angle_error := 0.0
+		for axis in [Vector3.RIGHT, Vector3.UP, Vector3.BACK]:
+			angle_error = maxf(angle_error, (seated_grip.basis * axis).normalized()
+					.angle_to((palm_frame.basis * axis).normalized()))
+		_held_attachment_report[side] = {
+			"position_error": seated_grip.origin.distance_to(palm_frame.origin),
+			"angle_error": angle_error,
+			"render_position_error": rendered_grip.origin.distance_to(
+					rendered_palm_frame.origin),
+			"welded": true,
+		}
 
 
 # --- internals ---------------------------------------------------------------
@@ -451,6 +616,24 @@ func _cone_to_forearm(side: String, contact: Vector3, F: Vector3) -> Vector3:
 	if axis.length_squared() < 1e-10:
 		return F
 	return fore.rotated(axis.normalized(), WRIST_CONE)
+
+
+func _gaze_occlusion(shoulder: Vector3, contact: Vector3) -> float:
+	## Approximate the projected palm plus forearm against the central reading
+	## region. Close geometry in the centre costs most; outboard hands are free.
+	if camera == null:
+		return 0.0
+	var worst := 0.0
+	for world_point: Vector3 in [shoulder.lerp(contact, 0.58), contact]:
+		var local := camera.to_local(world_point)
+		if local.z >= -0.03:
+			continue
+		var half_fov := tan(deg_to_rad(camera.fov) * 0.5)
+		var screen := Vector2(local.x, local.y) / maxf(-local.z * half_fov, 1e-4)
+		var central := 1.0 - smoothstep(0.12, 0.72, screen.length())
+		var near_cost := clampf(0.70 / maxf(-local.z, 0.08), 0.0, 1.0)
+		worst = maxf(worst, central * near_cost)
+	return worst
 
 
 func _lean_limit_for(to_grip: Vector3) -> float:
@@ -474,6 +657,13 @@ func _reach(side: String, xf: Transform3D, weight: float, clamp_sphere := false)
 		_lean_want += want
 		_lean_samples += 1
 		_lean_limit_want = maxf(_lean_limit_want, lean_limit)
+	var local_reach := camera.global_basis.inverse() * to_grip
+	if local_reach.length_squared() > 1e-6:
+		var reach_yaw := atan2(local_reach.x, -local_reach.z)
+		_torso_yaw_want += clampf(reach_yaw * 0.32,
+				deg_to_rad(-28.0), deg_to_rad(28.0))
+		_torso_samples += 1
+	_balance_offset = Vector2(_lean.x, _lean.z).length()
 	# Only for one-shot reaches. Pinning a helm grip to the arm sphere lifts
 	# the palm off the rim the moment the wrist sits a centimetre past reach.
 	if clamp_sphere:
@@ -516,7 +706,11 @@ func _apply_fingers(side: String) -> void:
 			var b: int = chain[i]
 			var axis: Vector3 = _curl_axis.get(b, Vector3.RIGHT)
 			var rest: Quaternion = skeleton.get_bone_rest(b).basis.get_rotation_quaternion()
-			var ang: float = float(values[mini(i, values.size() - 1)]) * amt
+			var contact_scales: Array = _finger_scales[side].get(f, [1.0, 1.0, 1.0])
+			var contact_scale := float(contact_scales[mini(i,
+					contact_scales.size() - 1)])
+			var ang: float = float(values[mini(i, values.size() - 1)]) \
+					* amt * contact_scale
 			skeleton.set_bone_pose_rotation(b, rest * Quaternion(axis, ang))
 
 
@@ -1259,6 +1453,15 @@ func measurements() -> Dictionary:
 
 func lean() -> Vector3:
 	return _lean
+
+
+func posture_report() -> Dictionary:
+	return {
+		"lean": _lean,
+		"torso_yaw": _torso_yaw,
+		"balance_offset": _balance_offset,
+		"step_required": _balance_offset > 0.18,
+	}
 
 
 func shoulder_global(side: String) -> Vector3:
