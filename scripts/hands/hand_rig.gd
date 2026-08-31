@@ -80,6 +80,17 @@ const POSES := {
 		"middle": [0.62, 0.82, 0.72], "ring": [0.68, 0.88, 0.78],
 		"pinky": [0.72, 0.92, 0.82],
 	},
+	# Slim utility-knife handle: a compact power grasp with the thumb opposed
+	# across the scales. The index is closed with the other fingers—this is a
+	# cutting grip, never the floating trigger-finger silhouette of a firearm.
+	"knife_grip": {
+		# A fist is not five equally curled digits. The long fingers fold hard at
+		# the knuckle/PIP and ease at the tip; the thumb stays shallower so it can
+		# cross the index finger and visibly lock the handle from the near side.
+		"thumb": [0.62, 0.85, 0.55], "index": [1.12, 1.46, 0.92],
+		"middle": [1.18, 1.52, 0.98], "ring": [1.22, 1.56, 1.02],
+		"pinky": [1.24, 1.58, 1.04],
+	},
 	# A wheel rim is larger than a lever and needs a shallower, evenly loaded
 	# wrap.  This prevents the fingertips visibly tunnelling through the wood.
 	"rim": {
@@ -163,6 +174,7 @@ var _pose := {"R": "open", "L": "open"}
 var _pose_amt := {"R": 0.0, "L": 0.0}
 var _contact_target := {"R": null, "L": null}
 var _contact_bounds := {"R": AABB(), "L": AABB()}
+var _contact_pad := {"R": 0.018, "L": 0.018}
 ## Persistent carried props are seated from the FINAL solved palm, after torso
 ## lag and wrist alignment. Without this last weld the prop follows the camera
 ## target while the wrist follows the body solver and visibly swims in fingers.
@@ -473,6 +485,20 @@ func set_contact_target(side: String, device: Node3D) -> void:
 	_finger_report[side] = {}
 	if device != null:
 		_contact_bounds[side] = FINGER_CONTACT_SOLVER.device_bounds(device)
+		_contact_pad[side] = FINGER_CONTACT_SOLVER.FINGER_PAD
+
+
+func set_contact_target_bounds(side: String, device: Node3D, bounds: AABB,
+		pad := 0.004) -> void:
+	## Held tools can expose a narrow contact region independently from blades,
+	## guards or housings. The closed-loop finger solver then reacts to the real
+	## handle instead of the whole device AABB.
+	if _contact_target.get(side) != device:
+		_contact_target[side] = device
+		_finger_scales[side] = {}
+		_finger_report[side] = {}
+	_contact_bounds[side] = bounds
+	_contact_pad[side] = maxf(pad, 0.0)
 
 
 func finger_contact_report(side: String) -> Dictionary:
@@ -553,7 +579,7 @@ func update(delta: float) -> void:
 				* pre_wrist.affine_inverse()
 		var result := FINGER_CONTACT_SOLVER.solve(skeleton, _fingers[side],
 				device, _contact_bounds[side], _finger_scales[side],
-				pose_to_world, delta)
+				pose_to_world, delta, float(_contact_pad[side]))
 		_finger_scales[side] = result["scales"]
 		_finger_report[side] = result
 

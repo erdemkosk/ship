@@ -261,10 +261,19 @@ func set_body_hold(id: String, on: bool, side := "L") -> bool:
 func set_bag_hand(target: Node3D, mode := "") -> void:
 	## Camera supplies the real slot/item node after the bag has been posed. A
 	## stale world-space point would visibly swim when the vessel rolls.
+	if target == null or mode != "knife":
+		_restore_held_render_space("bag_knife")
 	_bag_hand_target = target
 	_bag_hand_mode = mode if target != null else ""
+	if target != null and mode == "knife":
+		var knife_device := target.get_meta("held_device", null) as Node3D
+		if knife_device != null:
+			_enter_held_render_space("bag_knife", "R", knife_device)
 	if target == null:
 		_bag_hand_report = {}
+		if rig != null:
+			rig.clear_held_attachment("R")
+			rig.set_contact_target("R", null)
 	if target != null and _claim.get("R", "") != "":
 		_release("R")
 
@@ -757,12 +766,14 @@ func _drive_bag_hand(_delta: float) -> void:
 		_bag_hand_mode = ""
 		_rest_hand("R")
 		return
-	rig.set_contact_target("R", null)
 	var object_point := _bag_hand_target.global_position
 	var contact := object_point
 	var axes: Dictionary
 	var pose := "power"
+	var pose_amount := 1.0
 	if _bag_hand_mode == "point":
+		rig.set_contact_target("R", null)
+		rig.clear_held_attachment("R")
 		# Build the extended index backwards from the selected object. The palm is
 		# one finger-length away on the natural shoulder-to-slot line, so the
 		# fingertip lands on the object without asking the wrist to kink sideways.
@@ -772,15 +783,59 @@ func _drive_bag_hand(_delta: float) -> void:
 		axes = rig.natural_axes("R", contact)
 		axes["fingers"] = (object_point - contact).normalized()
 		pose = "point"
+	elif _bag_hand_mode == "knife" or _bag_hand_mode == "knife_release":
+		# The target is the desired PALM contact, not the prop itself. The solver
+		# keeps the natural forearm direction, then pronates around it so the BACK
+		# of the fist faces the player: knuckles visible, palm hidden, thumb locked
+		# over the handle like a normal knife power grip.
+		if bool(_bag_hand_target.get_meta("authored_grip_frame", false)):
+			# During insertion the target IS the knife's semantic K/P/F frame. The
+			# hand follows that exact frame, so the knife cannot rotate sideways and
+			# then snap through the fist when it reaches the webbing.
+			axes = {
+				"fingers": _bag_hand_target.global_basis.z.normalized(),
+				"palm": _bag_hand_target.global_basis.y.normalized(),
+			}
+		else:
+			axes = rig.natural_axes("R", contact)
+			var knife_fingers: Vector3 = axes["fingers"]
+			# A small roll exposes the thumb-side ridge instead of presenting a flat,
+			# featureless back of hand. The knife is welded to this same semantic
+			# frame, so hand and blade always roll together.
+			var knife_palm := (-_cam.global_basis.z \
+					+ _cam.global_basis.x * 0.20).normalized()
+			knife_palm -= knife_palm.project(knife_fingers)
+			if knife_palm.length_squared() > 0.0001:
+				axes["palm"] = knife_palm.normalized()
+		pose = "knife_grip"
+		pose_amount = float(_bag_hand_target.get_meta("grip_closure", 1.0))
+		var held_device := _bag_hand_target.get_meta("held_device") as Node3D \
+				if _bag_hand_target.has_meta("held_device") else null
+		var held_grip: Transform3D = _bag_hand_target.get_meta(
+				"held_grip_transform") as Transform3D \
+				if _bag_hand_target.has_meta("held_grip_transform") \
+				else Transform3D.IDENTITY
+		if held_device != null and held_device.has_method("grip_contact_bounds"):
+			rig.set_contact_target_bounds("R", held_device,
+					held_device.call("grip_contact_bounds") as AABB, 0.006)
+		else:
+			rig.set_contact_target("R", null)
+		if _bag_hand_mode == "knife" and held_device != null:
+			rig.set_held_attachment("R", held_device, held_grip)
+		else:
+			rig.clear_held_attachment("R")
 	else:
 		# The item origin is authored at its grip zone.  A natural frame keeps the
 		# wrist straight across all four different silhouettes; the power pose
 		# supplies the actual cylindrical wrap.
+		rig.set_contact_target("R", null)
+		rig.clear_held_attachment("R")
 		axes = rig.natural_axes("R", contact)
 	_last_grip["R"] = contact
 	_rest_t["R"] = 0.0
 	_bag_hand_report = rig.consider("R", contact, axes["fingers"], axes["palm"])
-	rig.grip("R", contact, axes["fingers"], axes["palm"], 1.0, pose, 1.0, false)
+	rig.grip("R", contact, axes["fingers"], axes["palm"], 1.0, pose,
+			pose_amount, false)
 
 
 func _drive(side: String, delta: float) -> void:

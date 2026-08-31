@@ -33,6 +33,7 @@ func _enter_tree() -> void:
 	# boat_camera consumes them while the bag has focus.
 	_add_action("bag_previous", [KEY_LEFT, KEY_UP])
 	_add_action("bag_next", [KEY_RIGHT, KEY_DOWN])
+	_add_mouse_action("knife_attack", MOUSE_BUTTON_LEFT)
 	# The circuits. Every one of these is also a physical switch under the fuse
 	# box lid — these are the shorthand the status panel prints beside each row,
 	# and the panel is lying if they are not bound.
@@ -65,6 +66,15 @@ func _add_action(action: String, keys: Array) -> void:
 		var ev := InputEventKey.new()
 		ev.physical_keycode = k
 		InputMap.action_add_event(action, ev)
+
+
+func _add_mouse_action(action: String, button: MouseButton) -> void:
+	if InputMap.has_action(action):
+		return
+	InputMap.add_action(action)
+	var ev := InputEventMouseButton.new()
+	ev.button_index = button
+	InputMap.action_add_event(action, ev)
 
 
 func _ready() -> void:
@@ -196,6 +206,10 @@ func _ready() -> void:
 			_bag_cycle_test(rig, boat)
 		elif arg == "--bag-item-test":
 			_bag_item_test(rig, boat)
+		elif arg == "--knife-test":
+			_knife_test(rig, boat)
+		elif arg.begins_with("--knife-shot="):
+			_knife_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--probe-engine":
 			_probe_engine(boat)
 		elif arg == "--drift-test":
@@ -983,6 +997,154 @@ func _bag_item_test(rig: Node3D, boat: RigidBody3D) -> void:
 			hold_after_take, preview_ok, placed, place_ok, complete])
 	if not complete:
 		push_error("deck bag take/return cycle incomplete")
+	get_tree().quit()
+
+
+func _knife_test(rig: Node3D, boat: RigidBody3D) -> void:
+	## Full player path: point at slot three, take the imported model, verify its
+	## palm weld, cut once, then return that same node to the empty webbing.
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("_bag_selected", 2)
+	await get_tree().create_timer(0.35).timeout
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var slot_label := str(bag.call("slot_label", 2))
+	var taken := bool(rig.call("_activate_bag_selection"))
+	await get_tree().create_timer(0.82).timeout
+	var active := bag.call("active_item_node") as Node3D
+	var same_model := active != null \
+			and str(active.get_meta("item_kind", "")) == "utility_knife" \
+			and int(active.call("model_mesh_count")) == 4
+	var arms: Node = rig.get("_arms")
+	var report: Dictionary = arms.get("_bag_hand_report")
+	var wrist := rad_to_deg(float(report.get("wrist_break", PI)))
+	var hand_rig: Node = arms.get("rig")
+	var hand_poses: Dictionary = hand_rig.get("_pose")
+	var palm_grip := str(hand_poses.get("R", "")) == "knife_grip"
+	var finger_contact: Dictionary = hand_rig.call("finger_contact_report", "R")
+	var handle_bounds: AABB = active.call("grip_contact_bounds") as AABB
+	var contact_ok := int(finger_contact.get("touches", 0)) >= 8 \
+			and int(finger_contact.get("penetrations", 1)) == 0 \
+			and float(finger_contact.get("nearest", -1.0)) >= 0.0
+	var weld: Dictionary = hand_rig.call("held_attachment_report", "R")
+	var welded := bool(weld.get("welded", false)) \
+			and float(weld.get("position_error", 1.0)) < 0.001 \
+			and float(weld.get("angle_error", 1.0)) < deg_to_rad(0.2)
+	var tip := active.call("blade_tip_node") as Node3D if active != null else null
+	var enlarged := tip != null and tip.position.length() > 0.25
+	var sound_removed := active != null \
+			and active.find_child("KnifeWhoosh", true, false) == null
+	var tip_start := tip.global_position if tip != null else Vector3.ZERO
+	var hit_target := StaticBody3D.new()
+	hit_target.name = "KnifeSweepTestTarget"
+	var hit_shape := CollisionShape3D.new()
+	var hit_wall := BoxShape3D.new()
+	hit_wall.size = Vector3(1.5, 1.5, 0.025)
+	hit_shape.shape = hit_wall
+	hit_target.add_child(hit_shape)
+	add_child(hit_target)
+	var test_camera := rig.get("_cam") as Camera3D
+	hit_target.global_transform = test_camera.global_transform \
+			* Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, -0.55))
+	await get_tree().physics_frame
+	var max_travel := 0.0
+	var max_render_weld := 0.0
+	var sweep_frames := 0
+	var lmb_bound := false
+	for input_event in InputMap.action_get_events("knife_attack"):
+		if input_event is InputEventMouseButton \
+				and (input_event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+			lmb_bound = true
+	var attack_event := InputEventAction.new()
+	attack_event.action = "knife_attack"
+	attack_event.pressed = true
+	rig.call("_unhandled_input", attack_event)
+	var attacked := bool(active.call("is_attacking"))
+	for _i in 34:
+		await get_tree().create_timer(0.018).timeout
+		if tip != null:
+			max_travel = maxf(max_travel, tip.global_position.distance_to(tip_start))
+		var moving_weld: Dictionary = hand_rig.call("held_attachment_report", "R")
+		max_render_weld = maxf(max_render_weld,
+				float(moving_weld.get("render_position_error", 0.0)))
+		if not (bag.call("active_knife_sweep") as Dictionary).is_empty():
+			sweep_frames += 1
+	await get_tree().create_timer(0.22).timeout
+	var hit_registered := bool(active.call("hit_latched"))
+	rig.set("_bag_selected", 2)
+	var reopened := bool(rig.call("set_bag_open", true))
+	await get_tree().create_timer(0.95).timeout
+	var return_frame := bool(bag.get("_knife_hand_target").get_meta(
+			"authored_grip_frame", false)) \
+			and str(arms.get("_bag_hand_mode")) == "knife"
+	var placed := bool(rig.call("_activate_bag_selection"))
+	await get_tree().create_timer(0.10).timeout
+	var release_mode := str(arms.get("_bag_hand_mode")) == "knife_release"
+	var release_opening := float(bag.get("_knife_hand_target").get_meta(
+			"grip_closure", 1.0)) < 0.98
+	await get_tree().create_timer(0.30).timeout
+	var restored := placed and bag.call("active_item_node") == null \
+			and bool(bag.call("slot_occupied", 2)) \
+			and str(arms.get("_bag_hand_mode")) == "point"
+	var complete := slot_label == "Utility knife" and taken and same_model \
+			and wrist < 1.0 \
+			and palm_grip and contact_ok and welded and enlarged and sound_removed \
+			and lmb_bound and attacked and max_travel > 0.12 \
+			and hit_registered and return_frame and release_mode and release_opening \
+			and reopened and restored
+	print("[knife] label=%s take=%s imported=%s enlarged=%s palm=%s bounds=%s..%s contacts=%d penetrations=%d nearest=%.4f silent=%s wrist=%.2fdeg weld=%s pos_err=%.5f render_err=%.5f lmb=%s attack=%s travel=%.3fm sweeps=%d hit=%s return_frame=%s release=%s opening=%s place=%s restored=%s complete=%s" % [
+			slot_label, taken, same_model, enlarged, palm_grip,
+			handle_bounds.position, handle_bounds.end,
+			int(finger_contact.get("touches", 0)),
+			int(finger_contact.get("penetrations", 0)),
+			float(finger_contact.get("nearest", -1.0)),
+			sound_removed, wrist, welded,
+			float(weld.get("position_error", -1.0)), max_render_weld,
+			lmb_bound, attacked, max_travel,
+			sweep_frames, hit_registered, return_frame, release_mode, release_opening,
+			placed, restored, complete])
+	if not complete:
+		push_error("utility knife take/attack/return contract incomplete")
+	get_tree().quit()
+
+
+func _knife_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Three deterministic frames for visual review: webbing, settled grip and
+	## the fast middle of the diagonal cut.
+	await get_tree().create_timer(0.35).timeout
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("_bag_selected", 2)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	await _shot(dir, "knife0_bag")
+	rig.call("_activate_bag_selection")
+	await get_tree().create_timer(0.82).timeout
+	await _shot(dir, "knife1_held")
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	bag.call("begin_active_attack")
+	await get_tree().create_timer(0.20).timeout
+	await _shot(dir, "knife2_slash")
+	await get_tree().create_timer(0.52).timeout
+	rig.set("_bag_selected", 2)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	await _shot(dir, "knife3_return")
+	rig.call("_activate_bag_selection")
+	await get_tree().create_timer(0.10).timeout
+	await _shot(dir, "knife4_release")
+	await get_tree().create_timer(0.30).timeout
+	await _shot(dir, "knife5_stowed")
 	get_tree().quit()
 
 

@@ -26,6 +26,7 @@ başlar. Komut satırı probe/ekran görüntüsü bayraklarında kart atlanır.
 | I | Sırttaki güverte çantasını tek elle öne al / yeniden omuzla |
 | Yön tuşları | Çanta açıkken sağ işaret parmağıyla dört fiziksel yuvadan birini seç |
 | E | Seçili eşyayı al; elde eşya varken seçili boş yuvaya geri bırak |
+| Sol fare | Utility knife eldeyken doğal kesme saldırısı |
 | Q / E | Serbest kamerada alçal / yüksel (Shift: hızlı) |
 | Tab | Ayar panelini gizle/göster |
 | `"` | FPS sayacını gizle/göster |

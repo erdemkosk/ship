@@ -4,6 +4,8 @@ class_name DeckBag3D
 ## real 3D pieces so the inventory can later move from this wall stowage into
 ## the player's hands without swapping to a painted interface.
 
+const UtilityKnifeScript := preload("res://scripts/utility_knife.gd")
+
 var _clock := 0.0
 const SLOT_POSITIONS := [
 	Vector3(-0.178, -0.040, 0.125),
@@ -11,7 +13,7 @@ const SLOT_POSITIONS := [
 	Vector3(0.060, -0.050, 0.125),
 	Vector3(0.174, -0.045, 0.125),
 ]
-const SLOT_LABELS := ["Flashlight", "Signal flare", "Rigging knife", "Multitool"]
+const SLOT_LABELS := ["Flashlight", "Signal flare", "Utility knife", "Multitool"]
 
 var _slot_anchors: Array[Node3D] = []
 ## Deliberately untyped: an empty physical slot is represented by null.
@@ -19,6 +21,11 @@ var _slot_items: Array = []
 var _active_item: Node3D
 var _active_label := ""
 var _preview_slot := -1
+var _knife_hand_target: Node3D
+var _knife_draw := 1.0
+const KNIFE_RELEASE_DURATION := 0.34
+var _knife_release_left := 0.0
+var _knife_release_item: UtilityKnife3D
 
 
 func _ready() -> void:
@@ -27,6 +34,10 @@ func _ready() -> void:
 	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	visible = false
 	_build()
+	_knife_hand_target = Node3D.new()
+	_knife_hand_target.name = "KnifeHandTarget"
+	_knife_hand_target.top_level = true
+	add_child(_knife_hand_target)
 
 
 func update_camera_pose(delta: float, camera: Camera3D, amount: float) -> void:
@@ -58,6 +69,7 @@ func update_camera_pose(delta: float, camera: Camera3D, amount: float) -> void:
 			deg_to_rad(weight_arc * -13.0 + sin(_clock * 1.15) * 0.8 * settled))
 		global_transform = camera.global_transform * Transform3D(Basis.from_euler(rot), pos)
 		reset_physics_interpolation()
+	_update_knife_release(delta)
 	_update_active_item(delta, camera, u)
 
 
@@ -99,6 +111,31 @@ func active_item_label() -> String:
 	return _active_label
 
 
+func active_item_kind() -> String:
+	if _active_item == null:
+		return ""
+	return str(_active_item.get_meta("item_kind", "generic"))
+
+
+func active_hand_target() -> Node3D:
+	if active_item_kind() == "utility_knife":
+		return _knife_hand_target
+	return _active_item
+
+
+func active_hand_mode() -> String:
+	return "knife" if active_item_kind() == "utility_knife" \
+			else "hold"
+
+
+func release_hand_active() -> bool:
+	return _knife_release_left > 0.0 and _knife_release_item != null
+
+
+func release_hand_target() -> Node3D:
+	return _knife_hand_target if release_hand_active() else null
+
+
 func take_slot(index: int) -> Node3D:
 	if _active_item != null or not slot_occupied(index):
 		return null
@@ -107,12 +144,25 @@ func take_slot(index: int) -> Node3D:
 	_active_item = item
 	_active_label = str(item.get_meta("item_label", SLOT_LABELS[index]))
 	_preview_slot = -1
+	_knife_draw = 0.0
+	_knife_release_left = 0.0
+	_knife_release_item = null
 	var outside := get_parent() as Node3D
 	if outside != null:
 		item.reparent(outside, true)
 	item.top_level = true
 	item.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	item.reset_physics_interpolation()
+	if active_item_kind() == "utility_knife" and _knife_hand_target != null:
+		var knife := _active_item as UtilityKnife3D
+		var grip := knife.grip_node()
+		_knife_hand_target.global_transform = item.global_transform \
+				* (grip.transform if grip != null else Transform3D.IDENTITY)
+		_knife_hand_target.set_meta("held_device", item)
+		_knife_hand_target.set_meta("held_grip_transform",
+				grip.transform if grip != null else Transform3D.IDENTITY)
+		_knife_hand_target.set_meta("authored_grip_frame", false)
+		_knife_hand_target.set_meta("grip_closure", 1.0)
 	return item
 
 
@@ -126,16 +176,73 @@ func place_active_in_slot(index: int) -> bool:
 			or slot_occupied(index):
 		return false
 	var item := _active_item
+	if item is UtilityKnife3D:
+		(item as UtilityKnife3D).cancel_attack()
 	item.reparent(self, true)
 	item.top_level = false
-	item.transform = Transform3D(Basis.IDENTITY, SLOT_POSITIONS[index])
+	item.transform = _slot_transform(index)
 	item.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
 	item.reset_physics_interpolation()
 	_slot_items[index] = item
+	if item is UtilityKnife3D:
+		_knife_release_item = item as UtilityKnife3D
+		_knife_release_left = KNIFE_RELEASE_DURATION
+		var grip := _knife_release_item.grip_node()
+		_knife_hand_target.global_transform = item.global_transform \
+				* (grip.transform if grip != null else Transform3D.IDENTITY)
+		_knife_hand_target.set_meta("authored_grip_frame", true)
+		_knife_hand_target.set_meta("grip_closure", 1.0)
 	_active_item = null
 	_active_label = ""
 	_preview_slot = -1
+	_knife_hand_target.remove_meta("held_device")
+	_knife_hand_target.remove_meta("held_grip_transform")
 	return true
+
+
+func _update_knife_release(delta: float) -> void:
+	if _knife_release_left <= 0.0 or _knife_release_item == null \
+			or not is_instance_valid(_knife_release_item):
+		_knife_release_left = 0.0
+		_knife_release_item = null
+		return
+	_knife_release_left = maxf(_knife_release_left - delta, 0.0)
+	var grip := _knife_release_item.grip_node()
+	_knife_hand_target.global_transform = _knife_release_item.global_transform \
+			* (grip.transform if grip != null else Transform3D.IDENTITY)
+	_knife_hand_target.set_meta("authored_grip_frame", true)
+	var progress := 1.0 - _knife_release_left / KNIFE_RELEASE_DURATION
+	_knife_hand_target.set_meta("grip_closure",
+			1.0 - smoothstep(0.06, 0.62, progress))
+
+
+func begin_active_attack() -> bool:
+	if _active_item is UtilityKnife3D and _preview_slot < 0:
+		return (_active_item as UtilityKnife3D).begin_attack()
+	return false
+
+
+func cancel_active_attack() -> void:
+	if _active_item is UtilityKnife3D:
+		(_active_item as UtilityKnife3D).cancel_attack()
+
+
+func active_knife_sweep() -> Dictionary:
+	if _active_item is UtilityKnife3D:
+		return (_active_item as UtilityKnife3D).sample_sweep()
+	return {}
+
+
+func active_knife_camera_kick() -> Vector3:
+	if _active_item is UtilityKnife3D:
+		return (_active_item as UtilityKnife3D).camera_kick()
+	return Vector3.ZERO
+
+
+func mark_active_knife_hit(collider: Object, position: Vector3,
+		normal: Vector3) -> void:
+	if _active_item is UtilityKnife3D:
+		(_active_item as UtilityKnife3D).mark_hit(collider, position, normal)
 
 
 func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> void:
@@ -145,16 +252,46 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 	if _preview_slot >= 0 and bag_amount > 0.62:
 		# Hover a few centimetres in front of the empty loop.  The hand and item
 		# travel together, so E completes an insertion instead of teleporting it.
-		target = global_transform * Transform3D(Basis.IDENTITY,
-				SLOT_POSITIONS[_preview_slot] + Vector3(0.0, 0.0, 0.060))
+		var preview_transform := _slot_transform(_preview_slot)
+		preview_transform.origin += Vector3(0.0, 0.0, 0.060)
+		target = global_transform * preview_transform
 	else:
 		var carry_rot := Basis.from_euler(Vector3(deg_to_rad(-10.0),
 				deg_to_rad(-4.0), deg_to_rad(-8.0)))
 		target = camera.global_transform * Transform3D(carry_rot,
 				Vector3(0.205, -0.205, -0.40))
+	if _active_item is UtilityKnife3D:
+		var knife := _active_item as UtilityKnife3D
+		knife.tick_attack(delta)
+		if _preview_slot >= 0 and bag_amount > 0.62:
+			var grip := knife.grip_node()
+			var grip_target := target \
+					* (grip.transform if grip != null else Transform3D.IDENTITY)
+			var return_k := 1.0 - exp(-10.0 * delta)
+			_knife_hand_target.global_transform = \
+					_knife_hand_target.global_transform.interpolate_with(
+							grip_target, return_k)
+			_knife_hand_target.set_meta("authored_grip_frame", true)
+		else:
+			_knife_hand_target.set_meta("authored_grip_frame", false)
+			_knife_draw = minf(_knife_draw + delta / 0.38, 1.0)
+			var palm_target := camera.global_transform * Transform3D(Basis.IDENTITY,
+					knife.hand_position_camera_local())
+			_knife_hand_target.global_transform = _knife_hand_target.global_transform \
+					.interpolate_with(palm_target, smoothstep(0.0, 1.0, _knife_draw))
 	var k := 1.0 - exp(-15.0 * delta)
 	_active_item.global_transform = _active_item.global_transform.interpolate_with(target, k)
 	_active_item.reset_physics_interpolation()
+
+
+func _slot_transform(index: int) -> Transform3D:
+	var basis := Basis.IDENTITY
+	var origin: Vector3 = SLOT_POSITIONS[index]
+	if index == 2:
+		# Blade down, grip up, flush with the same two leather retaining loops.
+		basis = Basis(Vector3.BACK, deg_to_rad(-90.0))
+		origin.y += 0.055
+	return Transform3D(basis, origin)
 
 
 func _material(color: Color, roughness: float, metallic := 0.0) -> StandardMaterial3D:
@@ -283,12 +420,13 @@ func _build() -> void:
 	for index in SLOT_POSITIONS.size():
 		var anchor := Node3D.new()
 		anchor.name = "Slot%d" % (index + 1)
-		anchor.position = SLOT_POSITIONS[index]
+		anchor.position = _slot_transform(index).origin
 		add_child(anchor)
 		_slot_anchors.append(anchor)
-		var item := Node3D.new()
+		var item: Node3D = UtilityKnifeScript.new() as Node3D if index == 2 \
+				else Node3D.new()
 		item.name = "BagItem%d" % (index + 1)
-		item.position = SLOT_POSITIONS[index]
+		item.transform = _slot_transform(index)
 		item.set_meta("item_label", SLOT_LABELS[index])
 		add_child(item)
 		_slot_items.append(item)
@@ -306,14 +444,8 @@ func _build() -> void:
 			flare_red, "SignalFlare", 14, flare)
 	_cylinder(0.022, 0.020, Vector3(0.0, 0.113, 0.0), Vector3.ZERO,
 			steel_dark, "FlareCap", 14, flare)
-	# Rigging knife in a dark leather sheath.
-	var knife := _slot_items[2] as Node3D
-	_box(Vector3(0.052, 0.190, 0.025), Vector3.ZERO,
-			Vector3.ZERO, leather_edge, "KnifeSheath", knife)
-	_box(Vector3(0.034, 0.075, 0.026), Vector3(0.0, 0.130, 0.0),
-			Vector3.ZERO, leather, "KnifeHandle", knife)
-	_cylinder(0.025, 0.010, Vector3(0.0, 0.082, 0.0), Vector3(90.0, 0.0, 0.0),
-			brass, "KnifeGuard", 12, knife)
+	# Slot three is the imported utility knife itself; the same node leaves the
+	# webbing, seats in the palm and performs the cut.
 	# Folded steel multitool.
 	var multitool := _slot_items[3] as Node3D
 	_box(Vector3(0.045, 0.185, 0.025), Vector3.ZERO,

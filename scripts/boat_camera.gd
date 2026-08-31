@@ -294,6 +294,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		set_bag_open(not _bag_open)
 		get_viewport().set_input_as_handled()
 		return
+	if mode == Mode.FPS and _bag_focus < 0.08 and not _panel_open() \
+			and event.is_action_pressed("knife_attack"):
+		var attack_bag := _deck_bag()
+		if attack_bag != null and str(attack_bag.call("active_item_kind")) \
+				== "utility_knife" and bool(attack_bag.call("begin_active_attack")):
+			get_viewport().set_input_as_handled()
+			return
 	if mode == Mode.FPS and _bag_open and _bag_focus > 0.58:
 		if event.is_action_pressed("bag_previous"):
 			_shift_bag_selection(-1)
@@ -378,6 +385,10 @@ func set_bag_open(open: bool) -> bool:
 	if open and (_panel_open() or _flag(_walker, "swimming") \
 			or _flag(_walker, "on_sea_ladder")):
 		return false
+	if open:
+		var active_bag := _deck_bag()
+		if active_bag != null:
+			active_bag.call("cancel_active_attack")
 	if _bag_open == open:
 		return true
 	_bag_open = open
@@ -434,14 +445,20 @@ func _activate_bag_selection() -> bool:
 		if active == null:
 			return false
 		if _arms != null and _arms.has_method("set_bag_hand"):
-			_arms.set_bag_hand(active, "hold")
+			_arms.set_bag_hand(bag.call("active_hand_target") as Node3D,
+					str(bag.call("active_hand_mode")))
 		set_bag_open(false)
 		return true
 	if bool(bag.call("slot_occupied", _bag_selected)):
 		return false
 	if _arms != null and _arms.has_method("set_bag_hand"):
 		_arms.set_bag_hand(null, "")
-	return bool(bag.call("place_active_in_slot", _bag_selected))
+	var placed := bool(bag.call("place_active_in_slot", _bag_selected))
+	if placed and _arms != null and _arms.has_method("set_bag_hand") \
+			and bool(bag.call("release_hand_active")):
+		_arms.set_bag_hand(bag.call("release_hand_target") as Node3D,
+				"knife_release")
+	return placed
 
 
 func _refresh_bag_hand() -> void:
@@ -452,8 +469,12 @@ func _refresh_bag_hand() -> void:
 		_arms.set_bag_hand(null, "")
 		return
 	var active := bag.call("active_item_node") as Node3D
-	if active != null:
-		_arms.set_bag_hand(active, "hold")
+	if bool(bag.call("release_hand_active")):
+		_arms.set_bag_hand(bag.call("release_hand_target") as Node3D,
+				"knife_release")
+	elif active != null:
+		_arms.set_bag_hand(bag.call("active_hand_target") as Node3D,
+				str(bag.call("active_hand_mode")))
 	elif _bag_open and _bag_focus > 0.58:
 		_arms.set_bag_hand(bag.call("slot_target", _bag_selected) as Node3D, "point")
 	else:
@@ -713,6 +734,9 @@ func _process_fps(delta: float) -> void:
 			else:
 				_prompt.text = "←/→ — choose   ·   %d: occupied   ·   find an empty slot" % slot_no
 			_prompt.visible = true
+		elif _active_bag_item_kind() == "utility_knife":
+			_prompt.text = "LMB — slash   ·   I — open bag"
+			_prompt.visible = true
 		elif _walker.get("on_sea_ladder"):
 			_prompt.text = "W/S — climb   ·   SPACE — let go"
 			_prompt.visible = true
@@ -950,8 +974,13 @@ func _process_fps(delta: float) -> void:
 	var bag_roll := bag_load_arc * 0.025
 	_roll = lerpf(_roll, clampf(heel * 0.24 + bag_roll, -0.11, 0.11),
 			1.0 - exp(-6.0 * delta))
-	_cam.global_basis = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) \
-			* Basis(Vector3.BACK, _roll)
+	var knife_kick := Vector3.ZERO
+	var held_bag := _deck_bag()
+	if held_bag != null and held_bag.has_method("active_knife_camera_kick"):
+		knife_kick = held_bag.call("active_knife_camera_kick") as Vector3
+	_cam.global_basis = Basis(Vector3.UP, yaw + knife_kick.y) \
+			* Basis(Vector3.RIGHT, pitch + knife_kick.x) \
+			* Basis(Vector3.BACK, _roll + knife_kick.z)
 	if target.has_method("update_deck_bag_pose"):
 		target.update_deck_bag_pose(delta, _cam, _bag_focus)
 	_refresh_bag_hand()
@@ -967,7 +996,63 @@ func _process_fps(delta: float) -> void:
 		if _arms.has_method("set_sea_ladder"):
 			_arms.set_sea_ladder(_flag(_walker, "on_sea_ladder"), _walker.pos.y)
 		_arms.update(delta, target, engaged, walking, _flag(_walker, "swimming"))
+	_resolve_active_knife_sweep()
 	_update_warmth(delta)
+
+
+func _active_bag_item_kind() -> String:
+	var bag := _deck_bag()
+	if bag == null:
+		return ""
+	return str(bag.call("active_item_kind"))
+
+
+func _resolve_active_knife_sweep() -> void:
+	var bag := _deck_bag()
+	if bag == null or str(bag.call("active_item_kind")) != "utility_knife":
+		return
+	var sweep: Dictionary = bag.call("active_knife_sweep")
+	if sweep.is_empty() or get_world_3d() == null:
+		return
+	var excluded: Array[RID] = []
+	if target is CollisionObject3D:
+		excluded.append((target as CollisionObject3D).get_rid())
+	var blade_base: Vector3 = sweep.get("blade_base", Vector3.ZERO)
+	var blade_tip: Vector3 = sweep.get("blade_tip", Vector3.ZERO)
+	var edge := blade_tip - blade_base
+	var reach_tip := blade_tip + edge.normalized() * 0.055 \
+			if edge.length_squared() > 0.000001 else blade_tip
+	var segments := [
+		[sweep.get("from", Vector3.ZERO), sweep.get("to", Vector3.ZERO)],
+		[blade_base, reach_tip],
+	]
+	var hit := {}
+	for segment in segments:
+		var from: Vector3 = segment[0]
+		var to: Vector3 = segment[1]
+		if from.distance_squared_to(to) < 0.000001:
+			continue
+		var query := PhysicsRayQueryParameters3D.create(from, to)
+		query.exclude = excluded
+		query.collide_with_areas = true
+		hit = get_world_3d().direct_space_state.intersect_ray(query)
+		if not hit.is_empty():
+			break
+	if hit.is_empty():
+		return
+	var collider := hit.get("collider") as Object
+	var position: Vector3 = hit.get("position", Vector3.ZERO)
+	var normal: Vector3 = hit.get("normal", Vector3.UP)
+	bag.call("mark_active_knife_hit", collider, position, normal)
+	var receiver := collider as Node
+	while receiver != null and receiver != target:
+		if receiver.has_method("hit_by_knife"):
+			receiver.call("hit_by_knife", 35.0, position, normal)
+			break
+		if receiver.has_method("take_damage"):
+			receiver.call("take_damage", 35.0)
+			break
+		receiver = receiver.get_parent()
 
 
 func _tick_stair_step() -> void:
@@ -1549,6 +1634,3 @@ func _inum(obj: Object, key: String) -> int:
 	if typeof(v) == TYPE_FLOAT:
 		return int(v)
 	return 0
-
-
-

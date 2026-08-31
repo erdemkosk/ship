@@ -34,13 +34,13 @@ static func device_bounds(device: Node3D) -> AABB:
 
 static func solve(skeleton: Skeleton3D, finger_chains: Dictionary,
 		device: Node3D, bounds: AABB, previous: Dictionary,
-		pose_to_world: Transform3D, delta: float) -> Dictionary:
+		pose_to_world: Transform3D, delta: float, pad := FINGER_PAD) -> Dictionary:
 	var scales := previous.duplicate(true)
 	var touched := 0
 	var penetrations := 0
 	var samples := 0
 	var nearest := INF
-	var grown := bounds.grow(FINGER_PAD)
+	var grown := bounds.grow(maxf(pad, 0.0))
 	for finger: int in finger_chains:
 		var chain: PackedInt32Array = finger_chains[finger]
 		var values: Array = scales.get(finger, [0.18, 0.18, 0.18])
