@@ -39,6 +39,14 @@ const FPS_LOOK_TAU := 0.075
 var _look_yaw := 0.0
 var _look_pitch := 0.0
 
+## WRAD arms terminate inside the torso. Free look may inspect the floor, but
+## a planted/loaded hand cannot follow that view without exposing the open
+## shoulder ends.  -0.56 rad is the last angle where both shoulder caps remain
+## behind the camera on the 70-degree gameplay lens.
+const FREE_LOOK_DOWN_LIMIT := -1.40
+const HELD_LOOK_DOWN_LIMIT := -0.56
+const LOOK_UP_LIMIT := 1.40
+
 
 
 var _cam: Camera3D
@@ -285,6 +293,18 @@ func _panel_open() -> bool:
 	return _panel != null and _panel.has_method("is_open") and _panel.is_open()
 
 
+func _view_pitch_guard_active() -> bool:
+	# Check control state directly as well as the hand rig so the limit is active
+	# on the exact frame E takes hold, before the per-hand claim has settled.
+	if target != null and (_flag(target, "helm_engaged") \
+			or _flag(target, "telegraph_engaged")):
+		return true
+	if _flag(_walker, "on_sea_ladder"):
+		return true
+	return _arms != null and _arms.has_method("view_pitch_guard_active") \
+			and bool(_arms.call("view_pitch_guard_active"))
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("toggle_camera"):
 		set_mode((mode + 1) % 3)
@@ -362,7 +382,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			return                      # leaning in; the camera is driving
 		if mode == Mode.FPS:
 			_look_yaw -= event.relative.x * FPS_LOOK
-			_look_pitch = clampf(_look_pitch - event.relative.y * FPS_LOOK, -1.4, 1.4)
+			var down_limit := HELD_LOOK_DOWN_LIMIT \
+					if _view_pitch_guard_active() else FREE_LOOK_DOWN_LIMIT
+			_look_pitch = clampf(_look_pitch - event.relative.y * FPS_LOOK,
+					down_limit, LOOK_UP_LIMIT)
 		elif _orbiting:
 			yaw -= event.relative.x * 0.005
 			if mode == Mode.FREE:
@@ -1028,6 +1051,13 @@ func _process_fps(delta: float) -> void:
 		var lk := 1.0 - exp(-delta / FPS_LOOK_TAU)
 		yaw = lerp_angle(yaw, _look_yaw, lk)
 		pitch = lerpf(pitch, _look_pitch, lk)
+
+	# Entering a hold while already looking at the floor must close the shoulder
+	# seam on that same frame. Subsequent mouse input is clamped above, so this is
+	# normally a one-shot correction rather than a continuously driven camera.
+	if _view_pitch_guard_active():
+		pitch = maxf(pitch, HELD_LOOK_DOWN_LIMIT)
+		_look_pitch = maxf(_look_pitch, HELD_LOOK_DOWN_LIMIT)
 
 	# --- how far you can turn your head while you have hold of something -----
 	# Planted at a control your BODY does not turn. A helmsman with both hands

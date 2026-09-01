@@ -155,6 +155,21 @@ func inspecting_id() -> String:
 	return _inspect
 
 
+func view_pitch_guard_active() -> bool:
+	## The arm meshes end inside the torso.  While a hand is planted on a real
+	## object the player may turn their head, but looking below the shoulder line
+	## exposes those deliberately hidden mesh ends.  Camera code uses this single
+	## semantic answer for controls, carried tools and the boarding ladder.
+	if _ladder_driver.is_active():
+		return true
+	if _bag_hand_target != null or _rifle_support_target != null:
+		return true
+	for side: String in ["L", "R"]:
+		if str(_claim.get(side, "")) != "":
+			return true
+	return false
+
+
 func body_lean_local() -> Vector3:
 	## Camera-local upper-body contribution for boat_camera.gd. The arm rig still
 	## solves the exact palm contact; this moves the eye/shoulders with it so a
