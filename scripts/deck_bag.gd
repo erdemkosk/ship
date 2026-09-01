@@ -13,24 +13,26 @@ const SLOT_POSITIONS := [
 	Vector3(-0.060, -0.045, 0.125),
 	Vector3(0.060, -0.050, 0.125),
 	Vector3(0.174, -0.045, 0.125),
-	# The long-gun cradle overlaps the bag's lower lip by a few centimetres.
-	# This keeps it unmistakably BELOW the tool row without letting the camera
-	# crop the rifle and its straps out of the inspection view.
-	# The imported armature's visible stock sits about 18 cm below its semantic
-	# root. This compensated root position places the actual rifle across the
-	# lowest face of the bag (not off the bottom of the viewport).
-	Vector3(0.0, -0.235, 0.245),
+	# The rifle sits in the sling plane immediately behind the working hands.
+	# Keeping it only a little proud of the canvas makes it read as part of the
+	# bag instead of a second first-person weapon floating across the foreground.
+	Vector3(0.0, -0.330, 0.145),
 ]
 const SLOT_LABELS := ["Flashlight", "Signal flare", "Utility knife", "Multitool",
 		"Hunting rifle"]
 const RIFLE_SLOT := 4
-const RELOAD_CARTRIDGE_SHOW := 0.28
-const RELOAD_INSERTED := 1.32
-const RELOAD_BOLT_START := 1.42
-const RELOAD_BOLT_END := 2.42
-const RELOAD_DURATION := 2.75
+const RELOAD_BOLT_OPEN_START := 0.25
+const RELOAD_BOLT_OPEN_END := 0.95
+const RELOAD_CARTRIDGE_SHOW := 1.15
+const RELOAD_CARTRIDGE_MOVE := 1.40
+const RELOAD_CARTRIDGE_INSERT := 2.00
+const RELOAD_INSERTED := 2.28
+const RELOAD_BOLT_CLOSE_START := 2.45
+const RELOAD_BOLT_CLOSE_END := 2.90
+const RELOAD_DURATION := 3.30
 
 var _slot_anchors: Array[Node3D] = []
+var _pointer_anchors: Array[Node3D] = []
 ## Deliberately untyped: an empty physical slot is represented by null.
 var _slot_items: Array = []
 var _active_item: Node3D
@@ -53,6 +55,11 @@ var _rifle_reload_blend := 0.0
 # weapon-space lock may engage; surface/contact checks still prevent an early
 # bad freeze.
 const RIFLE_ADS_GRIP_SETTLE := 0.06
+# The imported stock continues roughly 33 cm behind the rear sight. At 39 cm
+# that left its butt almost on the 5 cm near plane and the camera visibly sliced
+# into the wood. A 50 cm rear-sight distance keeps the complete rifle in front
+# of the eye while preserving a readable iron-sight picture.
+const RIFLE_ADS_REAR_DISTANCE := -0.500
 
 
 func _ready() -> void:
@@ -93,9 +100,9 @@ func update_camera_pose(delta: float, camera: Camera3D, amount: float) -> void:
 		# weighted elbow bend instead of a straight mannequin arm.
 		# Slightly higher in the lap: the long-gun cradle remains visible below
 		# while the four quick-access pockets stay clear of the carrying forearm.
-		# Raise the bag body so the dedicated long-gun sling can live physically
-		# beneath it without the rifle being cropped out of the inspection view.
-		var inspect := Vector3(0.050, 0.070, -0.570)
+		# The long-gun sling now hangs well below the canvas. Lift the complete
+		# inspection composition enough to keep the low rifle selectable on screen.
+		var inspect := Vector3(0.050, 0.135, -0.570)
 		var a := shoulder.lerp(round_ribs, ease)
 		var b := round_ribs.lerp(inspect, ease)
 		var pos := a.lerp(b, ease)
@@ -128,6 +135,15 @@ func slot_target(index: int) -> Node3D:
 		return null
 	var item: Node3D = _slot_items[index] as Node3D if slot_occupied(index) else null
 	return item if item != null else _slot_anchors[index]
+
+
+func slot_pointer_target(index: int) -> Node3D:
+	## Point at a stable spot just in front of the webbing. Using the item root
+	## itself put the fingertip inside wide models and made the gesture read as an
+	## open hand reaching through them instead of an index indicating a choice.
+	if index < 0 or index >= _pointer_anchors.size():
+		return null
+	return _pointer_anchors[index]
 
 
 func slot_label(index: int) -> String:
@@ -501,7 +517,7 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 			var eye_line := camera.global_transform * Transform3D(Basis.IDENTITY,
 					# Pre-compensate the measured shoulder/IK settle so the rendered
 					# rear notch—not merely the mathematical target—lands at eye level.
-					Vector3(0.0, 0.035, -0.300))
+					Vector3(0.0, 0.035, RIFLE_ADS_REAR_DISTANCE))
 			var aimed := eye_line * sight.transform.affine_inverse()
 			target = carry.interpolate_with(aimed,
 					smoothstep(0.0, 1.0, _rifle_aim))
@@ -599,34 +615,52 @@ func _update_rifle_reload_hand(rifle: Node3D, camera: Camera3D,
 	var bolt_knuckles := bolt_palm.cross(bolt_fingers).normalized()
 	bolt.basis = Basis(bolt_knuckles, bolt_palm, bolt_fingers)
 	var hand_frame := primary_frame
-	var pose := "pinch"
+	var pose := "bolt_grip"
 	var natural_grip_blend := _reload_segment(t, 0.0, 0.16)
 	var carrying_round := t >= RELOAD_CARTRIDGE_SHOW and t < RELOAD_INSERTED
-	if t < RELOAD_CARTRIDGE_SHOW:
-		# Position leaves the trigger grip; hands.gd supplies the neutral wrist
-		# frame. No hand-authored Euler rotation participates in this reach.
+	var bolt_contact_active := false
+	if t < RELOAD_BOLT_OPEN_START:
+		# R begins by moving the firing hand to the bolt. The bolt animation cannot
+		# start until the palm has arrived at the live knob transform.
 		hand_frame = Transform3D(primary_frame.basis,
-				primary_frame.origin.lerp(pocket_palm_position,
-				_reload_segment(t, 0.0, RELOAD_CARTRIDGE_SHOW)))
-	elif t < 0.48:
+				primary_frame.origin.lerp(bolt.origin,
+				_reload_segment(t, 0.0, RELOAD_BOLT_OPEN_START)))
+		bolt_contact_active = t >= 0.12
+	elif t < RELOAD_BOLT_OPEN_END:
+		hand_frame = bolt
+		bolt_contact_active = true
+	elif t < RELOAD_CARTRIDGE_SHOW:
+		# The animation is paused at its measured full-rear key. The hand may leave
+		# the knob, but the metal remains open while it travels to the cartridge.
+		pose = "pinch"
+		hand_frame = Transform3D(chamber.basis,
+				bolt.origin.lerp(pocket_palm_position,
+				_reload_segment(t, RELOAD_BOLT_OPEN_END,
+				RELOAD_CARTRIDGE_SHOW)))
+	elif t < RELOAD_CARTRIDGE_MOVE:
+		pose = "pinch"
 		desired_round = pocket_round
 		hand_frame = Transform3D(chamber.basis,
 				desired_round * round_palm_local)
-	elif t < 1.08:
+	elif t < RELOAD_CARTRIDGE_INSERT:
+		pose = "pinch"
 		desired_round = Transform3D(chamber.basis,
 				pocket_round.origin.lerp(chamber_entry.origin,
-				_reload_segment(t, 0.48, 1.08)))
+				_reload_segment(t, RELOAD_CARTRIDGE_MOVE,
+				RELOAD_CARTRIDGE_INSERT)))
 		hand_frame = Transform3D(chamber.basis,
 				desired_round * round_palm_local)
 	elif t < RELOAD_INSERTED:
+		pose = "pinch"
 		desired_round = Transform3D(chamber.basis,
 				chamber_entry.origin.lerp(chamber.origin,
-				_reload_segment(t, 1.08, RELOAD_INSERTED)))
+				_reload_segment(t, RELOAD_CARTRIDGE_INSERT,
+				RELOAD_INSERTED)))
 		hand_frame = Transform3D(chamber.basis,
 				desired_round * round_palm_local)
-	elif t < RELOAD_BOLT_START:
+	elif t < RELOAD_BOLT_CLOSE_START:
 		var approach_blend := _reload_segment(t,
-				RELOAD_INSERTED, RELOAD_BOLT_START)
+				RELOAD_INSERTED, RELOAD_BOLT_CLOSE_START)
 		# Position travels to the knob while the authored endpoint stays the
 		# chamber frame. hands.gd performs the one and only chamber->natural wrist
 		# blend; interpolating this basis too caused a hidden second rotation.
@@ -634,12 +668,14 @@ func _update_rifle_reload_hand(rifle: Node3D, camera: Camera3D,
 		hand_frame = Transform3D(chamber.basis,
 				inserted_palm.lerp(bolt.origin, approach_blend))
 		pose = "bolt_grip"
-	elif t < RELOAD_BOLT_END:
+	elif t < RELOAD_BOLT_CLOSE_END:
 		pose = "bolt_grip"
 		hand_frame = bolt
+		bolt_contact_active = true
 	else:
 		pose = "rifle_primary"
-		var return_blend := _reload_segment(t, RELOAD_BOLT_END, RELOAD_DURATION)
+		var return_blend := _reload_segment(t, RELOAD_BOLT_CLOSE_END,
+				RELOAD_DURATION)
 		# Preserve one stable trigger-grip endpoint while the palm comes home.
 		# Blending bolt->primary here and then blending it again against the
 		# anatomical frame made the wrist corkscrew near the end of the reload.
@@ -676,13 +712,13 @@ func _update_rifle_reload_hand(rifle: Node3D, camera: Camera3D,
 		_rifle_primary_target.set_meta("held_device_target", desired_round)
 		_rifle_primary_target.set_meta("contact_bounds",
 				rifle.call("cartridge_contact_bounds") as AABB)
-	elif t >= RELOAD_INSERTED and t < RELOAD_BOLT_END:
+	elif bolt_contact_active:
 		_rifle_primary_target.remove_meta("held_device_target")
 		_rifle_primary_target.set_meta("held_device", rifle)
 		_rifle_primary_target.set_meta("held_grip_transform", Transform3D.IDENTITY)
 		_rifle_primary_target.set_meta("contact_bounds",
 				rifle.call("bolt_contact_bounds") as AABB)
-	elif t >= RELOAD_BOLT_END:
+	elif t >= RELOAD_BOLT_CLOSE_END:
 		_rifle_primary_target.remove_meta("held_device_target")
 		var primary_grip := rifle.call("primary_grip_node") as Node3D
 		_configure_normal_rifle_hand(rifle, primary_grip)
@@ -748,6 +784,34 @@ func _cylinder(radius: float, height: float, pos: Vector3, rot_deg: Vector3,
 	return _mesh_instance(mesh, pos, rot_deg, material, part_name, parent)
 
 
+func _ring(inner_radius: float, outer_radius: float, pos: Vector3,
+		rot_deg: Vector3, material: Material, part_name: String) -> MeshInstance3D:
+	var mesh := TorusMesh.new()
+	mesh.inner_radius = inner_radius
+	mesh.outer_radius = outer_radius
+	mesh.rings = 14
+	mesh.ring_segments = 8
+	return _mesh_instance(mesh, pos, rot_deg, material, part_name)
+
+
+func _flat_strap_piece(from: Vector3, to: Vector3, width: float,
+		thickness: float, material: Material, part_name: String) -> MeshInstance3D:
+	## A flat leather band between two authored points in the bag's front plane.
+	## Individual short pieces form a gentle curve without turning leather into
+	## the round hose/cylinder silhouette the old handle used.
+	var delta := to - from
+	var angle := rad_to_deg(atan2(delta.y, delta.x))
+	return _box(Vector3(delta.length(), width, thickness), from.lerp(to, 0.5),
+			Vector3(0.0, 0.0, angle), material, part_name)
+
+
+func _cubic_strap_point(a: Vector3, b: Vector3, c: Vector3, d: Vector3,
+		t: float) -> Vector3:
+	var u := 1.0 - t
+	return a * (u * u * u) + b * (3.0 * u * u * t) \
+			+ c * (3.0 * u * t * t) + d * (t * t * t)
+
+
 func _buckle(center: Vector3, width: float, height: float,
 		brass: Material, prefix: String) -> void:
 	var bar := 0.008
@@ -782,6 +846,7 @@ func _build() -> void:
 	var canvas_wear := _material(Color(0.155, 0.158, 0.125), 0.99)
 	var leather := _material(Color(0.145, 0.080, 0.045), 0.91)
 	var leather_edge := _material(Color(0.075, 0.043, 0.028), 0.96)
+	var aged_leather := _material(Color(0.245, 0.128, 0.060), 0.97)
 	var brass := _material(Color(0.42, 0.30, 0.12), 0.38, 0.78)
 	var steel := _material(Color(0.26, 0.27, 0.27), 0.42, 0.72)
 	var steel_dark := _material(Color(0.090, 0.095, 0.098), 0.58, 0.56)
@@ -813,23 +878,78 @@ func _build() -> void:
 				Vector3.ZERO, leather, "ClosureStrap")
 		_buckle(Vector3(x, 0.070, 0.105), 0.052, 0.048, brass, "ClosureBuckle")
 
-	# Carry handle and shoulder-strap anchors.  Nothing resembles MOLLE: this
-	# is a repaired sailor's bag, held together with leather and brass.
-	_box(Vector3(0.025, 0.11, 0.025), Vector3(-0.105, 0.245, 0.0),
-			Vector3(0.0, 0.0, -12.0), leather, "HandleLeft")
-	_box(Vector3(0.025, 0.11, 0.025), Vector3(0.105, 0.245, 0.0),
-			Vector3(0.0, 0.0, 12.0), leather, "HandleRight")
-	_cylinder(0.013, 0.19, Vector3(0.0, 0.292, 0.0), Vector3(0.0, 0.0, 90.0),
-			leather, "CarryHandle")
+	# Old carry strap: both ends are visibly riveted into reinforced leather tabs
+	# on the bag's rolled mouth. A shallow, asymmetric arch reads as softened,
+	# load-bearing hide; a perfect round cylinder read as a loose rubber hose.
+	for x in [-0.180, 0.180]:
+		_box(Vector3(0.042, 0.104, 0.014), Vector3(x, 0.178, 0.072),
+				Vector3(0.0, 0.0, -8.0 * signf(x)), leather_edge,
+				"CarryStrapTab")
+		_cylinder(0.007, 0.008, Vector3(x, 0.157, 0.082),
+				Vector3(90.0, 0.0, 0.0), brass, "CarryStrapRivet", 10)
+		_stitch_line(Vector3(x - 0.012, 0.142, 0.081),
+				Vector3(x - 0.012, 0.204, 0.081), 4, thread,
+				"CarryTabStitch")
+	var carry_curve := PackedVector3Array([
+		Vector3(-0.180, 0.188, 0.076),
+		Vector3(-0.181, 0.207, 0.078),
+		Vector3(-0.145, 0.232, 0.080),
+		Vector3(-0.090, 0.250, 0.081),
+		Vector3(-0.030, 0.257, 0.082),
+		Vector3(0.040, 0.256, 0.082),
+		Vector3(0.105, 0.242, 0.081),
+		Vector3(0.156, 0.215, 0.079),
+		Vector3(0.180, 0.188, 0.076),
+	])
+	for index in carry_curve.size() - 1:
+		_flat_strap_piece(carry_curve[index], carry_curve[index + 1], 0.030,
+				0.010, aged_leather if index % 3 != 1 else leather_edge,
+				"AgedCarryStrap%02d" % index)
+
+	# Real open brass rings for the long shoulder strap. Short leather ears join
+	# each ring directly to the canvas seam; no floating attachment points.
 	for x in [-0.225, 0.225]:
-		_cylinder(0.022, 0.010, Vector3(x, 0.185, 0.030), Vector3(90.0, 0.0, 0.0),
-			brass, "StrapRing")
+		_box(Vector3(0.035, 0.075, 0.014), Vector3(x, 0.176, 0.060),
+				Vector3(0.0, 0.0, -7.0 * signf(x)), leather,
+				"ShoulderStrapEar")
+		_cylinder(0.006, 0.008, Vector3(x, 0.151, 0.071),
+				Vector3(90.0, 0.0, 0.0), brass, "ShoulderEarRivet", 10)
+		_ring(0.014, 0.021, Vector3(x, 0.207, 0.062),
+				Vector3(90.0, 0.0, 0.0), brass, "ShoulderStrapRing")
+	# The long shoulder strap is still attached while the bag is swung into the
+	# lap. It falls in a broad U behind the rifle rather than hovering beside the
+	# wrist. Alternating worn panels break the procedural-perfect silhouette.
+	var shoulder_curve := PackedVector3Array()
+	var left_curve := [
+		Vector3(-0.225, 0.207, 0.052),
+		Vector3(-0.355, 0.060, 0.048),
+		Vector3(-0.315, -0.405, 0.055),
+		Vector3(0.000, -0.432, 0.060),
+	]
+	var right_curve := [
+		Vector3(0.000, -0.432, 0.060),
+		Vector3(0.315, -0.405, 0.055),
+		Vector3(0.355, 0.060, 0.048),
+		Vector3(0.225, 0.207, 0.052),
+	]
+	for sample in 17:
+		shoulder_curve.append(_cubic_strap_point(left_curve[0], left_curve[1],
+				left_curve[2], left_curve[3], float(sample) / 16.0))
+	for sample in range(1, 17):
+		shoulder_curve.append(_cubic_strap_point(right_curve[0], right_curve[1],
+				right_curve[2], right_curve[3], float(sample) / 16.0))
+	for index in shoulder_curve.size() - 1:
+		_flat_strap_piece(shoulder_curve[index], shoulder_curve[index + 1],
+				0.032, 0.009,
+				aged_leather if floori(float(index) / 7.0) % 3 != 1 else leather,
+				"AgedShoulderStrap%02d" % index)
 
 	# Exterior quick-access fittings: each tool has its own root and physical
 	# slot. These are the exact meshes the right hand removes; no inventory icon
 	# or duplicate viewmodel is swapped in when E is pressed.
 	var tool_z := 0.125
 	_slot_anchors.clear()
+	_pointer_anchors.clear()
 	_slot_items.clear()
 	for index in SLOT_POSITIONS.size():
 		var anchor := Node3D.new()
@@ -837,6 +957,14 @@ func _build() -> void:
 		anchor.transform = _slot_transform(index)
 		add_child(anchor)
 		_slot_anchors.append(anchor)
+		var pointer_anchor := Node3D.new()
+		pointer_anchor.name = "Slot%dPointer" % (index + 1)
+		pointer_anchor.transform = _slot_transform(index)
+		# Local +Z is the bag's camera-facing normal in inspection pose. Four
+		# centimetres leaves the extended fingertip visibly clear of the prop.
+		pointer_anchor.position += Vector3(0.0, 0.0, 0.040)
+		add_child(pointer_anchor)
+		_pointer_anchors.append(pointer_anchor)
 		var item: Node3D
 		if index == 2:
 			item = UtilityKnifeScript.new() as Node3D
@@ -880,12 +1008,13 @@ func _build() -> void:
 			_box(Vector3(0.060, 0.018, 0.016), Vector3(x, y, tool_z + 0.020),
 					Vector3.ZERO, leather, "ToolLoop")
 
-	# Dedicated long-gun cradle below the ordinary inventory. These two broad
-	# leather loops visibly carry the rifle and are not addressable by tools.
+	# Dedicated long-gun cradle below the ordinary inventory. The loop faces are
+	# just in front of the rifle's 14.5 cm depth plane, so they visibly retain it
+	# while the complete assembly remains behind both working hands.
 	for x in [-0.285, 0.285]:
-		_box(Vector3(0.055, 0.090, 0.022), Vector3(x, -0.103, 0.262),
+		_box(Vector3(0.055, 0.090, 0.022), Vector3(x, -0.228, 0.168),
 				Vector3.ZERO, leather, "RifleSling")
-		_cylinder(0.009, 0.060, Vector3(x, -0.060, 0.261),
+		_cylinder(0.009, 0.060, Vector3(x, -0.185, 0.167),
 				Vector3(0.0, 0.0, 90.0), brass, "RifleSlingRivet", 10)
 
 	# Worn salt bloom and hand repair.  Subtle raised patches catch the cabin

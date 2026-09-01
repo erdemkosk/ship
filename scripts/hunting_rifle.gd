@@ -27,13 +27,20 @@ const SOURCE_BOLT_HANDLE := Vector3(0.230, 0.016, 0.070)
 const SOURCE_MUZZLE := Vector3(0.905, 0.058, 0.0)
 const FIRE_DURATION := 1.25
 const FLASH_DURATION := 0.165
-const RELOAD_DURATION := 2.75
-const RELOAD_CARTRIDGE_SHOW := 0.28
-const RELOAD_INSERTED := 1.32
-const RELOAD_BOLT_START := 1.42
-const RELOAD_BOLT_DURATION := 1.0
+const RELOAD_DURATION := 3.30
+const RELOAD_BOLT_OPEN_START := 0.25
+const RELOAD_BOLT_OPEN_END := 0.95
+const RELOAD_CARTRIDGE_SHOW := 1.15
+const RELOAD_INSERTED := 2.28
+const RELOAD_BOLT_CLOSE_START := 2.45
+const RELOAD_BOLT_CLOSE_END := 2.90
+# Measured from Rifle_Shoot: Bolt_Bone reaches its furthest rear translation at
+# 0.8333 s. Hold both animation and sound there while the cartridge is inserted.
+const RELOAD_BOLT_HOLD_CLIP_TIME := 0.8333
+const RELOAD_BOLT_CLIP_END := 1.25
 const RELOAD_SOUND_PITCH := 0.85
 const INTERIOR_AUDIO_BUS := &"RifleInterior"
+const FIRE_ONLY_ANIMATION := &"Rifle_Shoot_TriggerOnly"
 # 7.92x57 mm Mauser proportions, in metres. The cartridge root is the centre of
 # the case head; local +Z is the bullet/chamber direction. Keeping this contract
 # explicit prevents the old model from travelling primer-first into the rifle.
@@ -41,7 +48,7 @@ const CARTRIDGE_CASE_LENGTH := 0.057
 const CARTRIDGE_OVERALL_LENGTH := 0.082
 # The round sits on the right hand's radial (thumb/index) side, not on the palm
 # centreline where the middle finger would catch it first.
-const CARTRIDGE_PALM_LOCAL := Vector3(0.0, -0.004, -0.026)
+const CARTRIDGE_PALM_LOCAL := Vector3(0.0, -0.004, 0.005)
 
 var _model: Node3D
 var _body_mesh: MeshInstance3D
@@ -57,6 +64,8 @@ var _skeleton: Skeleton3D
 var _bolt_bone := -1
 var _cartridge: Node3D
 var _animation: AnimationPlayer
+var _fire_animation := StringName()
+var _reload_animation := StringName()
 var _flash_material: ShaderMaterial
 var _flash_light: OmniLight3D
 var _flash_core: MeshInstance3D
@@ -82,6 +91,8 @@ var _shot_serial := 0
 var _loaded := true
 var _reload_elapsed := -1.0
 var _reload_bolt_started := false
+var _reload_bolt_held := false
+var _reload_bolt_closing := false
 
 
 func _init() -> void:
@@ -126,6 +137,7 @@ func _build_model() -> void:
 			Basis(Vector3.BACK, Vector3.LEFT, Vector3.DOWN))
 	_bolt_handle_rest = _bolt_handle.transform
 	_find_animation_player(_model)
+	_build_fire_only_animation()
 	_build_cartridge()
 	_build_shot_audio()
 
@@ -162,6 +174,33 @@ func _find_animation_player(root: Node) -> void:
 		_find_animation_player(child)
 		if _animation != null:
 			return
+
+
+func _build_fire_only_animation() -> void:
+	## The supplied Rifle_Shoot clip also cycles Bolt_Bone. Firing must animate
+	## only the trigger; the two bolt tracks remain reserved for the explicit R
+	## reload. Duplicate the imported resource so the original stays untouched.
+	if _animation == null:
+		return
+	var source_name := _shoot_animation_name()
+	if source_name == StringName():
+		return
+	_reload_animation = source_name
+	var source := _animation.get_animation(source_name)
+	if source == null:
+		return
+	var fire_clip := source.duplicate(true) as Animation
+	for track_index in range(fire_clip.get_track_count() - 1, -1, -1):
+		if "bolt_bone" in str(fire_clip.track_get_path(track_index)).to_lower():
+			fire_clip.remove_track(track_index)
+	var library := _animation.get_animation_library(&"")
+	if library == null:
+		library = AnimationLibrary.new()
+		_animation.add_animation_library(&"", library)
+	if library.has_animation(FIRE_ONLY_ANIMATION):
+		library.remove_animation(FIRE_ONLY_ANIMATION)
+	library.add_animation(FIRE_ONLY_ANIMATION, fire_clip)
+	_fire_animation = FIRE_ONLY_ANIMATION
 
 
 func _find_skeleton(root: Node) -> void:
@@ -654,8 +693,8 @@ func cartridge_node() -> Node3D:
 
 
 func cartridge_palm_local() -> Vector3:
-	## The palm remains behind the round. Thumb and index meet roughly five
-	## centimetres forward of this point around the lower case body.
+	## Palm-frame anchor beside the case head. The precision solver places the
+	## distal thumb/index pads farther forward on the lower case body.
 	return CARTRIDGE_PALM_LOCAL
 
 
@@ -737,7 +776,7 @@ func begin_fire() -> bool:
 	if _shot_body_audio.volume_db > -45.0:
 		_shot_body_audio.play()
 	if _animation != null:
-		var clip := _shoot_animation_name()
+		var clip := _fire_animation
 		if clip != StringName():
 			_animation.stop()
 			_animation.play(clip, -1.0, 1.0)
@@ -757,9 +796,12 @@ func begin_reload() -> bool:
 		_shot_body_audio.stop()
 	_reload_elapsed = 0.0
 	_reload_bolt_started = false
+	_reload_bolt_held = false
+	_reload_bolt_closing = false
 	_reload_sound_started_at = -1.0
 	if _reload_audio != null:
 		_reload_audio.stop()
+		_reload_audio.stream_paused = false
 	_flash_left = 0.0
 	if _animation != null:
 		_animation.stop()
@@ -769,9 +811,12 @@ func begin_reload() -> bool:
 func cancel_reload() -> void:
 	_reload_elapsed = -1.0
 	_reload_bolt_started = false
+	_reload_bolt_held = false
+	_reload_bolt_closing = false
 	_reload_sound_started_at = -1.0
 	if _reload_audio != null:
 		_reload_audio.stop()
+		_reload_audio.stream_paused = false
 	if _cartridge != null:
 		_cartridge.visible = false
 	if _animation != null:
@@ -795,6 +840,19 @@ func reload_amount() -> float:
 			if _reload_elapsed >= 0.0 else 0.0
 
 
+func reload_bolt_held_open() -> bool:
+	return _reload_elapsed >= RELOAD_BOLT_OPEN_END \
+			and _reload_elapsed < RELOAD_BOLT_CLOSE_START \
+			and _reload_bolt_held
+
+
+func bolt_open_amount() -> float:
+	# Roughly 73 mm at the measured full-rear key. Rotation also changes the
+	# knob's position slightly, which is useful here because this reports the
+	# player's visible control rather than only one source-space coordinate.
+	return bolt_grip_transform().origin.distance_to(_bolt_handle_rest.origin)
+
+
 func _shoot_animation_name() -> StringName:
 	if _animation == null:
 		return StringName()
@@ -815,25 +873,47 @@ func tick(delta: float) -> void:
 		if _cartridge != null:
 			_cartridge.visible = _reload_elapsed >= RELOAD_CARTRIDGE_SHOW \
 					and _reload_elapsed < RELOAD_INSERTED
-		if not _reload_bolt_started and _reload_elapsed >= RELOAD_BOLT_START:
+		if not _reload_bolt_started \
+				and _reload_elapsed >= RELOAD_BOLT_OPEN_START:
 			_reload_bolt_started = true
 			_reload_sound_started_at = _reload_elapsed
 			if _reload_audio != null:
 				_reload_audio.pitch_scale = RELOAD_SOUND_PITCH
 				_reload_audio.play()
 			if _animation != null:
-				var reload_clip := _shoot_animation_name()
+				var reload_clip := _reload_animation
 				if reload_clip != StringName():
 					_animation.stop()
-					var clip_resource := _animation.get_animation(reload_clip)
-					var sync_speed := clip_resource.length / RELOAD_BOLT_DURATION \
-							if clip_resource != null else 1.0
-					_animation.play(reload_clip, -1.0, sync_speed)
+					var open_speed := RELOAD_BOLT_HOLD_CLIP_TIME \
+							/ (RELOAD_BOLT_OPEN_END - RELOAD_BOLT_OPEN_START)
+					_animation.play(reload_clip, -1.0, open_speed)
+		if _reload_bolt_started and not _reload_bolt_held \
+				and _reload_elapsed >= RELOAD_BOLT_OPEN_END:
+			_reload_bolt_held = true
+			if _animation != null:
+				_animation.pause()
+				_animation.seek(RELOAD_BOLT_HOLD_CLIP_TIME, true)
+			if _reload_audio != null:
+				_reload_audio.stream_paused = true
+		if _reload_bolt_held and not _reload_bolt_closing \
+				and _reload_elapsed >= RELOAD_BOLT_CLOSE_START:
+			_reload_bolt_closing = true
+			if _animation != null and _reload_animation != StringName():
+				var close_speed := (RELOAD_BOLT_CLIP_END \
+						- RELOAD_BOLT_HOLD_CLIP_TIME) \
+						/ (RELOAD_BOLT_CLOSE_END - RELOAD_BOLT_CLOSE_START)
+				_animation.play(_reload_animation, -1.0, close_speed)
+				_animation.seek(RELOAD_BOLT_HOLD_CLIP_TIME, true)
+			if _reload_audio != null:
+				_reload_audio.stream_paused = false
 		if _reload_elapsed >= RELOAD_DURATION:
 			_reload_elapsed = -1.0
 			_reload_bolt_started = false
+			_reload_bolt_held = false
+			_reload_bolt_closing = false
 			if _reload_audio != null:
 				_reload_audio.stop()
+				_reload_audio.stream_paused = false
 			_loaded = true
 			if _cartridge != null:
 				_cartridge.visible = false
@@ -879,6 +959,18 @@ func reload_sound_pitch() -> float:
 func shoot_animation_playing() -> bool:
 	return _animation != null and _animation.is_playing() \
 			and "shoot" in str(_animation.current_animation).to_lower()
+
+
+func current_animation_moves_bolt() -> bool:
+	if _animation == null or not _animation.is_playing():
+		return false
+	var clip := _animation.get_animation(_animation.current_animation)
+	if clip == null:
+		return false
+	for track_index in clip.get_track_count():
+		if "bolt_bone" in str(clip.track_get_path(track_index)).to_lower():
+			return true
+	return false
 
 
 func fire_phase() -> float:
@@ -934,3 +1026,27 @@ func _count_meshes(node: Node) -> int:
 	for child: Node in node.get_children():
 		count += _count_meshes(child)
 	return count
+
+
+func closest_camera_surface_z(camera: Camera3D) -> float:
+	## Camera-local Z of the closest point on the imported rifle hull. In front of
+	## the eye this is negative; callers compare it with the camera's near plane.
+	## Measuring the complete stock catches clipping that rear-sight alignment
+	## alone cannot see.
+	if camera == null or _model == null:
+		return 0.0
+	var closest := -INF
+	var stack: Array[Node] = [_model]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back() as Node
+		for child: Node in node.get_children():
+			stack.append(child)
+		if not (node is MeshInstance3D):
+			continue
+		var mesh_node := node as MeshInstance3D
+		var bounds := mesh_node.get_aabb()
+		for corner in 8:
+			var camera_point := camera.to_local(
+					mesh_node.to_global(bounds.get_endpoint(corner)))
+			closest = maxf(closest, camera_point.z)
+	return closest

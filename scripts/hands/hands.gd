@@ -837,14 +837,14 @@ func _drive_bag_hand(_delta: float) -> void:
 	if _bag_hand_mode == "point":
 		rig.set_contact_target("R", null)
 		rig.clear_held_attachment("R")
-		# Build the extended index backwards from the selected object. The palm is
-		# one finger-length away on the natural shoulder-to-slot line, so the
-		# fingertip lands on the object without asking the wrist to kink sideways.
-		var at_slot: Dictionary = rig.natural_axes("R", object_point)
-		var finger: Vector3 = at_slot.get("fingers", -_cam.global_basis.z)
-		contact = object_point - finger.normalized() * 0.105
-		axes = rig.natural_axes("R", contact)
-		axes["fingers"] = (object_point - contact).normalized()
+		# Solve from the rig's measured index-tip offset. This accounts for both
+		# finger length and the index knuckle's thumb-side position in the palm.
+		var point_frame: Dictionary = rig.point_frame("R", object_point)
+		contact = point_frame["contact"] as Vector3
+		axes = {
+			"fingers": point_frame["fingers"] as Vector3,
+			"palm": point_frame["palm"] as Vector3,
+		}
 		pose = "point"
 	elif _bag_hand_mode == "knife" or _bag_hand_mode == "knife_release":
 		# The target is the desired PALM contact, not the prop itself. The solver
@@ -948,7 +948,9 @@ func _drive_bag_hand(_delta: float) -> void:
 		var primary_lock_ready: bool = bool(rig.grip_locked("R")) \
 				or primary_palm.origin.distance_to(primary_world.origin) < 0.005
 		rig.set_grip_locked("R", weapon_pin_requested and primary_lock_ready)
-		rig.set_reach_bias("R", 0.030 if weapon_pin_requested else 0.0)
+		# A properly spaced sight picture puts the stock farther from the camera.
+		# Bring the shoulder girdle into that hold instead of stretching either arm.
+		rig.set_reach_bias("R", 0.085 if weapon_pin_requested else 0.0)
 		if rifle_device != null and _bag_hand_target.has_meta("contact_bounds"):
 			rig.set_contact_target_bounds("R", rifle_device,
 					_bag_hand_target.get_meta("contact_bounds") as AABB, 0.006)
@@ -969,6 +971,11 @@ func _drive_bag_hand(_delta: float) -> void:
 					# true instead of rotating the forearm to imitate the cartridge.
 					var desired_device: Transform3D = _bag_hand_target.get_meta(
 							"held_device_target") as Transform3D
+					# Opposite brass surfaces at the lower case body. The thumb and
+					# index solve to these two pads; no middle/ring digit participates.
+					rig.set_precision_pinch("R",
+							desired_device * Vector3(0.0082, 0.0, 0.031),
+							desired_device * Vector3(-0.0100, 0.0, 0.031))
 					var grip_f := (axes["fingers"] as Vector3).normalized()
 					var grip_p := axes["palm"] as Vector3
 					grip_p = (grip_p - grip_p.project(grip_f)).normalized()
@@ -982,8 +989,10 @@ func _drive_bag_hand(_delta: float) -> void:
 				# wrist-owned; the left hand and camera keep control of the long gun.
 				rig.set_held_attachment("R", rifle_device, reload_grip)
 			else:
+				rig.clear_precision_pinch("R")
 				rig.clear_held_attachment("R")
 		else:
+			rig.clear_precision_pinch("R")
 			rig.set_contact_frozen("R", false)
 			rig.set_contact_target("R", null)
 			rig.clear_held_attachment("R")
@@ -992,6 +1001,7 @@ func _drive_bag_hand(_delta: float) -> void:
 		# wrist straight across all four different silhouettes; the power pose
 		# supplies the actual cylindrical wrap.
 		rig.set_contact_target("R", null)
+		rig.clear_precision_pinch("R")
 		rig.set_grip_locked("R", false)
 		rig.clear_held_attachment("R")
 		axes = rig.natural_axes("R", contact)
@@ -1031,7 +1041,7 @@ func _drive_rifle_support() -> void:
 	var support_lock_ready: bool = bool(rig.grip_locked("L")) \
 			or support_palm.origin.distance_to(support_world.origin) < 0.005
 	rig.set_grip_locked("L", weapon_pin_requested and support_lock_ready)
-	rig.set_reach_bias("L", 0.110 if weapon_pin_requested else 0.0)
+	rig.set_reach_bias("L", 0.155 if weapon_pin_requested else 0.0)
 	if device != null and _rifle_support_target.has_meta("contact_bounds"):
 		rig.set_contact_target_bounds("L", device,
 				# A wrapped fore-end bears through finger pads, not mathematical
@@ -1317,12 +1327,12 @@ func _rest_hand(side: String) -> void:
 	u = u * u * (3.0 - 2.0 * u)
 	var from: Vector3 = _last_grip[side] if u < 1.0 else home
 	var contact: Vector3 = from.lerp(home, u)
-	# Lower the released hand with its current forearm roll intact. The final
-	# idle axes are anatomical for the travelling palm, not a fixed authored
-	# basis that may sit 180 degrees away from the hold we just left.
-	var natural: Dictionary = rig.natural_axes(side, contact)
-	var fingers := natural["fingers"] as Vector3
-	var palm := natural["palm"] as Vector3
+	# Restore the original walking silhouette: loose fingers hang diagonally
+	# down/forward and each palm stays side-on to the camera. Inferring this frame
+	# again from shoulder -> hand made both wrists roll through the step and
+	# periodically presented the broad open palm to the player.
+	var fingers: Vector3 = c.basis * Vector3(out * 0.08, -0.86, -0.46)
+	var palm: Vector3 = c.basis * Vector3(-out * 0.95, -0.12, 0.16)
 	var previous: Dictionary = _last_axes.get(side, {}) as Dictionary
 	if u < 1.0 and previous.has("fingers") and previous.has("palm"):
 		# Rotation-minimising transport: follow the changing forearm direction but

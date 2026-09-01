@@ -513,7 +513,8 @@ func _refresh_bag_hand() -> void:
 	elif active != null:
 		_set_active_bag_item_hands(bag)
 	elif _bag_open and _bag_focus > 0.58:
-		_arms.set_bag_hand(bag.call("slot_target", _bag_selected) as Node3D, "point")
+		_arms.set_bag_hand(bag.call("slot_pointer_target", _bag_selected) as Node3D,
+				"point")
 	else:
 		_clear_active_bag_item_hands()
 

@@ -145,8 +145,8 @@ const POSES := {
 	# Precision pinch: thumb and index meet; unused fingers are curled safely
 	# away instead of floating open through the key or cartridge.
 	"pinch": {
-		"thumb": [0.58, 0.72, 0.50], "thumb_splay": -0.78,
-		"index": [0.62, 0.82, 0.62],
+		"thumb": [0.42, 0.54, 0.36], "thumb_splay": 0.52,
+		"index": [0.58, 0.76, 0.56],
 		"middle": [1.02, 1.28, 0.96], "ring": [1.06, 1.32, 1.00],
 		"pinky": [1.10, 1.36, 1.04],
 	},
@@ -158,9 +158,12 @@ const POSES := {
 	# Index operates the toggle. Middle/ring/pinky close into the palm so they
 	# cannot clip the panel; thumb stabilises the side of the hand.
 	"point": {
-		"thumb": [0.50, 0.58, 0.40], "index": [0.08, 0.05, 0.03],
-		"middle": [0.78, 0.94, 0.86], "ring": [0.84, 1.00, 0.92],
-		"pinky": [0.88, 1.04, 0.96],
+		# One unmistakable straight index. The remaining digits form a compact,
+		# relaxed fist; the old half-curls left four visible fingertips and read as
+		# an open reaching hand rather than a deliberate selection gesture.
+		"thumb": [0.64, 0.82, 0.54], "index": [0.02, 0.01, 0.01],
+		"middle": [1.16, 1.46, 0.98], "ring": [1.22, 1.52, 1.02],
+		"pinky": [1.26, 1.56, 1.06],
 	},
 	# Handset power grasp, with a freer thumb for the push-to-talk bar.
 	"handset": {
@@ -192,6 +195,9 @@ var _curl_axis := {}                    # bone idx -> local axis Vector3
 var _splay_axis := {}                   # bone idx -> local palm-normal axis
 var _sem_inv := {}                      # side -> Basis, semantic->bone-local inverse
 var _palm_local := {}                   # side -> palm centre in bone local (scaled)
+## Rest-pose extended index tip measured from the palm in semantic K/P/F space.
+## The bag pointer uses this rather than guessing one average finger length.
+var _index_tip_from_palm_sem := {}
 var _shoulder_local := {}
 var _weight := {"R": 0.0, "L": 0.0}
 var _want := {"R": 0.0, "L": 0.0}
@@ -213,6 +219,7 @@ var _grip_locked := {"R": false, "L": false}
 ## target while the wrist follows the body solver and visibly swims in fingers.
 var _held_attachment := {"R": {}, "L": {}}
 var _held_attachment_report := {"R": {}, "L": {}}
+var _precision_pinch := {"R": {}, "L": {}}
 var _held_bone_mount := {}
 var _finger_scales := {"R": {}, "L": {}}
 var _finger_report := {"R": {}, "L": {}}
@@ -503,6 +510,32 @@ func natural_axes(side: String, contact: Vector3) -> Dictionary:
 	return {"fingers": F, "palm": P}
 
 
+func point_frame(side: String, tip_target: Vector3) -> Dictionary:
+	## Solve the PALM that places the real extended index tip on `tip_target`.
+	## Index knuckles sit toward the thumb side of the palm, so subtracting only
+	## an average length along F cannot point accurately across all bag slots.
+	var contact := tip_target
+	var axes := natural_axes(side, contact)
+	var offset: Vector3 = _index_tip_from_palm_sem.get(side,
+			Vector3(0.0, 0.0, 0.095))
+	# Re-evaluate once from the resulting palm position because natural wrist
+	# axes depend slightly on the shoulder-to-contact line.
+	for _iteration in 2:
+		var fingers := (axes["fingers"] as Vector3).normalized()
+		var palm := axes["palm"] as Vector3
+		palm = (palm - palm.project(fingers)).normalized()
+		var semantic := Basis(palm.cross(fingers).normalized(), palm, fingers)
+		contact = tip_target - semantic * offset
+		axes = natural_axes(side, contact)
+	var fingers := (axes["fingers"] as Vector3).normalized()
+	var palm := axes["palm"] as Vector3
+	palm = (palm - palm.project(fingers)).normalized()
+	var semantic := Basis(palm.cross(fingers).normalized(), palm, fingers)
+	contact = tip_target - semantic * offset
+	return {"contact": contact, "fingers": fingers, "palm": palm,
+			"tip_target": tip_target}
+
+
 func release(side: String) -> void:
 	_want[side] = 0.0
 	_pose[side] = "open"
@@ -529,6 +562,17 @@ func set_held_attachment(side: String, device: Node3D,
 func clear_held_attachment(side: String) -> void:
 	_held_attachment[side] = {}
 	_held_attachment_report[side] = {}
+
+
+func set_precision_pinch(side: String, thumb_target: Vector3,
+		index_target: Vector3) -> void:
+	if _precision_pinch.has(side):
+		_precision_pinch[side] = {"thumb": thumb_target, "index": index_target}
+
+
+func clear_precision_pinch(side: String) -> void:
+	if _precision_pinch.has(side):
+		_precision_pinch[side] = {}
 
 
 func held_attachment_report(side: String) -> Dictionary:
@@ -604,32 +648,6 @@ func grip_locked(side: String) -> bool:
 
 func finger_contact_report(side: String) -> Dictionary:
 	return (_finger_report.get(side, {}) as Dictionary).duplicate(true)
-
-
-func finger_endpoints_local(side: String, device: Node3D) -> Dictionary:
-	## Instrumentation for precision grips: return the same padded fingertip
-	## endpoints consumed by FingerContactSolver, expressed in device space.
-	var out := {}
-	if device == null or skeleton == null or not _fingers.has(side) \
-			or not _end_bone.has(side):
-		return out
-	var wrist_bone: int = _end_bone[side]
-	if not _wrist.solved.has(wrist_bone):
-		return out
-	var pre_wrist := skeleton.get_bone_global_pose(wrist_bone)
-	var pose_to_world: Transform3D = skeleton.global_transform \
-			* (_wrist.solved[wrist_bone] as Transform3D) \
-			* pre_wrist.affine_inverse()
-	for finger: int in _fingers[side]:
-		var chain: PackedInt32Array = _fingers[side][finger]
-		if chain.is_empty():
-			continue
-		var last := (pose_to_world * skeleton.get_bone_global_pose(
-				chain[chain.size() - 1])).origin
-		var before := (pose_to_world * skeleton.get_bone_global_pose(
-				chain[maxi(chain.size() - 2, 0)])).origin
-		out[finger] = device.to_local(last + (last - before) * 0.72)
-	return out
 
 
 func seed_contact_closure(side: String, amount: float) -> void:
@@ -904,8 +922,60 @@ func _apply_fingers(side: String) -> void:
 			if f == THUMB and i == 0 and spec.has("thumb_splay"):
 				var splay_axis: Vector3 = _splay_axis.get(b, Vector3.UP)
 				posed = rest * Quaternion(splay_axis,
-						float(spec["thumb_splay"]) * amt) * Quaternion(axis, ang)
+						float(spec["thumb_splay"]) * amt)
+				posed *= Quaternion(axis, ang)
 			skeleton.set_bone_pose_rotation(b, posed)
+	if _pose[side] == "pinch" and not (
+			_precision_pinch.get(side, {}) as Dictionary).is_empty():
+		_solve_precision_pinch(side)
+
+
+func _solve_precision_pinch(side: String) -> void:
+	## Aim the two distal pads at opposite sides of the live cartridge. Generic
+	## curl values cannot supply thumb opposition for every wrist orientation;
+	## this small CCD pass solves only the two digits and never rotates the wrist.
+	var targets := _precision_pinch[side] as Dictionary
+	var wrist_bone: int = _end_bone.get(side, -1)
+	if wrist_bone < 0 or not _wrist.solved.has(wrist_bone):
+		return
+	var pre_wrist := skeleton.get_bone_global_pose(wrist_bone)
+	var pose_to_world: Transform3D = skeleton.global_transform \
+			* (_wrist.solved[wrist_bone] as Transform3D) \
+			* pre_wrist.affine_inverse()
+	for finger: int in [THUMB, INDEX]:
+		var world_target: Vector3 = targets[
+				"thumb" if finger == THUMB else "index"] as Vector3
+		_solve_digit_ccd(side, finger, pose_to_world.affine_inverse() * world_target)
+
+
+func _solve_digit_ccd(side: String, finger: int,
+		target_in_skeleton: Vector3) -> void:
+	var chain: PackedInt32Array = _fingers[side][finger]
+	if chain.size() < 2:
+		return
+	for iteration in 5:
+		for joint_i in range(chain.size() - 1, -1, -1):
+			var bone: int = chain[joint_i]
+			var joint_xf := skeleton.get_bone_global_pose(bone)
+			var last_xf := skeleton.get_bone_global_pose(chain[chain.size() - 1])
+			var before_xf := skeleton.get_bone_global_pose(
+					chain[chain.size() - 2])
+			var tip := last_xf.origin + (last_xf.origin - before_xf.origin) * 0.72
+			var from_joint := tip - joint_xf.origin
+			var to_target := target_in_skeleton - joint_xf.origin
+			if from_joint.length_squared() < 1e-7 or to_target.length_squared() < 1e-7:
+				continue
+			var axis_skeleton := from_joint.normalized().cross(
+					to_target.normalized())
+			if axis_skeleton.length_squared() < 1e-7:
+				continue
+			axis_skeleton = axis_skeleton.normalized()
+			var angle := minf(from_joint.angle_to(to_target), deg_to_rad(32.0))
+			var axis_local := (joint_xf.basis.inverse() * axis_skeleton).normalized()
+			var current := skeleton.get_bone_pose_rotation(bone)
+			skeleton.set_bone_pose_rotation(bone,
+					current * Quaternion(axis_local, angle))
+			skeleton.force_update_all_bone_transforms()
 
 
 func _load_glb() -> Node3D:
@@ -1537,6 +1607,12 @@ func _measure_hand_frames() -> void:
 			_palm_local[side] = (H_inv * skeleton.get_bone_global_rest(sock).origin) * scale_s
 		else:
 			_palm_local[side] = kn_c * 0.70 * scale_s
+		if tip.has(INDEX):
+			# `_sem_inv` converts a measured wrist-local vector into semantic K/P/F
+			# coordinates. Both terms are scaled metres, matching grip().
+			_index_tip_from_palm_sem[side] = _sem_inv[side] * (
+					(tip[INDEX] as Vector3) * scale_s
+					- (_palm_local[side] as Vector3))
 
 		var P_rig: Vector3 = H.basis * P_l
 		for fi: int in _fingers[side]:
@@ -1682,3 +1758,25 @@ func palm_global(side: String) -> Vector3:
 	# imported GLB hierarchy scale, so multiplying the point transform directly
 	# would apply that scale twice and report the wrist as the palm.
 	return wrist.origin + wrist.basis.orthonormalized() * (_palm_local[side] as Vector3)
+
+
+func digit_tip_global(side: String, digit_name: String) -> Vector3:
+	## Final rendered fingertip, including the current finger pose and the wrist
+	## modifier. This is an audit surface for gestures that promise exact pointing.
+	var finger_index := FINGERS.find(digit_name)
+	var wrist_bone: int = _end_bone.get(side, -1)
+	if finger_index < 0 or wrist_bone < 0 or not _wrist.solved.has(wrist_bone):
+		return Vector3.INF
+	var chain: PackedInt32Array = _fingers[side].get(finger_index,
+			PackedInt32Array()) as PackedInt32Array
+	if chain.size() < 3:
+		return Vector3.INF
+	# Finger poses are stored before WristAlign, so carry the posed chain through
+	# the exact same wrist delta used by the contact solver.
+	var pre_wrist := skeleton.get_bone_global_pose(wrist_bone)
+	var pose_to_world: Transform3D = skeleton.global_transform \
+			* (_wrist.solved[wrist_bone] as Transform3D) \
+			* pre_wrist.affine_inverse()
+	var distal := skeleton.get_bone_global_pose(chain[2]).origin
+	var middle := skeleton.get_bone_global_pose(chain[1]).origin
+	return pose_to_world * (distal + (distal - middle) * 0.8)
