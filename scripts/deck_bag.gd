@@ -6,6 +6,8 @@ class_name DeckBag3D
 
 const UtilityKnifeScript := preload("res://scripts/utility_knife.gd")
 const HuntingRifleScript := preload("res://scripts/hunting_rifle.gd")
+const KIND_KNIFE := "utility_knife"
+const KIND_RIFLE := "hunting_rifle"
 
 var _clock := 0.0
 const SLOT_POSITIONS := [
@@ -20,7 +22,9 @@ const SLOT_POSITIONS := [
 ]
 const SLOT_LABELS := ["Flashlight", "Signal flare", "Utility knife", "Multitool",
 		"Hunting rifle"]
+const KNIFE_SLOT := 2
 const RIFLE_SLOT := 4
+const SLOT_WEIGHTS := [0.32, 0.24, 0.18, 0.36, 1.45]
 const RELOAD_BOLT_OPEN_START := 0.25
 const RELOAD_BOLT_OPEN_END := 0.95
 const RELOAD_CARTRIDGE_SHOW := 1.15
@@ -34,6 +38,7 @@ const RELOAD_DURATION := 3.30
 var _slot_anchors: Array[Node3D] = []
 var _pointer_anchors: Array[Node3D] = []
 var _pointer_target: Node3D
+var _pointer_current := 0
 var _pointer_pending := 0
 var _pointer_transition := 1.0
 var _pointer_from := Vector3.ZERO
@@ -50,7 +55,6 @@ var _knife_release_left := 0.0
 var _knife_release_item: UtilityKnife3D
 var _rifle_primary_target: Node3D
 var _rifle_support_target: Node3D
-var _rifle_draw := 1.0
 var _rifle_aim := 0.0
 var _rifle_aim_goal := false
 var _rifle_ads_settle := 0.0
@@ -58,11 +62,13 @@ var _rifle_reload_blend := 0.0
 const TAKE_GRASP_DURATION := 0.12
 const TAKE_EXTRACT_DURATION := 0.34
 const KNIFE_CLEAR_DURATION := 0.16
-# The knife sits behind the retaining leather, not pasted over it. One centimetre
-# keeps the model clear of the canvas skin while leaving the straps visibly in
-# front of the blade and handle.
-const KNIFE_SLOT_PROUD := 0.010
+# Account for the imported handle's thickness, not only its wrapper origin. A
+# small negative offset keeps the complete knife behind the retaining leather
+# while its rear face still remains clear of the canvas skin.
+const KNIFE_SLOT_PROUD := -0.040
 const KNIFE_CLEAR_PULL := 0.105
+enum TakePhase { IDLE, GRASP, CLEAR_RESTRAINT, TURN_TO_CARRY, COMPLETE }
+var _take_phase := TakePhase.IDLE
 var _take_elapsed := -1.0
 var _take_source_slot := -1
 var _take_grip_start := Transform3D.IDENTITY
@@ -257,6 +263,20 @@ func _register_load_ring(part: MeshInstance3D) -> MeshInstance3D:
 	return part
 
 
+func _register_tool_loop(slot: int, part: MeshInstance3D) -> MeshInstance3D:
+	if not _tool_loop_parts.has(slot):
+		_tool_loop_parts[slot] = []
+	(_tool_loop_parts[slot] as Array).append(part)
+	_tool_loop_rest[part] = part.transform
+	return part
+
+
+func _register_rifle_sling(part: MeshInstance3D) -> MeshInstance3D:
+	_rifle_sling_parts.append(part)
+	_rifle_sling_rest[part] = part.transform
+	return part
+
+
 func _update_loaded_canvas(delta: float, open_amount: float) -> void:
 	## Waxed canvas yields by millimetres, never breathes like rubber. Stored
 	## objects determine both the downward load and its left/right distribution.
@@ -264,14 +284,13 @@ func _update_loaded_canvas(delta: float, open_amount: float) -> void:
 		return
 	var total_load := 0.0
 	var moment := 0.0
-	var small_weights := [0.32, 0.24, 0.18, 0.36]
 	for index in RIFLE_SLOT:
 		if slot_occupied(index):
-			var weight: float = small_weights[index]
+			var weight: float = SLOT_WEIGHTS[index]
 			total_load += weight
 			moment += SLOT_POSITIONS[index].x * weight
 	if slot_occupied(RIFLE_SLOT):
-		total_load += 1.45
+		total_load += SLOT_WEIGHTS[RIFLE_SLOT]
 		# Its steel action sits a little to port even though the rifle is centred.
 		moment -= 0.014
 	var target := Vector2(clampf(moment * 0.055, -0.006, 0.006),
@@ -325,16 +344,15 @@ func _update_pointer_transition(delta: float) -> void:
 		_pointer_target.position = (goal + retract).lerp(goal,
 				smoothstep(0.0, 1.0, inverse_lerp(0.70, 1.0, t)))
 	_pointer_target.basis = _pointer_anchors[_pointer_pending].basis
-	_pointer_target.set_meta("centre_point_roll", _pointer_pending == RIFLE_SLOT)
+	var roll_slot := _pointer_current if t < 0.50 else _pointer_pending
+	_pointer_target.set_meta("centre_point_roll", roll_slot == RIFLE_SLOT)
+	if t >= 1.0:
+		_pointer_current = _pointer_pending
 
 
 func _update_slot_restraints(_delta: float) -> void:
-	var flex := 0.0
-	if _take_elapsed >= 0.0 and _take_source_slot >= 0 \
-			and not take_extraction_complete():
-		var p := clampf((_take_elapsed - TAKE_GRASP_DURATION) / TAKE_EXTRACT_DURATION,
-				0.0, 1.0)
-		flex = sin(p * PI)
+	var flex := sin(_take_extraction_progress() * PI) \
+			if _take_source_slot >= 0 and not take_extraction_complete() else 0.0
 	for slot in _tool_loop_parts:
 		for part: MeshInstance3D in _tool_loop_parts[slot]:
 			var rest: Transform3D = _tool_loop_rest[part]
@@ -379,7 +397,14 @@ func slot_pointer_target(index: int) -> Node3D:
 
 
 func take_extraction_complete() -> bool:
-	return _take_elapsed >= TAKE_GRASP_DURATION + TAKE_EXTRACT_DURATION
+	return _take_phase == TakePhase.COMPLETE
+
+
+func _take_extraction_progress() -> float:
+	if _take_phase == TakePhase.IDLE:
+		return 0.0
+	return clampf((_take_elapsed - TAKE_GRASP_DURATION) / TAKE_EXTRACT_DURATION,
+			0.0, 1.0)
 
 
 func slot_label(index: int) -> String:
@@ -403,7 +428,7 @@ func can_place_active(index: int) -> bool:
 	if _active_item == null or index < 0 or index >= _slot_items.size() \
 			or slot_occupied(index):
 		return false
-	var rifle := active_item_kind() == "hunting_rifle"
+	var rifle := active_item_kind() == KIND_RIFLE
 	return rifle if index == RIFLE_SLOT else not rifle
 
 
@@ -422,33 +447,33 @@ func active_item_kind() -> String:
 
 
 func active_hand_target() -> Node3D:
-	if active_item_kind() == "utility_knife":
+	if active_item_kind() == KIND_KNIFE:
 		return _knife_hand_target
 	return _active_item
 
 
 func active_hand_mode() -> String:
-	if active_item_kind() == "utility_knife":
+	if active_item_kind() == KIND_KNIFE:
 		return "knife"
-	if active_item_kind() == "hunting_rifle":
+	if active_item_kind() == KIND_RIFLE:
 		return "rifle"
 	return "hold"
 
 
 func rifle_primary_target() -> Node3D:
-	return _rifle_primary_target if active_item_kind() == "hunting_rifle" else null
+	return _rifle_primary_target if active_item_kind() == KIND_RIFLE else null
 
 
 func rifle_support_target() -> Node3D:
 	# Low carry deliberately reserves only the trigger hand. The support hand
 	# joins while shouldering and stays through the short lower-from-ADS blend.
-	return _rifle_support_target if active_item_kind() == "hunting_rifle" \
+	return _rifle_support_target if active_item_kind() == KIND_RIFLE \
 			and (_rifle_aim_goal or _rifle_aim > 0.18 \
 			or bool(_active_item.call("is_reloading"))) else null
 
 
 func set_rifle_aim(on: bool) -> void:
-	_rifle_aim_goal = on and active_item_kind() == "hunting_rifle" \
+	_rifle_aim_goal = on and active_item_kind() == KIND_RIFLE \
 			and _preview_slot < 0 and not bool(_active_item.call("is_reloading"))
 
 
@@ -458,12 +483,12 @@ func rifle_aim_amount() -> float:
 
 func rifle_loaded() -> bool:
 	return bool(_active_item.call("is_loaded")) \
-			if active_item_kind() == "hunting_rifle" else false
+			if active_item_kind() == KIND_RIFLE else false
 
 
 func rifle_reloading() -> bool:
 	return bool(_active_item.call("is_reloading")) \
-			if active_item_kind() == "hunting_rifle" else false
+			if active_item_kind() == KIND_RIFLE else false
 
 
 func release_hand_active() -> bool:
@@ -481,61 +506,73 @@ func take_slot(index: int) -> Node3D:
 	_slot_items[index] = null
 	_active_item = item
 	_active_label = str(item.get_meta("item_label", SLOT_LABELS[index]))
+	_begin_take_motion(index)
+	_reparent_active_item_for_carry(item)
+	if active_item_kind() == KIND_KNIFE and _knife_hand_target != null:
+		_configure_taken_knife(item)
+	elif active_item_kind() == KIND_RIFLE:
+		_configure_taken_rifle(item)
+	return item
+
+
+func _begin_take_motion(index: int) -> void:
 	_take_source_slot = index
 	_take_elapsed = 0.0
+	_take_phase = TakePhase.GRASP
 	_preview_slot = -1
 	_knife_draw = 0.0
 	_knife_release_left = 0.0
 	_knife_release_item = null
-	_rifle_draw = 0.0
 	_rifle_aim = 0.0
 	_rifle_aim_goal = false
 	_rifle_ads_settle = 0.0
 	_rifle_reload_blend = 0.0
+
+
+func _reparent_active_item_for_carry(item: Node3D) -> void:
 	var outside := get_parent() as Node3D
 	if outside != null:
 		item.reparent(outside, true)
 	item.top_level = true
 	item.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	item.reset_physics_interpolation()
-	if active_item_kind() == "utility_knife" and _knife_hand_target != null:
-		var knife := _active_item as UtilityKnife3D
-		var grip := knife.grip_node()
-		_knife_hand_target.global_transform = item.global_transform \
-				* (grip.transform if grip != null else Transform3D.IDENTITY)
-		_take_grip_start = _knife_hand_target.global_transform
-		_knife_hand_target.set_meta("held_device", item)
-		_knife_hand_target.set_meta("held_grip_transform",
-				grip.transform if grip != null else Transform3D.IDENTITY)
-		# Keep the stored vertical frame until the blade has cleared both
-		# retaining loops; only then may the wrist turn it into the carry grip.
-		_knife_hand_target.set_meta("authored_grip_frame", true)
-		_knife_hand_target.set_meta("grip_closure", 1.0)
-	elif active_item_kind() == "hunting_rifle":
-		var rifle: Node3D = _active_item
-		var primary := rifle.call("primary_grip_node") as Node3D
-		var support := rifle.call("support_grip_node") as Node3D
-		_rifle_primary_target.global_transform = item.global_transform \
-				* primary.transform
-		_rifle_support_target.global_transform = item.global_transform \
-				* support.transform
-		_rifle_primary_target.set_meta("held_device", item)
-		_rifle_primary_target.set_meta("held_grip_transform", primary.transform)
-		_rifle_primary_target.set_meta("contact_bounds",
-				rifle.call("primary_contact_bounds") as AABB)
-		_rifle_primary_target.set_meta("ads_locked", false)
-		_rifle_primary_target.set_meta("weapon_space_pinned", false)
-		_rifle_support_target.set_meta("held_device", item)
-		_rifle_support_target.set_meta("held_grip_transform", support.transform)
-		_rifle_support_target.set_meta("contact_bounds",
-				rifle.call("support_contact_bounds") as AABB)
-		_rifle_support_target.set_meta("ads_locked", false)
-		_rifle_support_target.set_meta("weapon_space_pinned", false)
-	return item
+
+
+func _configure_taken_knife(item: Node3D) -> void:
+	var knife := _active_item as UtilityKnife3D
+	var grip := knife.grip_node()
+	var grip_transform := grip.transform if grip != null else Transform3D.IDENTITY
+	_knife_hand_target.global_transform = item.global_transform * grip_transform
+	_take_grip_start = _knife_hand_target.global_transform
+	_knife_hand_target.set_meta("held_device", item)
+	_knife_hand_target.set_meta("held_grip_transform", grip_transform)
+	_knife_hand_target.set_meta("authored_grip_frame", true)
+	_knife_hand_target.set_meta("grip_closure", 1.0)
+
+
+func _configure_taken_rifle(item: Node3D) -> void:
+	var rifle: Node3D = _active_item
+	var primary := rifle.call("primary_grip_node") as Node3D
+	var support := rifle.call("support_grip_node") as Node3D
+	_rifle_primary_target.global_transform = item.global_transform * primary.transform
+	_rifle_support_target.global_transform = item.global_transform * support.transform
+	_set_rifle_take_target(_rifle_primary_target, item, primary.transform,
+			rifle.call("primary_contact_bounds") as AABB)
+	_set_rifle_take_target(_rifle_support_target, item, support.transform,
+			rifle.call("support_contact_bounds") as AABB)
+
+
+func _set_rifle_take_target(target_node: Node3D, item: Node3D,
+		grip_transform: Transform3D, bounds: AABB) -> void:
+	target_node.set_meta("held_device", item)
+	target_node.set_meta("held_grip_transform", grip_transform)
+	target_node.set_meta("contact_bounds", bounds)
+	target_node.set_meta("ads_locked", false)
+	target_node.set_meta("weapon_space_pinned", false)
 
 
 func set_preview_slot(index: int) -> void:
-	if active_item_kind() == "hunting_rifle" \
+	if active_item_kind() == KIND_RIFLE \
 			and bool(_active_item.call("is_reloading")):
 		_preview_slot = -1
 		return
@@ -549,29 +586,49 @@ func place_active_in_slot(index: int) -> bool:
 	var item := _active_item
 	if item is UtilityKnife3D:
 		(item as UtilityKnife3D).cancel_attack()
-	elif str(item.get_meta("item_kind", "")) == "hunting_rifle":
+	elif str(item.get_meta("item_kind", "")) == KIND_RIFLE:
 		item.call("cancel_reload")
+	_seat_item_in_slot(item, index)
+	if item is UtilityKnife3D:
+		_begin_knife_release(item as UtilityKnife3D)
+	_clear_active_item_state()
+	return true
+
+
+func _seat_item_in_slot(item: Node3D, index: int) -> void:
 	item.reparent(self, true)
 	item.top_level = false
 	item.transform = _slot_transform(index)
 	item.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
 	item.reset_physics_interpolation()
 	_slot_items[index] = item
-	if item is UtilityKnife3D:
-		_knife_release_item = item as UtilityKnife3D
-		_knife_release_left = KNIFE_RELEASE_DURATION
-		var grip := _knife_release_item.grip_node()
-		_knife_hand_target.global_transform = item.global_transform \
-				* (grip.transform if grip != null else Transform3D.IDENTITY)
-		_knife_hand_target.set_meta("authored_grip_frame", true)
-		_knife_hand_target.set_meta("grip_closure", 1.0)
+
+
+func _begin_knife_release(knife: UtilityKnife3D) -> void:
+	_knife_release_item = knife
+	_knife_release_left = KNIFE_RELEASE_DURATION
+	var grip := knife.grip_node()
+	_knife_hand_target.global_transform = knife.global_transform \
+			* (grip.transform if grip != null else Transform3D.IDENTITY)
+	_knife_hand_target.set_meta("authored_grip_frame", true)
+	_knife_hand_target.set_meta("grip_closure", 1.0)
+
+
+func _clear_active_item_state() -> void:
 	_active_item = null
 	_active_label = ""
 	_preview_slot = -1
 	_rifle_aim = 0.0
 	_rifle_aim_goal = false
 	_rifle_ads_settle = 0.0
+	_take_phase = TakePhase.IDLE
+	_take_elapsed = -1.0
+	_take_source_slot = -1
 	_rifle_reload_blend = 0.0
+	_clear_active_hand_metadata()
+
+
+func _clear_active_hand_metadata() -> void:
 	_knife_hand_target.remove_meta("held_device")
 	_knife_hand_target.remove_meta("held_grip_transform")
 	for target_node: Node3D in [_rifle_primary_target, _rifle_support_target]:
@@ -580,7 +637,6 @@ func place_active_in_slot(index: int) -> bool:
 				"hand_attachment", "held_device_target"]:
 			if target_node.has_meta(key):
 				target_node.remove_meta(key)
-	return true
 
 
 func _update_knife_release(delta: float) -> void:
@@ -606,7 +662,7 @@ func begin_active_attack() -> bool:
 
 
 func begin_active_rifle_fire() -> bool:
-	if active_item_kind() == "hunting_rifle" and _preview_slot < 0:
+	if active_item_kind() == KIND_RIFLE and _preview_slot < 0:
 		var openness := 1.0
 		var acoustic_source: Node = get_parent()
 		while acoustic_source != null:
@@ -621,7 +677,7 @@ func begin_active_rifle_fire() -> bool:
 
 
 func begin_active_rifle_reload() -> bool:
-	if active_item_kind() == "hunting_rifle" and _preview_slot < 0:
+	if active_item_kind() == KIND_RIFLE and _preview_slot < 0:
 		_rifle_aim_goal = false
 		_rifle_ads_settle = 0.0
 		var started := bool(_active_item.call("begin_reload"))
@@ -632,20 +688,20 @@ func begin_active_rifle_reload() -> bool:
 
 
 func active_rifle_camera_kick() -> Vector3:
-	if active_item_kind() == "hunting_rifle":
+	if active_item_kind() == KIND_RIFLE:
 		return _active_item.call("recoil_camera") as Vector3
 	return Vector3.ZERO
 
 
 func active_rifle_pressure() -> float:
-	if active_item_kind() == "hunting_rifle":
+	if active_item_kind() == KIND_RIFLE:
 		return float(_active_item.call("pressure_amount"))
 	return 0.0
 
 
 func active_rifle_muzzle() -> Node3D:
 	return _active_item.call("muzzle_node") as Node3D \
-			if active_item_kind() == "hunting_rifle" else null
+			if active_item_kind() == KIND_RIFLE else null
 
 
 func cancel_active_attack() -> void:
@@ -674,9 +730,8 @@ func mark_active_knife_hit(collider: Object, position: Vector3,
 func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> void:
 	if _active_item == null or not is_instance_valid(_active_item):
 		return
-	if _take_elapsed >= 0.0 and not take_extraction_complete():
-		_take_elapsed = minf(_take_elapsed + delta,
-				TAKE_GRASP_DURATION + TAKE_EXTRACT_DURATION)
+	var kind := active_item_kind()
+	_update_take_phase(delta)
 	var target: Transform3D
 	if _preview_slot >= 0 and bag_amount > 0.62:
 		# Hover a few centimetres in front of the empty loop.  The hand and item
@@ -692,43 +747,12 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 	# Hold the prop in its webbing for a short finger-closing beat. The existing
 	# draw interpolation then becomes the visible extraction rather than an
 	# immediate inventory transfer.
-	var grasping := _take_elapsed >= 0.0 and _take_elapsed < TAKE_GRASP_DURATION
+	var grasping := _take_phase == TakePhase.GRASP
 	if grasping:
 		target = _active_item.global_transform
 	if _active_item is UtilityKnife3D:
-		var knife := _active_item as UtilityKnife3D
-		knife.tick_attack(delta)
-		if _preview_slot >= 0 and bag_amount > 0.62:
-			var grip := knife.grip_node()
-			var grip_target := target \
-					* (grip.transform if grip != null else Transform3D.IDENTITY)
-			var return_k := 1.0 - exp(-10.0 * delta)
-			_knife_hand_target.global_transform = \
-					_knife_hand_target.global_transform.interpolate_with(
-							grip_target, return_k)
-			_knife_hand_target.set_meta("authored_grip_frame", true)
-		else:
-			var extraction_time := maxf(_take_elapsed - TAKE_GRASP_DURATION, 0.0) \
-					if _take_source_slot == 2 else TAKE_EXTRACT_DURATION
-			if _take_source_slot == 2 and extraction_time < KNIFE_CLEAR_DURATION:
-				# Pull straight out along the bag face normal without rotating. This
-				# keeps the fist below the lower loop and the blade clear of the leather.
-				var clear_u := smoothstep(0.0, 1.0,
-						extraction_time / KNIFE_CLEAR_DURATION)
-				_knife_hand_target.set_meta("authored_grip_frame", true)
-				_knife_hand_target.global_transform = _take_grip_start
-				_knife_hand_target.global_position += global_basis.z * (KNIFE_CLEAR_PULL * clear_u)
-			else:
-				_knife_hand_target.set_meta("authored_grip_frame", false)
-				if not grasping:
-					var turn_duration := TAKE_EXTRACT_DURATION - KNIFE_CLEAR_DURATION \
-							if _take_source_slot == 2 else TAKE_EXTRACT_DURATION
-					_knife_draw = minf(_knife_draw + delta / turn_duration, 1.0)
-				var palm_target := camera.global_transform * Transform3D(Basis.IDENTITY,
-						knife.hand_position_camera_local())
-				_knife_hand_target.global_transform = _knife_hand_target.global_transform \
-						.interpolate_with(palm_target, smoothstep(0.0, 1.0, _knife_draw))
-	elif active_item_kind() == "hunting_rifle":
+		_update_active_knife(delta, camera, bag_amount, target, grasping)
+	elif kind == KIND_RIFLE:
 		var rifle: Node3D = _active_item
 		rifle.call("tick", delta)
 		var reloading := bool(rifle.call("is_reloading"))
@@ -791,15 +815,18 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 			target = carry.interpolate_with(aimed,
 					smoothstep(0.0, 1.0, _rifle_aim))
 			target *= rifle.call("recoil_local_transform") as Transform3D
-		if not grasping:
-			_rifle_draw = minf(_rifle_draw + delta / TAKE_EXTRACT_DURATION, 1.0)
 		# Advance the weapon once, here, before deriving either hand target. Both
 		# palms must solve to the exact frame that will be rendered this tick. The
 		# former code advanced the rifle after the hands and let each hand chase a
 		# different future transform; reload completion exposed that as a final
 		# corkscrew/pop.
 		var weapon_k := 1.0 - exp(-15.0 * delta)
-		var weapon_frame := target if reloading \
+		# Once the draw is complete, carry is camera-local just like ADS. Smoothing
+		# this world transform made the rifle trail the camera by one frame whenever
+		# the ship rolled, which looked like uncontrolled one-hand shaking.
+		var stable_camera_carry := _take_phase == TakePhase.COMPLETE \
+				and _preview_slot < 0
+		var weapon_frame := target if reloading or stable_camera_carry \
 				or (_rifle_aim > 0.82 and _preview_slot < 0) \
 				else _active_item.global_transform.interpolate_with(target, weapon_k)
 		if _preview_slot < 0 and not reloading:
@@ -842,9 +869,60 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 	# Interpolating a camera-relative target in world space adds a one-frame boat
 	# lag, and welding the rifle to a wrist lets IK rotate the sights. Both break
 	# the iron-sight line. Once shouldered, stamp the authored target exactly.
-	if active_item_kind() != "hunting_rifle":
+	if kind != KIND_RIFLE:
 		_active_item.global_transform = _active_item.global_transform.interpolate_with(target, k)
 	_active_item.reset_physics_interpolation()
+
+
+func _update_active_knife(delta: float, camera: Camera3D, bag_amount: float,
+		target: Transform3D, grasping: bool) -> void:
+	var knife := _active_item as UtilityKnife3D
+	knife.tick_attack(delta)
+	if _preview_slot >= 0 and bag_amount > 0.62:
+		var grip := knife.grip_node()
+		var grip_target := target \
+				* (grip.transform if grip != null else Transform3D.IDENTITY)
+		var return_k := 1.0 - exp(-10.0 * delta)
+		_knife_hand_target.global_transform = \
+				_knife_hand_target.global_transform.interpolate_with(grip_target, return_k)
+		_knife_hand_target.set_meta("authored_grip_frame", true)
+		return
+	if _take_phase == TakePhase.CLEAR_RESTRAINT:
+		var clear_u := smoothstep(0.0, 1.0, _knife_clear_progress())
+		_knife_hand_target.set_meta("authored_grip_frame", true)
+		_knife_hand_target.global_transform = _take_grip_start
+		_knife_hand_target.global_position += global_basis.z * (KNIFE_CLEAR_PULL * clear_u)
+		return
+	_knife_hand_target.set_meta("authored_grip_frame", false)
+	if not grasping:
+		var turn_duration := TAKE_EXTRACT_DURATION - KNIFE_CLEAR_DURATION \
+				if _take_source_slot == KNIFE_SLOT else TAKE_EXTRACT_DURATION
+		_knife_draw = minf(_knife_draw + delta / turn_duration, 1.0)
+	var palm_target := camera.global_transform * Transform3D(Basis.IDENTITY,
+			knife.hand_position_camera_local())
+	_knife_hand_target.global_transform = _knife_hand_target.global_transform \
+			.interpolate_with(palm_target, smoothstep(0.0, 1.0, _knife_draw))
+
+
+func _update_take_phase(delta: float) -> void:
+	if _take_phase == TakePhase.IDLE or _take_phase == TakePhase.COMPLETE:
+		return
+	_take_elapsed = minf(_take_elapsed + delta,
+			TAKE_GRASP_DURATION + TAKE_EXTRACT_DURATION)
+	if _take_elapsed < TAKE_GRASP_DURATION:
+		_take_phase = TakePhase.GRASP
+	elif _take_source_slot == KNIFE_SLOT \
+			and _take_elapsed < TAKE_GRASP_DURATION + KNIFE_CLEAR_DURATION:
+		_take_phase = TakePhase.CLEAR_RESTRAINT
+	elif _take_elapsed < TAKE_GRASP_DURATION + TAKE_EXTRACT_DURATION:
+		_take_phase = TakePhase.TURN_TO_CARRY
+	else:
+		_take_phase = TakePhase.COMPLETE
+
+
+func _knife_clear_progress() -> float:
+	return clampf((_take_elapsed - TAKE_GRASP_DURATION) / KNIFE_CLEAR_DURATION,
+			0.0, 1.0)
 
 
 func _resolve_rifle_obstruction(frame: Transform3D, rifle: Node3D,
@@ -1101,7 +1179,7 @@ func _update_rifle_reload_hand(rifle: Node3D, camera: Camera3D,
 func _slot_transform(index: int) -> Transform3D:
 	var basis := Basis.IDENTITY
 	var origin: Vector3 = SLOT_POSITIONS[index]
-	if index == 2:
+	if index == KNIFE_SLOT:
 		# Keep the knife vertical in its original slot with the handle below. Rotate
 		# it around that long axis so the cutting edge points to screen-left. Its
 		# shallow Z offset leaves both leather retainers visibly in front.
@@ -1375,7 +1453,7 @@ func _build() -> void:
 		add_child(pointer_anchor)
 		_pointer_anchors.append(pointer_anchor)
 		var item: Node3D
-		if index == 2:
+		if index == KNIFE_SLOT:
 			item = UtilityKnifeScript.new() as Node3D
 		elif index == RIFLE_SLOT:
 			item = HuntingRifleScript.new() as Node3D
@@ -1414,12 +1492,10 @@ func _build() -> void:
 	# repeated webbing would turn the silhouette into a modern tactical pack.
 	for x in [-0.178, -0.060, 0.060, 0.174]:
 		var slot := [-0.178, -0.060, 0.060, 0.174].find(x)
-		_tool_loop_parts[slot] = []
 		for y in [-0.105, 0.015]:
 			var loop := _box(Vector3(0.060, 0.018, 0.016),
 					Vector3(x, y, tool_z + 0.020), Vector3.ZERO, leather, "ToolLoop")
-			_tool_loop_parts[slot].append(loop)
-			_tool_loop_rest[loop] = loop.transform
+			_register_tool_loop(slot, loop)
 
 	# Dedicated long-gun cradle below the ordinary inventory. Each restraint is a
 	# real U around the rifle cross-section: rear leg attached to the bag, bridge
@@ -1462,8 +1538,7 @@ func _build() -> void:
 		var sling_front := _box(Vector3(band_w, leg_h, 0.020),
 				Vector3(x, leg_y, front_z), Vector3.ZERO, leather, "RifleSlingFront")
 		for sling_part in [sling_rear, sling_under, sling_front]:
-			_rifle_sling_parts.append(sling_part)
-			_rifle_sling_rest[sling_part] = sling_part.transform
+			_register_rifle_sling(sling_part)
 		_cylinder(0.009 if not muzzle_loop else 0.007,
 				0.060 if not muzzle_loop else 0.040,
 				Vector3(x, top_y, front_z - 0.002),
