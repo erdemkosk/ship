@@ -922,9 +922,9 @@ func _bag_visual_shot(rig: Node3D, dir: String) -> void:
 
 
 func _held_pitch_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
-	## Reproduce the shoulder-hole failure: request an extreme downward look
-	## while both hands are planted on the helm. The runtime guard must keep the
-	## rendered pitch at the last seam-safe angle without limiting upward look.
+	## Request an extreme downward look while both hands are planted on the
+	## helm. The station-specific guard must stop at the ignition-capable angle;
+	## the arm rig's stronger downward follow keeps shoulder ends out of view.
 	await get_tree().create_timer(0.45).timeout
 	rig.call("set_mode", 1)
 	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
@@ -1364,14 +1364,23 @@ func _rifle_test(rig: Node3D, boat: RigidBody3D) -> void:
 			and not bool(rifle.call("blast_visible"))
 	var shot_sound := bool(rifle.call("shot_audio_playing"))
 	var pressure := float(rifle.call("pressure_amount")) > 0.20
-	var indoor_profile := rifle.call("acoustic_profile_for", 0.0) as Dictionary
+	rifle.call("set_acoustic_environment", &"deck", 1.0)
 	var outdoor_profile := rifle.call("acoustic_profile_for", 1.0) as Dictionary
-	var acoustic_variants := float(indoor_profile["report_db"]) \
-			> float(outdoor_profile["report_db"]) + 5.0 \
-			and float(indoor_profile["report_pitch"]) \
-			< float(outdoor_profile["report_pitch"]) \
-			and float(indoor_profile["body_db"]) \
-			> float(outdoor_profile["body_db"]) + 40.0
+	rifle.call("set_acoustic_environment", &"wheelhouse", 0.12)
+	var wheelhouse_profile := rifle.call("acoustic_profile_for", 0.12) as Dictionary
+	rifle.call("set_acoustic_environment", &"cabin", 0.10)
+	var cabin_profile := rifle.call("acoustic_profile_for", 0.10) as Dictionary
+	var acoustic_variants := (
+			float(outdoor_profile["body_db"]) < -45.0
+			and float(wheelhouse_profile["body_db"])
+					> float(outdoor_profile["body_db"]) + 30.0
+			and float(cabin_profile["body_db"])
+					> float(outdoor_profile["body_db"]) + 30.0
+			and float(wheelhouse_profile["body_pitch"])
+					> float(cabin_profile["body_pitch"]) + 0.05
+			and float(outdoor_profile["report_db"]) <= -5.0
+			and float(wheelhouse_profile["report_db"]) <= -5.0
+			and float(cabin_profile["report_db"]) <= -5.0)
 	var clip_playing := bool(rifle.call("shoot_animation_playing"))
 	var automatic_bolt_suppressed := not bool(rifle.call(
 			"current_animation_moves_bolt"))

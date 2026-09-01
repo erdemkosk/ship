@@ -724,14 +724,21 @@ func begin_active_attack() -> bool:
 func begin_active_rifle_fire() -> bool:
 	if active_item_kind() == KIND_RIFLE and _preview_slot < 0:
 		var openness := 1.0
+		var acoustic_space := &"deck"
 		var acoustic_source: Node = get_parent()
 		while acoustic_source != null:
 			if acoustic_source.has_method("weather_openness"):
 				openness = float(acoustic_source.call("weather_openness",
 						_active_item.global_position))
+				if acoustic_source.has_method("acoustic_space"):
+					acoustic_space = acoustic_source.call("acoustic_space",
+							_active_item.global_position) as StringName
 				break
 			acoustic_source = acoustic_source.get_parent()
-		_active_item.call("set_acoustic_openness", openness)
+		if _active_item.has_method("set_acoustic_environment"):
+			_active_item.call("set_acoustic_environment", acoustic_space, openness)
+		else:
+			_active_item.call("set_acoustic_openness", openness)
 		return bool(_active_item.call("begin_fire"))
 	return false
 

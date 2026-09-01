@@ -58,7 +58,10 @@ const WRIST_CONE := 0.96  # ~55 deg
 ## your own arms — the "gap" that flashes whenever the head bobs. Looking up,
 ## the arms should stay put or they hover into the sky with you.
 const FOLLOW_UP := 0.15
-const FOLLOW_DOWN := 0.72
+# At the helm the head may look roughly 58 degrees down to the ignition key.
+# Following 86% keeps the shoulder stumps behind the same seam-safe camera
+# plane while the IK hands remain planted on their world-space fittings.
+const FOLLOW_DOWN := 0.86
 
 ## Curl per joint, radians, applied about each joint's MEASURED curl axis.
 ##

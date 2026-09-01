@@ -1,5 +1,6 @@
 extends Node3D
 const ShaderSet := preload("res://scripts/shader_set.gd")
+const AudioMix := preload("res://scripts/audio_mix.gd")
 ## Environment controller: sun/time of day, procedural weather-driven sky
 ## (clouds, stars, lightning glow), fog, rain. Parameters driven from the UI.
 ##
@@ -884,6 +885,7 @@ func _build_weather_audio() -> void:
 	## try to match individual waves (that is what sounded fake last time).
 	## A Weather bus holds a low-pass so the cabin can muffle them without
 	## touching the stove, which lives on Master and in the room.
+	AudioMix.ensure_master_headroom()
 	_ensure_weather_bus()
 	_wind_pl = _loop_player("res://assets/audio/wind.mp3")
 	_storm_pl = _loop_player("res://assets/audio/storm.mp3")
@@ -962,7 +964,9 @@ func _play_thunder(token: int, dist: float, sheet: bool, at: Vector3) -> void:
 	var nearness := clampf(1.0 - (dist - 32.0) / 200.0, 0.0, 1.0)
 	if sheet:
 		nearness *= 0.38
-	var lin := lerpf(0.07, 1.05, nearness * nearness)
+	# Exceptional, but still leaves several dB for the rifle and storm bed if
+	# they coincide. The master limiter catches only the last accidental sum.
+	var lin := lerpf(0.06, 0.63, nearness * nearness)
 	if _underwater:
 		lin *= 0.10
 	p.volume_db = linear_to_db(maxf(lin, 0.0001))
@@ -1043,4 +1047,3 @@ func _update_weather_audio(delta: float) -> void:
 		_storm_pl.volume_db = -80.0
 	if not _wind_pl.playing:
 		_wind_pl.play()
-

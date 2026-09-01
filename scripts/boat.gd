@@ -5,6 +5,7 @@ extends RigidBody3D
 const WeatherScript := preload("res://scripts/weather.gd")
 const ShaderSet := preload("res://scripts/shader_set.gd")
 const BoatAudio := preload("res://scripts/boat_audio_factory.gd")
+const AudioMix := preload("res://scripts/audio_mix.gd")
 const BoatAudioControllerScript := preload("res://scripts/boat_audio_controller.gd")
 const BoatVisuals := preload("res://scripts/boat_visual_factory.gd")
 const BoatMeshBatcherScript := preload("res://scripts/boat_mesh_batcher.gd")
@@ -134,6 +135,9 @@ var _ign_key: Node3D
 var _ign_led: StandardMaterial3D
 var _starter_snd: AudioStreamPlayer3D
 var _engine_snd: AudioStreamPlayer3D
+var _engine_load_snd: AudioStreamPlayer3D
+var _engine_reverse_snd: AudioStreamPlayer3D
+var _engine_strain_snd: AudioStreamPlayer3D
 var _ign_click: AudioStreamPlayer3D
 var _eng_lp: AudioEffectLowPassFilter
 var _eng_open := 1.0
@@ -3623,6 +3627,7 @@ func _play_ign_click() -> void:
 func _build_engine_sound() -> void:
 	## Diesel under the aft sole. Own bus with a low-pass so timber muffles
 	## it in the rooms; on deck it is the exhaust, not a speaker in your ear.
+	AudioMix.ensure_master_headroom()
 	_ensure_engine_bus()
 	_starter_snd = AudioStreamPlayer3D.new()
 	_starter_snd.position = Vector3(0.0, 0.42, 3.70)
@@ -3655,6 +3660,9 @@ func _build_engine_sound() -> void:
 	_engine_snd.volume_db = -16.0
 	_engine_snd.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
 	add_child(_engine_snd)
+	_engine_load_snd = _engine_layer("EngineLoad", BoatAudio.diesel_load())
+	_engine_reverse_snd = _engine_layer("EngineAstern", BoatAudio.reverse_gear())
+	_engine_strain_snd = _engine_layer("EngineStrain", BoatAudio.diesel_strain())
 	_ign_click = AudioStreamPlayer3D.new()
 	_ign_click.position = Vector3(0.50, 3.62, 0.06)
 	var ign_rec: AudioStream = load("res://assets/audio/ignition.mp3")
@@ -3666,6 +3674,22 @@ func _build_engine_sound() -> void:
 	_ign_click.volume_db = -4.0
 	_ign_click.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
 	add_child(_ign_click)
+
+
+func _engine_layer(layer_name: String, stream: AudioStream) -> AudioStreamPlayer3D:
+	var player := AudioStreamPlayer3D.new()
+	player.name = layer_name
+	player.position = Vector3(-1.05, 1.10, 2.16)
+	player.stream = stream
+	player.bus = "Engine"
+	player.unit_size = 2.8
+	player.max_distance = 26.0
+	player.max_db = 0.0
+	player.volume_db = -60.0
+	player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	add_child(player)
+	player.play()
+	return player
 
 
 func _ensure_engine_bus() -> void:
@@ -3838,12 +3862,18 @@ func _process(delta: float) -> void:
 			if not _engine_snd.playing:
 				_engine_snd.play()
 			var load := clampf(absf(_rpm), 0.0, 1.0)
+			var astern := smoothstep(0.02, 0.38, maxf(-_rpm, 0.0))
 			_engine_snd.pitch_scale = lerpf(_engine_snd.pitch_scale,
-					0.76 + load * 0.40, 1.0 - exp(-2.4 * delta))
-			var vol := lerpf(-12.5, -10.0, _eng_open) + load * lerpf(6.0, 8.0, _eng_open)
-			_engine_snd.volume_db = lerpf(_engine_snd.volume_db, minf(vol, -3.0),
+					lerpf(0.76 + load * 0.40, 0.72 + load * 0.26, astern),
+					1.0 - exp(-2.4 * delta))
+			# Leave room for the load/gear layers. The old single voice rose to
+			# -3 dB and left no space for weather, hull or a weapon report.
+			var vol := lerpf(-15.0, -12.5, _eng_open) + load * lerpf(4.0, 5.0, _eng_open)
+			_engine_snd.volume_db = lerpf(_engine_snd.volume_db, minf(vol, -7.5),
 					1.0 - exp(-2.2 * delta))
+			_update_engine_character_layers(delta, load, astern)
 		elif _engine_snd.playing:
+			_update_engine_character_layers(delta, 0.0, 0.0)
 			_engine_snd.volume_db = lerpf(_engine_snd.volume_db, -52.0,
 					1.0 - exp(-5.0 * delta))
 			if _engine_snd.volume_db < -44.0:
@@ -4121,6 +4151,37 @@ func _process(delta: float) -> void:
 		ocean.prop_wash(to_global(Vector3(0.0, -0.62, 4.15)), global_basis.z, _rpm, delta)
 
 
+func _update_engine_character_layers(delta: float, load: float, astern: float) -> void:
+	var speed_ahead := absf((global_basis.inverse() * linear_velocity).z)
+	var expected_speed := load * 8.0
+	var prop_slip := clampf((expected_speed - speed_ahead) \
+			/ maxf(expected_speed, 1.0), 0.0, 1.0) * load
+	var command_lag := maxf(absf(throttle) - load, 0.0)
+	var strain := maxf(command_lag * 0.85, prop_slip * 0.72)
+	if aground and absf(throttle) > 0.10:
+		strain = maxf(strain, 0.92)
+	_set_engine_layer(_engine_load_snd,
+			linear_to_db(maxf(pow(load, 0.78) * 0.34, 0.001)),
+			lerpf(0.88, 1.10, load), delta, 3.4)
+	_set_engine_layer(_engine_reverse_snd,
+			linear_to_db(maxf(astern * 0.24, 0.001)),
+			lerpf(0.82, 1.02, astern), delta, 4.2)
+	_set_engine_layer(_engine_strain_snd,
+			linear_to_db(maxf(strain * 0.25, 0.001)),
+			lerpf(0.86, 1.02, load), delta, 5.0)
+
+
+func _set_engine_layer(player: AudioStreamPlayer3D, target_db: float,
+		target_pitch: float, delta: float, response: float) -> void:
+	if player == null:
+		return
+	if not player.playing:
+		player.play()
+	var k := 1.0 - exp(-response * delta)
+	player.volume_db = lerpf(player.volume_db, clampf(target_db, -60.0, -8.5), k)
+	player.pitch_scale = lerpf(player.pitch_scale, target_pitch, k)
+
+
 func toggle_lights() -> void:
 	## Master switch on the panel: if anything is burning, douse it all; if the
 	## boat is dark, light her up. The beacon keeps its own toggle.
@@ -4297,6 +4358,21 @@ func weather_openness(world_pos: Vector3) -> float:
 		var d := Vector2(p.x, p.z - DOOR_Z1).length()
 		o = maxf(o, lerpf(0.88, 0.26, clampf(d / 3.6, 0.0, 1.0)) * aft)
 	return o
+
+
+func acoustic_space(world_pos: Vector3) -> StringName:
+	## Reflection character, separate from how open a door happens to be.
+	## Wheelhouse glass is a short bright box; the timber cabin is smaller and
+	## duller; everything else is open deck/sea.
+	if not world_pos.is_finite():
+		return &"deck"
+	var p: Vector3 = global_transform.affine_inverse() * world_pos
+	if p.y >= 0.55 and p.y < 2.82 and CABIN_XZ.has_point(Vector2(p.x, p.z)):
+		return &"cabin"
+	if p.y >= 2.82 and p.y < 5.40 and absf(p.x) < 1.74 \
+			and p.z > -0.32 and p.z < 4.12:
+		return &"wheelhouse"
+	return &"deck"
 
 
 func heat_at(local_pos: Vector3) -> float:

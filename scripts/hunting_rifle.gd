@@ -9,6 +9,7 @@ signal fired(origin: Vector3, direction: Vector3)
 const MODEL_SCENE := preload("res://art/models/hunting_rifle_animation.glb")
 const SHOT_AUDIO_PATH := "res://assets/audio/kar98_shot.mp3"
 const RELOAD_AUDIO_PATH := "res://assets/audio/kar98_reload.mp3"
+const AudioMix := preload("res://scripts/audio_mix.gd")
 const SOURCE_SLOT_CENTER := Vector3(0.407, -0.005, 0.0)
 # Seat the trigger palm on the narrow stock wrist, behind and below the action.
 # The previous point was too high/forward: the palm technically touched wood,
@@ -91,6 +92,9 @@ var _shot_audio: AudioStreamPlayer
 var _shot_body_audio: AudioStreamPlayer
 var _reload_audio: AudioStreamPlayer
 var _acoustic_openness := 1.0
+var _acoustic_space := &"deck"
+var _interior_reverb: AudioEffectReverb
+var _interior_damping: AudioEffectLowPassFilter
 var _reload_sound_started_at := -1.0
 var _fire_elapsed := -1.0
 var _flash_left := 0.0
@@ -510,12 +514,14 @@ func _build_shot_audio() -> void:
 	## alone and slightly quieter; inside, a pitch-lowered copy feeds a short,
 	## damped reflection bus to add the heavy cabin body without replacing the
 	## original transient.
+	AudioMix.ensure_master_headroom()
 	_ensure_interior_audio_bus()
 	var shot_stream := _mp3_stream(SHOT_AUDIO_PATH)
 	var reload_stream := _mp3_stream(RELOAD_AUDIO_PATH)
 	_shot_audio = AudioStreamPlayer.new()
 	_shot_audio.name = "RifleReport"
 	_shot_audio.stream = shot_stream
+	_shot_audio.bus = "Master"
 	add_child(_shot_audio)
 	_shot_body_audio = AudioStreamPlayer.new()
 	_shot_body_audio.name = "RifleInteriorBody"
@@ -544,17 +550,18 @@ func _ensure_interior_audio_bus() -> void:
 		bus_index = AudioServer.bus_count - 1
 		AudioServer.set_bus_name(bus_index, INTERIOR_AUDIO_BUS)
 	if AudioServer.get_bus_effect_count(bus_index) == 0:
-		var room := AudioEffectReverb.new()
-		room.room_size = 0.34
-		room.damping = 0.42
-		room.spread = 0.72
-		room.hipass = 0.08
-		room.dry = 0.0
-		room.wet = 0.82
-		AudioServer.add_bus_effect(bus_index, room)
-		var damping := AudioEffectLowPassFilter.new()
-		damping.cutoff_hz = 2600.0
-		AudioServer.add_bus_effect(bus_index, damping)
+		_interior_reverb = AudioEffectReverb.new()
+		AudioServer.add_bus_effect(bus_index, _interior_reverb)
+		_interior_damping = AudioEffectLowPassFilter.new()
+		AudioServer.add_bus_effect(bus_index, _interior_damping)
+	else:
+		for effect_index in AudioServer.get_bus_effect_count(bus_index):
+			var effect := AudioServer.get_bus_effect(bus_index, effect_index)
+			if effect is AudioEffectReverb:
+				_interior_reverb = effect as AudioEffectReverb
+			elif effect is AudioEffectLowPassFilter:
+				_interior_damping = effect as AudioEffectLowPassFilter
+	_configure_room_effects()
 
 
 func _configure_shot_audio_mix() -> void:
@@ -569,11 +576,25 @@ func _configure_shot_audio_mix() -> void:
 
 func acoustic_profile_for(openness: float) -> Dictionary:
 	var enclosed := pow(1.0 - clampf(openness, 0.0, 1.0), 0.72)
+	if _acoustic_space == &"wheelhouse":
+		return {
+			"report_db": lerpf(-7.5, -6.2, enclosed),
+			"report_pitch": 0.985,
+			"body_db": lerpf(-42.0, -8.0, enclosed),
+			"body_pitch": 0.88,
+		}
+	if _acoustic_space == &"cabin":
+		return {
+			"report_db": lerpf(-8.0, -6.8, enclosed),
+			"report_pitch": 0.955,
+			"body_db": lerpf(-40.0, -6.5, enclosed),
+			"body_pitch": 0.78,
+		}
 	return {
-		"report_db": lerpf(-6.0, 0.5, enclosed),
-		"report_pitch": lerpf(1.025, 0.955, enclosed),
-		"body_db": lerpf(-60.0, -2.0, enclosed),
-		"body_pitch": lerpf(0.90, 0.80, enclosed),
+		"report_db": -7.0,
+		"report_pitch": 1.025,
+		"body_db": -60.0,
+		"body_pitch": 0.90,
 	}
 
 
@@ -582,8 +603,39 @@ func set_acoustic_openness(openness: float) -> void:
 	_configure_shot_audio_mix()
 
 
+func set_acoustic_environment(space: StringName, openness: float) -> void:
+	_acoustic_space = space
+	_acoustic_openness = clampf(openness, 0.0, 1.0)
+	_configure_room_effects()
+	_configure_shot_audio_mix()
+
+
+func _configure_room_effects() -> void:
+	if _interior_reverb == null or _interior_damping == null:
+		return
+	if _acoustic_space == &"wheelhouse":
+		# Glass and painted framing: short, bright, hard reflections.
+		_interior_reverb.room_size = 0.42
+		_interior_reverb.damping = 0.24
+		_interior_reverb.spread = 0.82
+		_interior_reverb.hipass = 0.12
+		_interior_reverb.dry = 0.0
+		_interior_reverb.wet = 0.62
+		_interior_damping.cutoff_hz = 4800.0
+	else:
+		# Low timber cabin: close, dense body with the high crack absorbed.
+		_interior_reverb.room_size = 0.27
+		_interior_reverb.damping = 0.58
+		_interior_reverb.spread = 0.68
+		_interior_reverb.hipass = 0.06
+		_interior_reverb.dry = 0.0
+		_interior_reverb.wet = 0.78
+		_interior_damping.cutoff_hz = 2200.0
+
+
 func acoustic_mix_report() -> Dictionary:
 	return {
+		"space": _acoustic_space,
 		"openness": _acoustic_openness,
 		"report_db": _shot_audio.volume_db if _shot_audio != null else -80.0,
 		"report_pitch": _shot_audio.pitch_scale if _shot_audio != null else 1.0,

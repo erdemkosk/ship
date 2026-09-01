@@ -45,6 +45,7 @@ var _look_pitch := 0.0
 ## behind the camera on the 70-degree gameplay lens.
 const FREE_LOOK_DOWN_LIMIT := -1.40
 const HELD_LOOK_DOWN_LIMIT := -0.56
+const HELM_LOOK_DOWN_LIMIT := -1.02
 const LOOK_UP_LIMIT := 1.40
 
 
@@ -63,7 +64,8 @@ var _walker: RefCounted = (load("res://scripts/deck_walker.gd") as GDScript).new
 # companionway, so an eye pinned straight to them climbs like a staircase of
 # jump cuts. Smoothed in the BOAT'S frame, never in world space — smooth it in
 # world space and you are also smoothing her heave, which puts the horizon on
-# a spring and makes the whole deck feel like jelly.
+# a spring and makes the whole deck feel like jelly. The separate knee response
+# below is acceleration-driven, critically damped and capped at 6.5 cm.
 var _eye_y := 0.0
 var _eye_ready := false
 var _bob := 0.0
@@ -71,6 +73,13 @@ var _bob := 0.0
 ## deck; this is head/torso travel from bending at the waist.
 var _reach_body_lean := Vector3.ZERO
 var _roll := 0.0
+var _ship_pitch := 0.0
+var _boat_vy := 0.0
+var _boat_vy_ready := false
+var _heave_accel := 0.0
+var _knee_offset := 0.0
+var _knee_velocity := 0.0
+var _station_eye_drop := 0.0
 var _panel: Node = null
 # 0 while you are not at the chart, running to 1 as you lean over it. The lean
 # is what makes it a place you go rather than a screen that opens.
@@ -248,6 +257,12 @@ func set_mode(m: int) -> void:
 			_eye_ready = false
 			_bob = 0.0
 			_roll = 0.0
+			_ship_pitch = 0.0
+			_boat_vy_ready = false
+			_heave_accel = 0.0
+			_knee_offset = 0.0
+			_knee_velocity = 0.0
+			_station_eye_drop = 0.0
 			if _arms != null:
 				_arms.set_active(true)
 			# start looking where the boat points, standing at the wheel
@@ -303,6 +318,15 @@ func _view_pitch_guard_active() -> bool:
 		return true
 	return _arms != null and _arms.has_method("view_pitch_guard_active") \
 			and bool(_arms.call("view_pitch_guard_active"))
+
+
+func _look_down_limit() -> float:
+	## A helmsman must be able to inspect and work the key below the wheel.
+	## Other planted poses retain the tighter seam-safe authored limit.
+	if target != null and _flag(target, "helm_engaged"):
+		return HELM_LOOK_DOWN_LIMIT
+	return HELD_LOOK_DOWN_LIMIT if _view_pitch_guard_active() \
+			else FREE_LOOK_DOWN_LIMIT
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -382,8 +406,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			return                      # leaning in; the camera is driving
 		if mode == Mode.FPS:
 			_look_yaw -= event.relative.x * FPS_LOOK
-			var down_limit := HELD_LOOK_DOWN_LIMIT \
-					if _view_pitch_guard_active() else FREE_LOOK_DOWN_LIMIT
+			var down_limit := _look_down_limit()
 			_look_pitch = clampf(_look_pitch - event.relative.y * FPS_LOOK,
 					down_limit, LOOK_UP_LIMIT)
 		elif _orbiting:
@@ -982,6 +1005,11 @@ func _process_fps(delta: float) -> void:
 		# tread is a rise and not a cut.
 		_eye_y = lerpf(_eye_y, eye_l.y, 1.0 - exp(-13.0 * delta))
 	eye_l.y = _eye_y
+	var station_drop_goal := 0.08 if engaged == "helm" \
+			else (0.04 if engaged == "telegraph" else 0.0)
+	_station_eye_drop = lerpf(_station_eye_drop, station_drop_goal,
+			1.0 - exp(-8.0 * delta))
+	eye_l.y -= _station_eye_drop
 
 	# A little sway with your stride. Two steps to the cycle, and only while
 	# your feet are actually on something — no bobbing in mid-air.
@@ -1013,6 +1041,11 @@ func _process_fps(delta: float) -> void:
 		_reach_body_lean = _reach_body_lean.lerp(Vector3.ZERO,
 				1.0 - exp(-delta / 0.08))
 	eye_l += _reach_body_lean
+	_update_knee_suspension(delta, target)
+	# The legs absorb a small part of world-vertical hull acceleration. Convert
+	# that displacement back into the boat frame so it never becomes a magic
+	# world-space camera lag when the vessel is heeled.
+	eye_l += xf.basis.inverse() * (Vector3.UP * _knee_offset)
 
 	var cam_pos: Vector3 = xf * eye_l
 	# The eye is normally held clear of the water — you are aboard, and a wave
@@ -1056,8 +1089,9 @@ func _process_fps(delta: float) -> void:
 	# seam on that same frame. Subsequent mouse input is clamped above, so this is
 	# normally a one-shot correction rather than a continuously driven camera.
 	if _view_pitch_guard_active():
-		pitch = maxf(pitch, HELD_LOOK_DOWN_LIMIT)
-		_look_pitch = maxf(_look_pitch, HELD_LOOK_DOWN_LIMIT)
+		var down_limit := _look_down_limit()
+		pitch = maxf(pitch, down_limit)
+		_look_pitch = maxf(_look_pitch, down_limit)
 
 	# --- how far you can turn your head while you have hold of something -----
 	# Planted at a control your BODY does not turn. A helmsman with both hands
@@ -1093,23 +1127,53 @@ func _process_fps(delta: float) -> void:
 		_look_pitch = pitch
 	_was_ladder = on_lad
 
+	var held_bag := _deck_bag()
+	var rifle_aim := float(held_bag.call("rifle_aim_amount")) \
+			if held_bag != null and held_bag.has_method("rifle_aim_amount") else 0.0
+	var manipulating := engaged != "" or _bag_focus > 0.15 or rifle_aim > 0.15
+	if _arms != null and _arms.has_method("inspecting_id"):
+		manipulating = manipulating or str(_arms.call("inspecting_id")) != ""
+	var space := &"deck"
+	if target.has_method("acoustic_space"):
+		space = target.call("acoustic_space", cam_pos) as StringName
+	var roll_follow := 0.24
+	var pitch_follow := 0.15
+	var roll_limit := deg_to_rad(6.3)
+	var pitch_limit := deg_to_rad(5.0)
+	if space == &"wheelhouse":
+		roll_follow = 0.45
+		pitch_follow = 0.35
+		roll_limit = deg_to_rad(9.0)
+		pitch_limit = deg_to_rad(8.0)
+	elif space == &"cabin":
+		roll_follow = 0.65
+		pitch_follow = 0.50
+		roll_limit = deg_to_rad(13.0)
+		pitch_limit = deg_to_rad(10.0)
+	if manipulating:
+		roll_follow = 0.75
+		pitch_follow = 0.60
+		roll_limit = deg_to_rad(15.0)
+		pitch_limit = deg_to_rad(12.0)
 	var heel := asin(clampf(xf.basis.x.y, -1.0, 1.0))
+	var vessel_pitch := asin(clampf(-xf.basis.z.y, -1.0, 1.0))
 	var bag_roll := bag_load_arc * 0.025
-	_roll = lerpf(_roll, clampf(heel * 0.24 + bag_roll, -0.11, 0.11),
-			1.0 - exp(-6.0 * delta))
+	var roll_goal := _soft_limit_angle(heel * roll_follow,
+			roll_limit * 0.68, roll_limit) + bag_roll
+	var pitch_goal := _soft_limit_angle(vessel_pitch * pitch_follow,
+			pitch_limit * 0.68, pitch_limit)
+	_roll = lerpf(_roll, roll_goal, 1.0 - exp(-6.0 * delta))
+	_ship_pitch = lerpf(_ship_pitch, pitch_goal, 1.0 - exp(-7.0 * delta))
 	var knife_kick := Vector3.ZERO
 	var rifle_kick := Vector3.ZERO
-	var held_bag := _deck_bag()
 	if held_bag != null and held_bag.has_method("active_knife_camera_kick"):
 		knife_kick = held_bag.call("active_knife_camera_kick") as Vector3
 	if held_bag != null and held_bag.has_method("active_rifle_camera_kick"):
 		rifle_kick = held_bag.call("active_rifle_camera_kick") as Vector3
 	var total_kick := knife_kick + rifle_kick
 	_cam.global_basis = Basis(Vector3.UP, yaw + total_kick.y) \
-			* Basis(Vector3.RIGHT, pitch + total_kick.x) \
+			* Basis(Vector3.RIGHT, pitch + _ship_pitch + total_kick.x) \
 			* Basis(Vector3.BACK, _roll + total_kick.z)
-	var rifle_aim := float(held_bag.call("rifle_aim_amount")) \
-			if held_bag != null and held_bag.has_method("rifle_aim_amount") else 0.0
 	var rifle_pressure := float(held_bag.call("active_rifle_pressure")) \
 			if held_bag != null and held_bag.has_method("active_rifle_pressure") else 0.0
 	# The shock front briefly opens peripheral vision, then the sight picture
@@ -1134,6 +1198,48 @@ func _process_fps(delta: float) -> void:
 		_arms.update(delta, target, engaged, walking, _flag(_walker, "swimming"))
 	_resolve_active_knife_sweep()
 	_update_warmth(delta)
+
+
+func _update_knee_suspension(delta: float, boat: Node3D) -> void:
+	## The camera still rides the vessel. This is only the few centimetres a
+	## standing person's ankles, knees and hips give under vertical acceleration.
+	var active := _walker != null and bool(_walker.get("on_floor")) \
+			and not _flag(_walker, "swimming") \
+			and not _flag(_walker, "on_sea_ladder")
+	var current_vy := 0.0
+	if boat is RigidBody3D:
+		current_vy = (boat as RigidBody3D).linear_velocity.y
+	if not _boat_vy_ready:
+		_boat_vy = current_vy
+		_boat_vy_ready = true
+	var raw_accel := clampf((current_vy - _boat_vy) / maxf(delta, 0.001), -28.0, 28.0)
+	_boat_vy = current_vy
+	var accel_goal := raw_accel if active else 0.0
+	_heave_accel = lerpf(_heave_accel, accel_goal, 1.0 - exp(-delta / 0.11))
+	var target_offset := clampf(-_heave_accel * 0.0085, -0.065, 0.065) \
+			if active else 0.0
+	# Critically damped spring at roughly 3.2 Hz: it gives once, then settles;
+	# it cannot lag behind the boat and turn the horizon into jelly.
+	var dt := minf(delta, 0.033)
+	var omega := TAU * 3.2
+	var spring_accel := (target_offset - _knee_offset) * omega * omega \
+			- 2.0 * omega * _knee_velocity
+	_knee_velocity += spring_accel * dt
+	_knee_offset += _knee_velocity * dt
+	if absf(_knee_offset) > 0.065:
+		_knee_offset = clampf(_knee_offset, -0.065, 0.065)
+		_knee_velocity *= 0.25
+
+
+func _soft_limit_angle(angle: float, knee: float, maximum: float) -> float:
+	## Exactly linear through ordinary motion, then progressively compresses
+	## exceptional rolls/slams instead of hitting a visible hard camera clamp.
+	var magnitude := absf(angle)
+	if magnitude <= knee or maximum <= knee:
+		return angle
+	var tail := maximum - knee
+	var compressed := knee + tail * (1.0 - exp(-(magnitude - knee) / tail))
+	return signf(angle) * minf(compressed, maximum)
 
 
 func _resolve_active_rifle_shot(bag: Node3D) -> void:

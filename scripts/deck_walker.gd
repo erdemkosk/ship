@@ -9,8 +9,9 @@ extends RefCounted
 ## it, exactly the way a deck carries you.
 ##
 ## Gravity is the one thing that must stay in world space, so it is rotated into
-## the local frame each tick. That single line is why you slide toward the lee
-## rail when she heels, and why standing on the foredeck in a beam sea is work.
+## the local frame each tick. Static friction holds ordinary heel; once its
+## indoor/outdoor threshold breaks, that gravity is why you slide toward the lee
+## rail and why standing on the foredeck in a beam sea becomes work.
 ##
 ## Collision is deliberately not the physics engine either: the ship's walkable
 ## volume is a short list of axis-aligned rectangles published by boat.gd, and
@@ -191,8 +192,11 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 		if on_floor:
 			var target := Vector3(wish.x, 0.0, wish.y) * WALK_SPEED
 			hv = hv.lerp(target, 1.0 - exp(-ACCEL * delta))
-			# Down-slope pull, so a heeling deck is something you fight.
-			hv += Vector3(g.x, 0.0, g.z) * delta * 0.65
+			# Static friction first, downhill slide second. A dry cabin sole holds
+			# ordinary heel; the exposed wet deck lets go earlier. The transition
+			# is progressive so crossing the threshold never feels like a mode.
+			var slide := _slope_drift_scale(boat, xf, g)
+			hv += Vector3(g.x, 0.0, g.z) * delta * 0.65 * slide
 			hv *= exp(-GROUND_DRAG * delta * (0.12 if wish.length_squared() > 0.01 else 1.0))
 			if want_jump:
 				vel.y = JUMP_SPEED
@@ -209,6 +213,16 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 	_resolve_walls(blockers)
 	_resolve_ceilings(ceils)
 	_resolve_floor(floors)
+
+
+func _slope_drift_scale(boat: Node3D, xf: Transform3D, local_gravity: Vector3) -> float:
+	var horizontal := Vector2(local_gravity.x, local_gravity.z).length()
+	var slope := atan2(horizontal, maxf(absf(local_gravity.y), 0.001))
+	var inside := false
+	if boat.has_method("acoustic_space"):
+		inside = (boat.call("acoustic_space", xf * pos) as StringName) != &"deck"
+	var static_limit := deg_to_rad(12.0 if inside else 7.5)
+	return smoothstep(static_limit, static_limit + deg_to_rad(8.0), slope)
 
 
 func _resolve_floor(floors: Array) -> void:

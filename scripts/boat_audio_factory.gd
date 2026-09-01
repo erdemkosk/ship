@@ -59,6 +59,59 @@ static func diesel_idle() -> AudioStreamWAV:
 	return _pcm(samples, rate, true)
 
 
+static func diesel_load() -> AudioStreamWAV:
+	## Combustion body that enters with shaft load. It deliberately contains no
+	## idle character; layered below the recording it turns chug into weight.
+	var rate := 22050
+	var n := rate * 2
+	var samples := PackedFloat32Array()
+	samples.resize(n)
+	var lp := 0.0
+	for i in n:
+		var t := float(i) / float(rate)
+		var pulse := pow(0.5 + 0.5 * sin(t * TAU * 18.0), 5.0)
+		var body := sin(t * TAU * 36.0) * 0.30 + sin(t * TAU * 72.0) * 0.10
+		var raw := sin(t * TAU * 18.0) * 0.34 + pulse * body
+		lp = lerpf(lp, raw, 0.16)
+		samples[i] = clampf(lp * 0.78, -0.72, 0.72)
+	return _pcm(samples, rate, true)
+
+
+static func reverse_gear() -> AudioStreamWAV:
+	## A subdued gearbox/shaft whine. Astern must read by colour before the
+	## player looks at the telegraph, without becoming a modern transmission.
+	var rate := 22050
+	var n := rate * 2
+	var samples := PackedFloat32Array()
+	samples.resize(n)
+	for i in n:
+		var t := float(i) / float(rate)
+		var wobble := sin(t * TAU * 3.0) * 2.5
+		var gear := sin(t * TAU * (84.0 + wobble)) * 0.34
+		gear += sin(t * TAU * (168.0 + wobble * 2.0)) * 0.10
+		gear *= 0.82 + sin(t * TAU * 6.0) * 0.12
+		samples[i] = gear * 0.62
+	return _pcm(samples, rate, true)
+
+
+static func diesel_strain() -> AudioStreamWAV:
+	## Low irregular knock for high propeller slip, an accelerating shaft or a
+	## grounded hull. This is load without speed, not simply "more rpm".
+	var rate := 22050
+	var n := rate * 2
+	var samples := PackedFloat32Array()
+	samples.resize(n)
+	var lp := 0.0
+	for i in n:
+		var t := float(i) / float(rate)
+		var knock := pow(0.5 + 0.5 * sin(t * TAU * 12.0), 10.0)
+		var raw := sin(t * TAU * 12.0) * 0.22
+		raw += knock * (sin(t * TAU * 24.0) * 0.40 + sin(t * TAU * 48.0) * 0.16)
+		lp = lerpf(lp, raw, 0.12)
+		samples[i] = clampf(lp * 0.78, -0.70, 0.70)
+	return _pcm(samples, rate, true)
+
+
 static func _pcm(samples: PackedFloat32Array, rate: int, loop: bool) -> AudioStreamWAV:
 	var stream := AudioStreamWAV.new()
 	stream.format = AudioStreamWAV.FORMAT_16_BITS

@@ -298,6 +298,19 @@ Sonuncusu en uzunu çünkü makinenin durup ters yönde yeniden çalışması ge
 "Büyük" hissini veren şeyin çoğu bu gecikme — ve yavaş yola çok önceden
 çalman gerektiğinin sebebi.
 
+Makine sesi de aynı şaft durumunu okuyor. Rölanti ana kayıtta sakin kalıyor;
+yük bindikçe ayrı yanma gövdesi giriyor, tornistanda düşük bir dişli/şaft sesi
+duyuluyor, istenen güç gerçek devrin önüne geçtiğinde veya tekne karaya oturup
+pervane boşa yüklendiğinde zorlanma vuruntusu yükseliyor. Bunlar yalnızca ses
+perdesi değişiklikleri değil; dört karakter ayrı katmanlar ve motor sustuğunda
+birlikte sönüyor.
+
+Tüfek raporu da bulunduğun hacmi okuyor: açık güvertede kuru ve kısa, camlı
+dümen evinde parlak kısa yansımalarla, alçak ahşap kamarada daha koyu ve gövdeli.
+Kapı açıklığı her hacmin yansıma miktarını ayrıca azaltıyor. Sürekli sesler,
+mekanik olaylar ve patlamalar ortak bir headroom düzeninde; son çıkıştaki
+limiter yalnızca yıldırım ile atışın aynı anda geldiği tepeyi yakalıyor.
+
 Konsoldaki güç çubukları **kolu değil şaftı** okuyor, yani makinenin telgrafı
 kovalayışını izliyorsun. Dümen de öyle: `_helm` girdiyi 1.45 sn'lik bir sabitle
 takip ediyor, alabanda iki-üç saniye kol çevirmek demek. Fiziksel dümen yelpazesi
@@ -580,9 +593,19 @@ yani tam ıslaktan kuruya ~18 saniye. Silecek de tam bu yüzden var.
   1.10 m'den büyük atlamalar (dümene geçmek, denizden çıkmak) anında geçiliyor.
 - **Adım salınımı** — hız ve yerde olma durumuna bağlı, 2.2 cm. Var olduğunu
   fark etmiyorsun, olmadığında yürüyüş ölü hissettiriyor.
-- **Güverte yalpası görüşe yansıyor** — ama üçte biri, ±7.5° ile sınırlı.
-  Tam yalpa mide bulandırıyor, dümdüz ufuk ise fotoğrafın üstünde duruyormuş
-  gibi hissettiriyor.
+- **Baş bulunduğu yere tutunuyor.** Açık güvertede kamera yalpanın %24'ünü,
+  dümen evinde %45'ini, kamarada %65'ini alıyor; harita, nişan veya fiziksel
+  kontrol sırasında %75'e çıkıyor. Baş-kıç vurma da sırasıyla %15/%35/%50/%60.
+  Böylece güvertede ufuk sakin, içerideyse oda sakin; hiçbirinde tekne ölü
+  görünmüyor. Olağan hareket doğrusal, uç açılar görünür bir sert sınıra
+  çarpmadan kademeli sıkıştırılıyor.
+- **Dizler darbeyi alıyor.** Teknenin dikey ivmesine ters yönde çalışan kritik
+  sönümlü göz ofseti en fazla 6.5 cm veriyor. Kamera hâlâ teknenin üstünde;
+  yalnızca gerçek bir insanın ayak bileği, diz ve kalçasında kaybolacak darbe
+  başa kadar taşınmıyor.
+- **Zemin buz değil.** Kamara ve dümen evinde 12°'ye, açık ıslak güvertede
+  7.5°'ye kadar statik sürtünme oyuncuyu tutuyor. Eşik aşılınca eski aşağı-eğim
+  kuvveti sekiz derecelik yumuşak bir bantta devreye giriyor.
 - **Denize düşmek zorlaştı.** Eski test `pos.y < 0.15` de diyordu, yani gövdenin
   içinde bir metre düşmek seni güverte hâlâ tepende dururken suya sokuyordu.
   Artık *bordadan* dışarı çıkmak gerekiyor. Ayrıca gövde boyunca bir **sintine
@@ -594,6 +617,11 @@ yani tam ıslaktan kuruya ~18 saniye. Silecek de tam bu yüzden var.
   yükseldi, dümenci de cama yaklaştı. Tavan artık görüş alanına hiç girmiyor.
   Kıç cam da düzeldi: altında tam boy dolu bir panel varmış, cam sahteymiş —
   şimdi gerçekten arkayı görüyorsun.
+- **Dümende aşağı görüş.** Tutununca göz 8 cm yerleşiyor ve baş yaklaşık 58°
+  aşağı dönebiliyor; ignition anahtarı mevcut noktadan 50° aşağıda, dolayısıyla
+  artık dümeni bırakmadan doğrudan görülüp sağ elle çevriliyor. Omuzlar aşağı
+  bakışın %86'sını izlediği için bu geniş açı kol modellerinin açık üst uçlarını
+  kameraya göstermiyor.
 
 ### Ekrandaki panel
 
