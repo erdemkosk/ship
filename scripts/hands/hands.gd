@@ -111,6 +111,7 @@ var _bag_hand_target: Node3D
 var _bag_hand_mode := ""
 var _bag_hand_report := {}
 var _rifle_support_target: Node3D
+var _inventory_brace_active := false
 
 
 func debug_frames(n: int) -> void:
@@ -558,6 +559,22 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 
 
 func _finish(delta: float) -> void:
+	# A fully presented inventory has two planted contacts on one rigid bag. Lock
+	# the shared shoulder/torso solution so ship roll cannot make the left and
+	# right IK chains alternately steal body lean and pass through one another.
+	# Item extraction deliberately releases this bilateral brace.
+	var target_requests_brace := _bag_hand_target != null \
+			and bool(_bag_hand_target.get_meta("inventory_braced", false))
+	var inventory_braced := str(_claim.get("L", "")) == "deckbag" \
+			and _bag_hand_target != null \
+			and (_bag_hand_mode == "point" or target_requests_brace)
+	if inventory_braced:
+		rig.set_grip_locked("L", true)
+		rig.set_grip_locked("R", true)
+	elif _inventory_brace_active:
+		rig.set_grip_locked("L", false)
+		rig.set_grip_locked("R", false)
+	_inventory_brace_active = inventory_braced
 	if rig.has_method("set_watch_read"):
 		rig.set_watch_read(_watch_driver.amount())
 	rig.update(delta)

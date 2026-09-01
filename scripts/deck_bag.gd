@@ -53,6 +53,7 @@ var _knife_draw := 1.0
 const KNIFE_RELEASE_DURATION := 0.34
 var _knife_release_left := 0.0
 var _knife_release_item: UtilityKnife3D
+var _knife_release_start := Transform3D.IDENTITY
 var _rifle_primary_target: Node3D
 var _rifle_support_target: Node3D
 var _rifle_aim := 0.0
@@ -66,7 +67,7 @@ const KNIFE_CLEAR_DURATION := 0.16
 # small negative offset keeps the complete knife behind the retaining leather
 # while its rear face still remains clear of the canvas skin.
 const KNIFE_SLOT_PROUD := -0.040
-const KNIFE_CLEAR_PULL := 0.105
+const KNIFE_CLEAR_PULL := 0.145
 enum TakePhase { IDLE, GRASP, CLEAR_RESTRAINT, TURN_TO_CARRY, COMPLETE }
 var _take_phase := TakePhase.IDLE
 var _take_elapsed := -1.0
@@ -84,6 +85,8 @@ var _sling_last_anchor := Vector3.ZERO
 var _sling_last_velocity := Vector3.ZERO
 var _sling_ready := false
 var _shoulder_strap_parts: Array[MeshInstance3D] = []
+var _side_handle_parts: Array[MeshInstance3D] = []
+var _side_handle_points := PackedVector3Array()
 ## Cosmetic soft-body layer. Inventory anchors remain rigid and exact for the
 ## hands; only the waxed canvas skin and loose hardware yield under its load.
 var _soft_canvas_parts: Array[MeshInstance3D] = []
@@ -155,10 +158,15 @@ func update_camera_pose(delta: float, camera: Camera3D, amount: float) -> void:
 		var pos := a.lerp(b, ease)
 		var weight_arc := sin(ease * PI)
 		pos.y -= weight_arc * 0.035
-		# Once settled it still rides the character's breathing, but never floats.
+		# Breathing belongs to the weighted swing, not the inventory screen. Once
+		# both hands brace the open bag, even a few millimetres of decorative motion
+		# makes the independently solved arms drift through one another on a rolling
+		# ship. Fade it out completely before selection becomes active.
 		var settled := smoothstep(0.72, 1.0, ease)
-		pos.x += sin(_clock * 1.15) * 0.0035 * settled
-		pos.y += sin(_clock * 1.72 + 0.8) * 0.0025 * settled
+		var inspection_lock := smoothstep(0.82, 0.96, ease)
+		var breathing := settled * (1.0 - inspection_lock)
+		pos.x += sin(_clock * 1.15) * 0.0035 * breathing
+		pos.y += sin(_clock * 1.72 + 0.8) * 0.0025 * breathing
 		var rot := Vector3(
 			deg_to_rad(lerpf(18.0, -5.0, ease) + weight_arc * 8.0),
 			deg_to_rad(lerpf(-108.0, 0.0, ease)),
@@ -167,6 +175,7 @@ func update_camera_pose(delta: float, camera: Camera3D, amount: float) -> void:
 		_update_sling_physics(delta, camera, anchor_xf, ease)
 		reset_physics_interpolation()
 		_update_physical_shoulder_strap(ease)
+		_update_side_carry_handle(ease)
 		_update_loaded_canvas(delta, ease)
 	_update_pointer_transition(delta)
 	_update_slot_restraints(delta)
@@ -196,6 +205,12 @@ func _update_sling_physics(delta: float, camera: Camera3D,
 	forcing.x = clampf(forcing.x, -3.2, 3.2)
 	forcing.y = clampf(forcing.y, -3.2, 3.2)
 	var brace := smoothstep(0.58, 1.0, open_amount)
+	if open_amount >= 0.96:
+		# The left hand owns the side handle and the right hand owns the selected
+		# slot. At this point the load is physically closed between two contacts;
+		# retaining pendulum history only lets a wave inject motion between palms.
+		_sling_velocity = Vector2.ZERO
+		_sling_angle = Vector2.ZERO
 	var stiffness := lerpf(18.0, 48.0, brace)
 	var damping := lerpf(5.8, 12.0, brace)
 	_sling_velocity += (forcing - _sling_angle * stiffness
@@ -212,7 +227,14 @@ func _update_sling_physics(delta: float, camera: Camera3D,
 	var travel := Vector3(_sling_angle.y * 0.085,
 			-(absf(_sling_angle.x) + absf(_sling_angle.y)) * 0.018,
 			_sling_angle.x * 0.070) * (1.0 - brace)
-	global_transform = anchor_xf * Transform3D(swing_basis, travel)
+	# As the left fist takes the side loop, the load settles a few millimetres
+	# toward that hand and loses the last loose roll. This is weight transfer, not
+	# a decorative bob, and vanishes again while the bag returns to the shoulder.
+	var hand_load := smoothstep(0.28, 0.92, open_amount)
+	var hand_seat := Transform3D(Basis.from_euler(Vector3(0.0, 0.0,
+			deg_to_rad(1.4) * hand_load)),
+			Vector3(-0.007, -0.004, 0.0) * hand_load)
+	global_transform = anchor_xf * Transform3D(swing_basis, travel) * hand_seat
 
 
 func _update_physical_shoulder_strap(open_amount: float) -> void:
@@ -249,6 +271,24 @@ func _set_flat_strap_piece(piece: MeshInstance3D, from: Vector3, to: Vector3) ->
 		# A slight overlap hides the square gaps between articulated pieces while
 		# retaining the live pendulum curve.
 		mesh.size.x = delta.length() * 1.12
+
+
+func _update_side_carry_handle(open_amount: float) -> void:
+	if _side_handle_parts.size() != _side_handle_points.size() - 1:
+		return
+	var points := _side_handle_points.duplicate()
+	var tension := smoothstep(0.18, 0.86, open_amount)
+	# Index 3 is the authored palm contact and never moves. Adjacent leather
+	# straightens toward it under load; the stitched ends retain a little lag.
+	points[2].x = lerpf(points[2].x, -0.305, tension)
+	points[4].x = lerpf(points[4].x, -0.305, tension)
+	var lag_z := -_sling_angle.x * 0.020 * (1.0 - tension)
+	for index in points.size():
+		if index != 3:
+			var influence := sin(float(index) / float(points.size() - 1) * PI)
+			points[index].z += lag_z * influence
+	for index in _side_handle_parts.size():
+		_set_flat_strap_piece(_side_handle_parts[index], points[index], points[index + 1])
 
 
 func _register_soft_canvas(part: MeshInstance3D) -> MeshInstance3D:
@@ -311,7 +351,8 @@ func _update_loaded_canvas(delta: float, open_amount: float) -> void:
 		part.position = rest.origin + Vector3(_body_yield.x * low_factor,
 				-_body_yield.y * low_factor, 0.0)
 		var compression := _body_yield.y * 0.75 * low_factor
-		part.scale = Vector3(1.0 + compression * 0.55,
+		var authored_scale := rest.basis.get_scale()
+		part.scale = authored_scale * Vector3(1.0 + compression * 0.55,
 				1.0 - compression, 1.0 + compression * 0.30)
 
 	for ring in _load_ring_parts:
@@ -363,6 +404,9 @@ func _update_slot_restraints(_delta: float) -> void:
 	for part: MeshInstance3D in _rifle_sling_parts:
 		var rest: Transform3D = _rifle_sling_rest[part]
 		part.transform = rest
+		# Loaded leather hangs lower; empty leather remembers the curve but springs
+		# back enough that the vacant rifle slot is immediately readable.
+		part.position.y += -0.006 if slot_occupied(RIFLE_SLOT) else 0.004
 		if _take_source_slot == RIFLE_SLOT:
 			part.position.z += flex * 0.020
 			part.scale.z = 1.0 + flex * 0.10
@@ -607,10 +651,12 @@ func _seat_item_in_slot(item: Node3D, index: int) -> void:
 func _begin_knife_release(knife: UtilityKnife3D) -> void:
 	_knife_release_item = knife
 	_knife_release_left = KNIFE_RELEASE_DURATION
-	var grip := knife.grip_node()
-	_knife_hand_target.global_transform = knife.global_transform \
-			* (grip.transform if grip != null else Transform3D.IDENTITY)
+	# Preserve the hand's raised preview frame. The item is now seated, but the
+	# palm must release from in front of the canvas and withdraw outward; snapping
+	# it to the slot's deep grip frame made the complete hand enter the backpack.
+	_knife_release_start = _knife_hand_target.global_transform
 	_knife_hand_target.set_meta("authored_grip_frame", true)
+	_knife_hand_target.set_meta("inventory_braced", true)
 	_knife_hand_target.set_meta("grip_closure", 1.0)
 
 
@@ -634,7 +680,7 @@ func _clear_active_hand_metadata() -> void:
 	for target_node: Node3D in [_rifle_primary_target, _rifle_support_target]:
 		for key in ["held_device", "held_grip_transform", "contact_bounds",
 				"ads_locked", "weapon_space_pinned", "hand_pose",
-				"hand_attachment", "held_device_target"]:
+				"hand_attachment", "held_device_target", "inventory_braced"]:
 			if target_node.has_meta(key):
 				target_node.remove_meta(key)
 
@@ -644,15 +690,29 @@ func _update_knife_release(delta: float) -> void:
 			or not is_instance_valid(_knife_release_item):
 		_knife_release_left = 0.0
 		_knife_release_item = null
+		_knife_hand_target.remove_meta("inventory_braced")
 		return
 	_knife_release_left = maxf(_knife_release_left - delta, 0.0)
 	var grip := _knife_release_item.grip_node()
-	_knife_hand_target.global_transform = _knife_release_item.global_transform \
+	var seated_grip := _knife_release_item.global_transform \
 			* (grip.transform if grip != null else Transform3D.IDENTITY)
+	# A hard clearance plane in front of the organiser. The first beat follows
+	# the knife only as far as this plane; after the fingers open, the palm peels
+	# outward and slightly to the thumb side instead of retreating through cloth.
+	var safe_seat := seated_grip
+	safe_seat.origin += global_basis.z * 0.064
 	_knife_hand_target.set_meta("authored_grip_frame", true)
 	var progress := 1.0 - _knife_release_left / KNIFE_RELEASE_DURATION
+	if progress < 0.38:
+		_knife_hand_target.global_transform = _knife_release_start.interpolate_with(
+				safe_seat, smoothstep(0.0, 1.0, progress / 0.38))
+	else:
+		var retract := safe_seat
+		retract.origin += global_basis.z * 0.105 + global_basis.x * 0.030
+		_knife_hand_target.global_transform = safe_seat.interpolate_with(retract,
+				smoothstep(0.0, 1.0, inverse_lerp(0.38, 1.0, progress)))
 	_knife_hand_target.set_meta("grip_closure",
-			1.0 - smoothstep(0.06, 0.62, progress))
+			1.0 - smoothstep(0.12, 0.58, progress))
 
 
 func begin_active_attack() -> bool:
@@ -754,6 +814,7 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 		_update_active_knife(delta, camera, bag_amount, target, grasping)
 	elif kind == KIND_RIFLE:
 		var rifle: Node3D = _active_item
+		var previewing_rifle := _preview_slot == RIFLE_SLOT and bag_amount > 0.62
 		rifle.call("tick", delta)
 		var reloading := bool(rifle.call("is_reloading"))
 		if reloading:
@@ -783,18 +844,14 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 					Vector3(0.020, -0.120, -0.520))
 			target = _active_item.global_transform.interpolate_with(reload_pose,
 					smoothstep(0.0, 1.0, _rifle_reload_blend))
-		elif _preview_slot == RIFLE_SLOT and bag_amount > 0.62:
+		elif previewing_rifle:
 			_rifle_reload_blend = 0.0
-			# Keep the SLOT orientation but let the camera/right shoulder own the
-			# stock-wrist contact. Positioning the rifle root from the bag made the arm
-			# chase a point across the body; solve the root backwards from a stable
-			# camera-space palm instead. E still performs the final seating into the U.
+			# Raise the actual sling transform as one rigid assembly. Solving the rifle
+			# backwards from a camera-right palm pushed nearly the entire long gun out
+			# of frame after the padded compartment made the composition wider.
 			var raised_slot := _slot_transform(RIFLE_SLOT)
-			var staged := global_transform * raised_slot
-			var staged_primary := rifle.call("primary_grip_node") as Node3D
-			var grip_frame := staged * staged_primary.transform
-			grip_frame.origin = camera.global_transform * Vector3(0.165, -0.255, -0.500)
-			target = grip_frame * staged_primary.transform.affine_inverse()
+			target = global_transform * raised_slot
+			target.origin += global_basis.z * 0.075 + global_basis.y * 0.018
 		else:
 			_rifle_reload_blend = 0.0
 			# One-hand patrol carry: butt low at the right hip, muzzle safely above
@@ -827,6 +884,7 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 		var stable_camera_carry := _take_phase == TakePhase.COMPLETE \
 				and _preview_slot < 0
 		var weapon_frame := target if reloading or stable_camera_carry \
+				or (previewing_rifle and bag_amount >= 0.90) \
 				or (_rifle_aim > 0.82 and _preview_slot < 0) \
 				else _active_item.global_transform.interpolate_with(target, weapon_k)
 		if _preview_slot < 0 and not reloading:
@@ -838,7 +896,9 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 		var support_local := support_grip.transform
 		var support_target := weapon_frame * support_local
 		_rifle_support_target.set_meta("held_grip_transform", support_local)
-		var placing_in_sling := _preview_slot == RIFLE_SLOT and bag_amount > 0.62
+		var placing_in_sling := previewing_rifle
+		_rifle_primary_target.set_meta("inventory_braced",
+				placing_in_sling and bag_amount >= 0.90)
 		if placing_in_sling:
 			primary_target = weapon_frame * (rifle.call(
 					"sling_placement_grip_transform") as Transform3D)
@@ -870,7 +930,10 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 	# lag, and welding the rifle to a wrist lets IK rotate the sights. Both break
 	# the iron-sight line. Once shouldered, stamp the authored target exactly.
 	if kind != KIND_RIFLE:
-		_active_item.global_transform = _active_item.global_transform.interpolate_with(target, k)
+		if _preview_slot >= 0 and bag_amount >= 0.90:
+			_active_item.global_transform = target
+		else:
+			_active_item.global_transform = _active_item.global_transform.interpolate_with(target, k)
 	_active_item.reset_physics_interpolation()
 
 
@@ -882,11 +945,19 @@ func _update_active_knife(delta: float, camera: Camera3D, bag_amount: float,
 		var grip := knife.grip_node()
 		var grip_target := target \
 				* (grip.transform if grip != null else Transform3D.IDENTITY)
-		var return_k := 1.0 - exp(-10.0 * delta)
-		_knife_hand_target.global_transform = \
-				_knife_hand_target.global_transform.interpolate_with(grip_target, return_k)
+		if bag_amount >= 0.90:
+			_knife_hand_target.global_transform = grip_target
+		else:
+			var return_k := 1.0 - exp(-10.0 * delta)
+			var current_local := global_transform.affine_inverse() \
+					* _knife_hand_target.global_transform
+			var target_local := global_transform.affine_inverse() * grip_target
+			_knife_hand_target.global_transform = global_transform \
+					* current_local.interpolate_with(target_local, return_k)
 		_knife_hand_target.set_meta("authored_grip_frame", true)
+		_knife_hand_target.set_meta("inventory_braced", true)
 		return
+	_knife_hand_target.remove_meta("inventory_braced")
 	if _take_phase == TakePhase.CLEAR_RESTRAINT:
 		var clear_u := smoothstep(0.0, 1.0, _knife_clear_progress())
 		_knife_hand_target.set_meta("authored_grip_frame", true)
@@ -900,8 +971,25 @@ func _update_active_knife(delta: float, camera: Camera3D, bag_amount: float,
 		_knife_draw = minf(_knife_draw + delta / turn_duration, 1.0)
 	var palm_target := camera.global_transform * Transform3D(Basis.IDENTITY,
 			knife.hand_position_camera_local())
-	_knife_hand_target.global_transform = _knife_hand_target.global_transform \
-			.interpolate_with(palm_target, smoothstep(0.0, 1.0, _knife_draw))
+	if _take_source_slot == KNIFE_SLOT and _take_phase == TakePhase.TURN_TO_CARRY:
+		# Deterministic clearance arc: the palm begins fourteen centimetres in
+		# front of the MOLLE panel, moves a little farther out, then turns toward
+		# camera carry. A straight world-space interpolation cut the forearm through
+		# the bag whenever ship roll moved the final target across the slot.
+		var draw_u := smoothstep(0.0, 1.0, _knife_draw)
+		var clear_frame := _take_grip_start
+		clear_frame.origin += global_basis.z * KNIFE_CLEAR_PULL
+		var control := clear_frame.origin + global_basis.z * 0.070 \
+				+ global_basis.x * 0.035
+		var u_inv := 1.0 - draw_u
+		_knife_hand_target.global_position = clear_frame.origin * (u_inv * u_inv) \
+				+ control * (2.0 * u_inv * draw_u) \
+				+ palm_target.origin * (draw_u * draw_u)
+		_knife_hand_target.global_basis = clear_frame.basis.slerp(
+				palm_target.basis, draw_u)
+	else:
+		_knife_hand_target.global_transform = _knife_hand_target.global_transform \
+				.interpolate_with(palm_target, smoothstep(0.0, 1.0, _knife_draw))
 
 
 func _update_take_phase(delta: float) -> void:
@@ -1201,6 +1289,15 @@ func _material(color: Color, roughness: float, metallic := 0.0) -> StandardMater
 	return mat
 
 
+func _fabric_material(color: Color, worn: Color, wear: float) -> ShaderMaterial:
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/waxed_canvas.gdshader") as Shader
+	mat.set_shader_parameter("base_color", color)
+	mat.set_shader_parameter("worn_color", worn)
+	mat.set_shader_parameter("wear_amount", wear)
+	return mat
+
+
 func _mesh_instance(mesh: Mesh, pos: Vector3, rot_deg: Vector3,
 		material: Material, part_name: String, parent: Node3D = null) -> MeshInstance3D:
 	var part := MeshInstance3D.new()
@@ -1233,6 +1330,21 @@ func _cylinder(radius: float, height: float, pos: Vector3, rot_deg: Vector3,
 	return _mesh_instance(mesh, pos, rot_deg, material, part_name, parent)
 
 
+func _ellipsoid(size: Vector3, pos: Vector3, rot_deg: Vector3,
+		material: Material, part_name: String) -> MeshInstance3D:
+	## A low-poly padded lobe is a better cloth silhouette than another bevel-less
+	## box.  SphereMesh supplies smooth normals; non-uniform scale makes the
+	## stuffed canvas volume while keeping the procedural asset lightweight.
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.5
+	mesh.height = 1.0
+	mesh.radial_segments = 24
+	mesh.rings = 12
+	var part := _mesh_instance(mesh, pos, rot_deg, material, part_name)
+	part.scale = size
+	return part
+
+
 func _ring(inner_radius: float, outer_radius: float, pos: Vector3,
 		rot_deg: Vector3, material: Material, part_name: String) -> MeshInstance3D:
 	var mesh := TorusMesh.new()
@@ -1252,6 +1364,35 @@ func _flat_strap_piece(from: Vector3, to: Vector3, width: float,
 	var angle := rad_to_deg(atan2(delta.y, delta.x))
 	return _box(Vector3(delta.length(), width, thickness), from.lerp(to, 0.5),
 			Vector3(0.0, 0.0, angle), material, part_name)
+
+
+func _elastic_strap_piece(from: Vector3, to: Vector3, width: float,
+		thickness: float, material: Material, part_name: String) -> MeshInstance3D:
+	## Rounded woven elastic between two points. A flattened ellipsoid removes the
+	## rigid timber-like corners while preserving the exact authored load path.
+	var delta := to - from
+	var angle := rad_to_deg(atan2(delta.y, delta.x))
+	return _ellipsoid(Vector3(delta.length(), width, thickness),
+			from.lerp(to, 0.5), Vector3(0.0, 0.0, angle), material, part_name)
+
+
+func _strap_piece_3d(from: Vector3, to: Vector3, width: float,
+		thickness: float, material: Material, part_name: String) -> MeshInstance3D:
+	## A thin flat band whose long axis may curve toward the camera. This is used
+	## for retainers wrapping a prop; the older XY-only helper could only produce
+	## one broad plank across the front of the knife.
+	var delta := to - from
+	var x_axis := delta.normalized()
+	var y_axis := Vector3.UP - Vector3.UP.project(x_axis)
+	if y_axis.length_squared() < 0.001:
+		y_axis = Vector3.FORWARD - Vector3.FORWARD.project(x_axis)
+	y_axis = y_axis.normalized()
+	var z_axis := x_axis.cross(y_axis).normalized()
+	y_axis = z_axis.cross(x_axis).normalized()
+	var piece := _box(Vector3(delta.length() * 1.06, width, thickness),
+			from.lerp(to, 0.5), Vector3.ZERO, material, part_name)
+	piece.basis = Basis(x_axis, y_axis, z_axis)
+	return piece
 
 
 func _cubic_strap_point(a: Vector3, b: Vector3, c: Vector3, d: Vector3,
@@ -1290,28 +1431,44 @@ func _stitch_line(from: Vector3, to: Vector3, count: int,
 
 
 func _build() -> void:
-	var canvas := _material(Color(0.105, 0.115, 0.096), 0.96)
-	var canvas_dark := _material(Color(0.060, 0.064, 0.054), 0.98)
+	var canvas := _fabric_material(Color(0.105, 0.115, 0.096),
+			Color(0.205, 0.190, 0.130), 0.31)
+	var canvas_dark := _fabric_material(Color(0.060, 0.064, 0.054),
+			Color(0.145, 0.135, 0.095), 0.24)
 	var canvas_wear := _material(Color(0.155, 0.158, 0.125), 0.99)
+	var slot_imprint := _material(Color(0.043, 0.047, 0.038), 0.99)
 	var leather := _material(Color(0.145, 0.080, 0.045), 0.91)
 	var leather_edge := _material(Color(0.075, 0.043, 0.028), 0.96)
 	var aged_leather := _material(Color(0.245, 0.128, 0.060), 0.97)
 	var brass := _material(Color(0.42, 0.30, 0.12), 0.38, 0.78)
 	var steel := _material(Color(0.26, 0.27, 0.27), 0.42, 0.72)
 	var steel_dark := _material(Color(0.090, 0.095, 0.098), 0.58, 0.56)
+	var zipper_metal := _material(Color(0.20, 0.18, 0.13), 0.48, 0.62)
+	var rifle_elastic := _fabric_material(Color(0.030, 0.034, 0.029),
+			Color(0.095, 0.090, 0.065), 0.12)
 	var flare_red := _material(Color(0.43, 0.055, 0.035), 0.75, 0.05)
 	var glass := _material(Color(0.34, 0.42, 0.38), 0.12)
 	var thread := _material(Color(0.50, 0.39, 0.23), 0.98)
 
-	# Canvas volume.  Edge rolls soften the primitive silhouette and make the
-	# bag read as stuffed cloth rather than a metal case.
+	# Canvas volume. The box is only the opaque core; three shallow padded lobes
+	# and mismatched edge rolls own the visible silhouette. Their few-millimetre
+	# overlap reads as packed waxed cloth instead of a flat equipment board.
 	_register_soft_canvas(_box(Vector3(0.48, 0.34, 0.135),
 			Vector3(0.0, -0.025, 0.0), Vector3.ZERO, canvas, "CanvasBody"))
+	_register_soft_canvas(_ellipsoid(Vector3(0.445, 0.285, 0.122),
+			Vector3(-0.010, -0.030, 0.028), Vector3(0.0, 0.0, -1.5),
+			canvas, "StuffedMainPanel"))
+	_register_soft_canvas(_ellipsoid(Vector3(0.215, 0.255, 0.105),
+			Vector3(-0.115, -0.040, 0.044), Vector3(0.0, 0.0, -4.0),
+			canvas, "StuffedPortLobe"))
+	_register_soft_canvas(_ellipsoid(Vector3(0.205, 0.238, 0.098),
+			Vector3(0.125, -0.050, 0.040), Vector3(0.0, 0.0, 3.0),
+			canvas_dark, "StuffedStarboardLobe"))
 	_register_soft_canvas(_cylinder(0.040, 0.29,
-			Vector3(-0.235, -0.025, 0.0), Vector3.ZERO,
+			Vector3(-0.235, -0.018, 0.0), Vector3(0.0, 0.0, -1.5),
 			canvas_dark, "LeftCanvasRoll"))
 	_register_soft_canvas(_cylinder(0.040, 0.29,
-			Vector3(0.235, -0.025, 0.0), Vector3.ZERO,
+			Vector3(0.235, -0.032, 0.0), Vector3(0.0, 0.0, 1.0),
 			canvas_dark, "RightCanvasRoll"))
 	_register_soft_canvas(_cylinder(0.038, 0.45,
 			Vector3(0.0, -0.195, 0.0), Vector3(0.0, 0.0, 90.0),
@@ -1320,10 +1477,69 @@ func _build() -> void:
 			Vector3(0.0, 0.185, 0.005), Vector3(0.0, 0.0, 90.0),
 			canvas, "RolledMouth"))
 
+	# Open clamshell architecture. A recessed organiser panel and a thick,
+	# continuous padded lip make this read as a real opened backpack rather than
+	# equipment attached to a flat board. The zipper teeth sit on the inner edge,
+	# safely outside every selectable prop and finger target.
+	_register_soft_canvas(_box(Vector3(0.430, 0.300, 0.030),
+			Vector3(0.0, -0.025, 0.078), Vector3.ZERO,
+			canvas_dark, "RecessedOrganizerPanel"))
+	for x in [-0.224, 0.224]:
+		_register_soft_canvas(_cylinder(0.020, 0.315,
+				Vector3(x, -0.025, 0.103), Vector3.ZERO,
+				canvas, "ClamshellSideLip"))
+	for y in [-0.178, 0.128]:
+		_register_soft_canvas(_cylinder(0.020, 0.448,
+				Vector3(0.0, y, 0.103), Vector3(0.0, 0.0, 90.0),
+				canvas, "ClamshellHorizontalLip"))
+	# Short alternating teeth imply a heavy two-way marine zipper without a
+	# noisy high-poly chain. Corners deliberately remain cloth so they can flex.
+	for i in 13:
+		var zipper_x := lerpf(-0.192, 0.192, float(i) / 12.0)
+		for zipper_y in [-0.157, 0.107]:
+			_box(Vector3(0.016, 0.007, 0.008),
+					Vector3(zipper_x, zipper_y, 0.124), Vector3.ZERO,
+					zipper_metal, "ZipperToothHorizontal")
+	for i in 8:
+		var zipper_y := lerpf(-0.130, 0.080, float(i) / 7.0)
+		for zipper_x in [-0.203, 0.203]:
+			_box(Vector3(0.007, 0.016, 0.008),
+					Vector3(zipper_x, zipper_y, 0.124), Vector3.ZERO,
+					zipper_metal, "ZipperToothVertical")
+
+	# MOLLE/PALS organiser sewn into the inner wall. Horizontal webbing remains
+	# behind the dedicated retainers; vertical stitch breaks provide the modular
+	# grid visible in the reference without turning the inventory into UI tiles.
+	for row in 5:
+		var molle_y := -0.132 + float(row) * 0.058
+		_box(Vector3(0.390, 0.018, 0.008), Vector3(0.0, molle_y, 0.108),
+				Vector3.ZERO, leather_edge, "MolleWebbingRow%02d" % row)
+		for column in 7:
+			var stitch_x := -0.168 + float(column) * 0.056
+			_box(Vector3(0.004, 0.020, 0.004),
+					Vector3(stitch_x, molle_y, 0.114), Vector3.ZERO,
+					thread, "MolleBarTack%02d_%02d" % [row, column])
+
+	# Shallow side utility pouches give the open bag the same layered silhouette
+	# as its closed exterior. They stay behind the side carry loop and never cover
+	# slot one or its pointing volume.
+	for side: float in [-1.0, 1.0]:
+		var side_x: float = side * 0.274
+		_register_soft_canvas(_ellipsoid(Vector3(0.090, 0.205, 0.078),
+				Vector3(side_x, -0.045, 0.020), Vector3(0.0, 0.0, side * 2.5),
+				canvas_dark, "SideUtilityPouch"))
+		_box(Vector3(0.078, 0.045, 0.016), Vector3(side_x, 0.038, 0.068),
+				Vector3(-8.0, 0.0, side * 2.0), leather, "SidePouchFlap")
+		_buckle(Vector3(side_x, 0.025, 0.081), 0.030, 0.028,
+				brass, "SidePouchBuckle")
+
 	# A broad flap and two old closure straps.  The flap stands a little proud
 	# of the body so its shadow survives the dim cabin lighting.
 	_box(Vector3(0.455, 0.145, 0.024), Vector3(0.0, 0.105, 0.082),
 			Vector3(-5.0, 0.0, 0.0), canvas_dark, "TopFlap")
+	_register_soft_canvas(_ellipsoid(Vector3(0.430, 0.128, 0.050),
+			Vector3(-0.008, 0.112, 0.087), Vector3(0.0, 0.0, -5.0),
+			canvas_dark, "PaddedTopFlap"))
 	_box(Vector3(0.435, 0.026, 0.012), Vector3(0.0, 0.168, 0.099),
 			Vector3.ZERO, leather_edge, "FlapEdge")
 	for x in [-0.155, 0.155]:
@@ -1371,11 +1587,14 @@ func _build() -> void:
 		Vector3(-0.272, -0.010, 0.080),
 		Vector3(-0.232, 0.000, 0.078),
 	])
+	_side_handle_points = side_carry_curve.duplicate()
+	_side_handle_parts.clear()
 	for index in side_carry_curve.size() - 1:
-		_flat_strap_piece(side_carry_curve[index], side_carry_curve[index + 1],
+		var side_piece := _flat_strap_piece(side_carry_curve[index], side_carry_curve[index + 1],
 				0.026, 0.009,
 				aged_leather if index % 2 == 0 else leather_edge,
 				"SideCarryLoop%02d" % index)
+		_side_handle_parts.append(side_piece)
 	_box(Vector3(0.050, 0.150, 0.014), Vector3(-0.231, 0.054, 0.072),
 			Vector3.ZERO, leather, "SideCarryReinforcement")
 	for stitch_y in [0.010, 0.052, 0.094]:
@@ -1488,14 +1707,106 @@ func _build() -> void:
 		_cylinder(0.009, 0.031, Vector3(0.0, y + 0.045, 0.002),
 				Vector3(90.0, 0.0, 0.0), brass, "MultitoolRivet", 10, multitool)
 
-	# Retaining loops around each tool. They are deliberately few and broad;
-	# repeated webbing would turn the silhouette into a modern tactical pack.
-	for x in [-0.178, -0.060, 0.060, 0.174]:
-		var slot := [-0.178, -0.060, 0.060, 0.174].find(x)
-		for y in [-0.105, 0.015]:
-			var loop := _box(Vector3(0.060, 0.018, 0.016),
-					Vector3(x, y, tool_z + 0.020), Vector3.ZERO, leather, "ToolLoop")
-			_register_tool_loop(slot, loop)
+	# Every object has the restraint a sailor would actually choose.  The dark,
+	# compressed backing remains when an item leaves, so an empty slot reads as a
+	# physical absence rather than a disabled UI cell.
+	for index in 4:
+		var x: float = SLOT_POSITIONS[index].x
+		_box(Vector3(0.054, 0.205, 0.003), Vector3(x, -0.050, 0.102),
+				Vector3.ZERO, slot_imprint, "Slot%dPressureGhost" % (index + 1))
+
+	# 1 — brass torch: two narrow cylindrical wraps plus a stitched bottom cup.
+	for y in [-0.096, 0.024]:
+		_register_tool_loop(0, _box(Vector3(0.064, 0.017, 0.017),
+				Vector3(SLOT_POSITIONS[0].x, y, tool_z + 0.020),
+				Vector3.ZERO, aged_leather, "FlashlightRetainer"))
+	_box(Vector3(0.072, 0.044, 0.020),
+			Vector3(SLOT_POSITIONS[0].x, -0.148, 0.132),
+			Vector3(-8.0, 0.0, 0.0), leather_edge, "FlashlightBottomCup")
+	_stitch_line(Vector3(SLOT_POSITIONS[0].x - 0.026, -0.156, 0.145),
+			Vector3(SLOT_POSITIONS[0].x + 0.026, -0.156, 0.145), 3,
+			thread, "FlashlightCupStitch")
+
+	# 2 — flare: a deep canvas sleeve carries its base; only one elasticised
+	# throat band needs to open when the cylinder is pulled free.
+	_box(Vector3(0.070, 0.108, 0.020),
+			Vector3(SLOT_POSITIONS[1].x, -0.105, 0.124),
+			Vector3.ZERO, canvas_dark, "FlareSleeve")
+	_register_tool_loop(1, _box(Vector3(0.062, 0.016, 0.017),
+			Vector3(SLOT_POSITIONS[1].x, 0.024, tool_z + 0.020),
+			Vector3.ZERO, leather_edge, "FlareElasticThroat"))
+	_stitch_line(Vector3(SLOT_POSITIONS[1].x - 0.027, -0.154, 0.139),
+			Vector3(SLOT_POSITIONS[1].x + 0.027, -0.154, 0.139), 3,
+			thread, "FlareSleeveStitch")
+
+	# 3 — utility knife: a narrow leather sheath supports the imported knife;
+	# the handle remains visible above one snap retainer.
+	_box(Vector3(0.078, 0.225, 0.016), Vector3(SLOT_POSITIONS[2].x,
+			-0.075, 0.078), Vector3.ZERO, leather_edge, "KnifeSheathBack")
+	_box(Vector3(0.078, 0.038, 0.020), Vector3(SLOT_POSITIONS[2].x,
+			-0.170, 0.102), Vector3.ZERO, leather, "KnifeSheathToe")
+	var knife_x: float = SLOT_POSITIONS[2].x
+	var knife_band_points := PackedVector3Array([
+		Vector3(knife_x - 0.039, 0.012, 0.126),
+		Vector3(knife_x - 0.019, 0.012, 0.142),
+		Vector3(knife_x + 0.018, 0.012, 0.145),
+		Vector3(knife_x + 0.039, 0.012, 0.127),
+	])
+	for band_index in knife_band_points.size() - 1:
+		_register_tool_loop(2, _strap_piece_3d(knife_band_points[band_index],
+				knife_band_points[band_index + 1], 0.012, 0.006,
+				rifle_elastic, "KnifeElasticRetainer%02d" % band_index))
+	# Offset snap at the actual opening end; it no longer reads as a decorative
+	# button glued to the centre of a solid beam.
+	_cylinder(0.0045, 0.006, Vector3(knife_x + 0.027, 0.012, 0.149),
+			Vector3(90.0, 0.0, 0.0), brass, "KnifeRetainerSnap", 10)
+
+	# 4 — multitool: a shallow gusseted pouch and weather flap.  The metal body
+	# still protrudes enough to identify and grasp it.
+	_box(Vector3(0.082, 0.190, 0.016), Vector3(SLOT_POSITIONS[3].x,
+			-0.060, 0.104), Vector3.ZERO, canvas_dark, "MultitoolPouchBack")
+	for side in [-1.0, 1.0]:
+		_box(Vector3(0.014, 0.180, 0.036), Vector3(SLOT_POSITIONS[3].x
+				+ side * 0.040, -0.065, 0.125),
+				Vector3(0.0, side * 7.0, 0.0), leather_edge,
+				"MultitoolPouchGusset")
+	_register_tool_loop(3, _box(Vector3(0.088, 0.050, 0.018),
+			Vector3(SLOT_POSITIONS[3].x, 0.052, 0.145),
+			Vector3(-10.0, 0.0, 0.0), leather, "MultitoolPouchFlap"))
+	_cylinder(0.007, 0.008, Vector3(SLOT_POSITIONS[3].x, 0.035, 0.158),
+			Vector3(90.0, 0.0, 0.0), brass, "MultitoolSnap", 10)
+
+	# Integrated long-gun compartment. Its padded back and perimeter are wider
+	# than the upper organiser because the rifle dictates the shape of the bag.
+	# The weapon remains completely exposed to the hand while the dark recess and
+	# zipper line make it read as stored inside the pack, never floating below it.
+	_register_soft_canvas(_box(Vector3(0.850, 0.185, 0.070),
+			Vector3(0.0, -0.337, 0.045), Vector3.ZERO,
+			canvas_dark, "RifleCompartmentBack"))
+	_register_soft_canvas(_ellipsoid(Vector3(0.815, 0.155, 0.065),
+			Vector3(-0.010, -0.340, 0.075), Vector3.ZERO,
+			canvas, "RifleCompartmentPadding"))
+	for y in [-0.432, -0.242]:
+		_register_soft_canvas(_cylinder(0.024, 0.845,
+				Vector3(0.0, y, 0.086), Vector3(0.0, 0.0, 90.0),
+				canvas_dark, "RifleCompartmentLip"))
+	for x in [-0.423, 0.423]:
+		_register_soft_canvas(_cylinder(0.024, 0.170,
+				Vector3(x, -0.337, 0.086), Vector3.ZERO,
+				canvas_dark, "RifleCompartmentSide"))
+	for i in 22:
+		var rifle_zip_x := lerpf(-0.385, 0.385, float(i) / 21.0)
+		_box(Vector3(0.018, 0.007, 0.007),
+				Vector3(rifle_zip_x, -0.253, 0.111), Vector3.ZERO,
+				zipper_metal, "RifleCompartmentZipper")
+	# Hinge bridges make the upper organiser and lower gun compartment one
+	# clamshell object, with actual load paths instead of two hovering panels.
+	for x in [-0.165, 0.165]:
+		_box(Vector3(0.058, 0.118, 0.018), Vector3(x, -0.226, 0.092),
+				Vector3.ZERO, leather_edge, "ClamshellHinge")
+		for hinge_y in [-0.258, -0.206]:
+			_cylinder(0.006, 0.009, Vector3(x, hinge_y, 0.104),
+					Vector3(90.0, 0.0, 0.0), brass, "ClamshellHingeRivet", 10)
 
 	# Dedicated long-gun cradle below the ordinary inventory. Each restraint is a
 	# real U around the rifle cross-section: rear leg attached to the bag, bridge
@@ -1524,19 +1835,32 @@ func _build() -> void:
 				Vector3.ZERO, leather_edge, "RifleSlingAnchorTab")
 		_cylinder(0.008, 0.012, Vector3(bag_x, -0.174, 0.124),
 				Vector3(90.0, 0.0, 0.0), brass, "RifleSlingAnchorRivet", 10)
-		_flat_strap_piece(Vector3(bag_x, -0.185, 0.120),
-				Vector3(x, top_y, rear_z + 0.004),
-				0.034 if muzzle_loop else 0.046, 0.018, leather,
-				"RifleSlingConnection")
+		var strap_start := Vector3(bag_x, -0.185, 0.120)
+		var strap_end := Vector3(x, top_y, rear_z + 0.004)
+		var connection_width := 0.030 if muzzle_loop else 0.040
+		var elastic_curve := PackedVector3Array()
+		for segment in 6:
+			var curve_t := float(segment) / 5.0
+			var curve_point := strap_start.lerp(strap_end, curve_t)
+			curve_point.y -= sin(curve_t * PI) * 0.018
+			curve_point.z += sin(curve_t * PI) * 0.005
+			elastic_curve.append(curve_point)
+		for segment in elastic_curve.size() - 1:
+			_register_rifle_sling(_flat_strap_piece(elastic_curve[segment],
+					elastic_curve[segment + 1], connection_width, 0.007,
+					rifle_elastic, "RifleElasticConnection%02d" % segment))
 		# Hidden/rear leg against the bag.
-		var sling_rear := _box(Vector3(band_w, leg_h, 0.018),
-				Vector3(x, leg_y, rear_z), Vector3.ZERO, leather_edge, "RifleSlingRear")
+		var sling_rear := _box(Vector3(band_w, leg_h, 0.007),
+				Vector3(x, leg_y, rear_z), Vector3.ZERO,
+				rifle_elastic, "RifleElasticRear")
 		# Lower return closes the U beneath the rifle rather than leaving two tabs.
-		var sling_under := _box(Vector3(band_w, 0.018, under_d), Vector3(x, under_y,
-				(rear_z + front_z) * 0.5), Vector3.ZERO, leather_edge, "RifleSlingUnder")
+		var sling_under := _box(Vector3(band_w, 0.007, under_d),
+				Vector3(x, under_y, (rear_z + front_z) * 0.5), Vector3.ZERO,
+				rifle_elastic, "RifleElasticUnder")
 		# Camera-facing band crosses the actual stock/receiver surface.
-		var sling_front := _box(Vector3(band_w, leg_h, 0.020),
-				Vector3(x, leg_y, front_z), Vector3.ZERO, leather, "RifleSlingFront")
+		var sling_front := _box(Vector3(band_w, leg_h, 0.008),
+				Vector3(x, leg_y, front_z), Vector3.ZERO,
+				rifle_elastic, "RifleElasticFront")
 		for sling_part in [sling_rear, sling_under, sling_front]:
 			_register_rifle_sling(sling_part)
 		_cylinder(0.009 if not muzzle_loop else 0.007,
@@ -1550,7 +1874,29 @@ func _build() -> void:
 			Vector3(0.0, 0.0, -8.0), canvas_wear, "SaltWear")
 	_box(Vector3(0.060, 0.040, 0.006), Vector3(0.115, -0.135, 0.073),
 			Vector3(0.0, 0.0, 5.0), canvas_dark, "CanvasRepair")
+	# Faded vessel-store stencil. It is deliberately small and low contrast: an
+	# old ownership mark on cloth, not a floating inventory title.
+	_box(Vector3(0.075, 0.028, 0.005), Vector3(0.155, -0.158, 0.119),
+			Vector3(0.0, 0.0, -4.0), canvas_wear, "FadedStorePatch")
+	var store_mark := Label3D.new()
+	store_mark.name = "FadedStoreMark"
+	store_mark.text = "D-17"
+	store_mark.font_size = 18
+	store_mark.pixel_size = 0.00062
+	store_mark.modulate = Color(0.34, 0.31, 0.22, 0.72)
+	store_mark.outline_size = 0
+	store_mark.position = Vector3(0.155, -0.158, 0.123)
+	store_mark.rotation_degrees.z = -4.0
+	add_child(store_mark)
 	_stitch_line(Vector3(-0.205, 0.150, 0.101), Vector3(0.205, 0.150, 0.101),
 			12, thread, "FlapStitch")
 	_stitch_line(Vector3(-0.215, -0.165, 0.072), Vector3(0.215, -0.165, 0.072),
 			12, thread, "BottomStitch")
+	_stitch_line(Vector3(-0.212, -0.145, 0.083), Vector3(-0.212, 0.135, 0.083),
+			9, thread, "PortEdgeStitch")
+	_stitch_line(Vector3(0.212, -0.150, 0.081), Vector3(0.212, 0.128, 0.081),
+			9, thread, "StarboardEdgeStitch")
+	_stitch_line(Vector3(0.086, -0.154, 0.080), Vector3(0.145, -0.149, 0.080),
+			4, thread, "RepairBottomStitch")
+	_stitch_line(Vector3(0.086, -0.116, 0.080), Vector3(0.145, -0.111, 0.080),
+			4, thread, "RepairTopStitch")

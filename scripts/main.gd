@@ -197,6 +197,8 @@ func _ready() -> void:
 			_held_framing_test(rig, boat)
 		elif arg == "--helm-driver-test":
 			_helm_driver_test(rig, boat)
+		elif arg.begins_with("--held-pitch-shot="):
+			_held_pitch_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--pull-radar":
 			_pull_radar(rig)
 		elif arg == "--pull-sounder":
@@ -205,6 +207,8 @@ func _ready() -> void:
 			_hold_radio(boat)
 		elif arg == "--open-bag":
 			_open_bag_later(rig)
+		elif arg.begins_with("--bag-visual="):
+			_bag_visual_shot(rig, arg.get_slice("=", 1))
 		elif arg == "--bag-take-shot":
 			_bag_take_shot(rig)
 		elif arg == "--bag-return-shot":
@@ -896,6 +900,53 @@ func _open_bag_later(rig: Node3D) -> void:
 			panel_view.visible = false
 	await get_tree().create_timer(0.20).timeout
 	rig.call("set_bag_open", true)
+
+
+func _bag_visual_shot(rig: Node3D, dir: String) -> void:
+	## Stable art-review frame after the complete shoulder-to-lap motion. Blink is
+	## disabled so a valid render can never be mistaken for a black screenshot.
+	await get_tree().create_timer(0.45).timeout
+	rig.call("set_mode", 1)
+	rig.set("_blink_wait", 999.0)
+	rig.call("_stop_blink")
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	await get_tree().create_timer(0.20).timeout
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(1.25).timeout
+	await _shot(dir, "bag_settled")
+	get_tree().quit()
+
+
+func _held_pitch_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Reproduce the shoulder-hole failure: request an extreme downward look
+	## while both hands are planted on the helm. The runtime guard must keep the
+	## rendered pitch at the last seam-safe angle without limiting upward look.
+	await get_tree().create_timer(0.45).timeout
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	boat.set("helm_engaged", true)
+	boat.set("telegraph_engaged", false)
+	rig.set("pitch", -1.20)
+	rig.set("_look_pitch", -1.20)
+	await get_tree().create_timer(0.65).timeout
+	print("[held-pitch] requested=-1.20 actual=%.3f target=%.3f guarded=%s" % [
+			float(rig.get("pitch")), float(rig.get("_look_pitch")),
+			bool(rig.call("_view_pitch_guard_active"))])
+	await _shot(dir, "held_pitch_down")
+	rig.set("pitch", 1.20)
+	rig.set("_look_pitch", 1.20)
+	await get_tree().create_timer(0.18).timeout
+	print("[held-pitch] requested_up=1.20 actual=%.3f unrestricted=%s" % [
+			float(rig.get("pitch")), float(rig.get("pitch")) > 1.10])
+	get_tree().quit()
 
 
 func _bag_take_shot(rig: Node3D) -> void:
