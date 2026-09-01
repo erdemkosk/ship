@@ -3925,7 +3925,11 @@ func _process(delta: float) -> void:
 		# Four turns lock to lock, the way a cable-and-quadrant helm feels.
 		_wheel.rotation.z = lerp_angle(_wheel.rotation.z, _helm * 4.2,
 				1.0 - exp(-5.0 * delta))
-	_boat_audio.tick_helm(delta, _wheel, helm_engaged)
+	# A dependency parse failure can abort `_ready()` before the audio controller
+	# is built. Keep hot-reload/failed-load frames from turning that one root error
+	# into an endless Nil-call flood.
+	if _boat_audio != null:
+		_boat_audio.tick_helm(delta, _wheel, helm_engaged)
 
 	# --- doors ---------------------------------------------------------------
 	# Shut is 0; open swings the leaf back against its own bulkhead. The blocker
@@ -4696,17 +4700,27 @@ func _build_deck_gear(trim: Material, metal: Material) -> void:
 	for lsx in [-0.16, 0.16]:
 		_box(Vector3(0.045, 2.52, 0.045), Vector3(lsx, -0.11, 0.0),
 				Vector3.ZERO, lad_iron, lad)
+		# Continue each stile over the transom to the deck grab. Previously the
+		# long ladder ended outboard while a second U was drawn on the cap, so an
+		# underside view read as two loose handles. These shoulders make one
+		# uninterrupted welded frame.
+		_box(Vector3(0.045, 0.050, 0.405), Vector3(lsx, 1.145, -0.202),
+				Vector3.ZERO, lad_iron, lad)
+		_cyl(0.031, 0.031, 0.055, Vector3(lsx, 1.145, -0.018),
+				Vector3.ZERO, lad_iron, lad)
 	var lad_n := 7
 	for li in lad_n:
 		var ly: float = SEA_LADDER_TOP - 0.10 - float(li) * 0.27
 		_cyl(0.020, 0.020, 0.36, Vector3(0.0, ly, 0.0),
 				Vector3(0.0, 0.0, 90.0), lad_iron, lad)
-	# Stiles stop at the cap. Grab U sits on the wood, between the two posts —
-	# nothing hanging in a hole in the transom.
+	# The upper U is the deck end of those same continuous stiles. Matching tube
+	# thickness and collars make the assembly read as one welded ladder.
 	for lsx in [-0.16, 0.16]:
-		_cyl(0.020, 0.020, 0.18, Vector3(SEA_LADDER_X + lsx, 1.36, 5.58),
+		_cyl(0.032, 0.032, 0.18, Vector3(SEA_LADDER_X + lsx, 1.36, 5.58),
 				Vector3.ZERO, lad_iron)
-	_cyl(0.020, 0.020, 0.36, Vector3(SEA_LADDER_X, 1.44, 5.58),
+		_cyl(0.038, 0.038, 0.035, Vector3(SEA_LADDER_X + lsx, 1.205, 5.58),
+				Vector3.ZERO, lad_iron)
+	_cyl(0.032, 0.032, 0.36, Vector3(SEA_LADDER_X, 1.44, 5.58),
 			Vector3(0.0, 0.0, 90.0), lad_iron)
 
 	# Fenders: three a side, hanging outboard from the rail. Bow, waist,
@@ -5020,7 +5034,8 @@ func _physics_process(delta: float) -> void:
 	var weather_state := weather as WeatherScript
 	var heavy_sea := weather_state != null \
 			and (weather_state.storm or weather_state.wind_speed > 16.5)
-	_boat_audio.tick_hull(delta, global_basis, angular_velocity, heavy_sea, slammed)
+	if _boat_audio != null:
+		_boat_audio.tick_hull(delta, global_basis, angular_velocity, heavy_sea, slammed)
 
 
 func _run_aground() -> void:

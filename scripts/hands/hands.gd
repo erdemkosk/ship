@@ -42,6 +42,7 @@ var boat: Node3D
 var rig: Node3D
 var _helm_driver := HELM_DRIVER.new()
 var _ladder_driver := LADDER_DRIVER.new()
+var _full_body_override_active := false
 var _watch_driver := WATCH_DRIVER.new()
 var _face_driver := FACE_DRIVER.new()
 var _swim_driver := SWIM_DRIVER.new()
@@ -238,7 +239,14 @@ func can_offer(id: String) -> bool:
 	## The reticle and the hand share one admission rule. If this returns true,
 	## pressing use will not be silently rejected for distance a moment later.
 	var spec: Dictionary = GripMap.spec_for(id)
-	if spec.is_empty() or rig == null or not rig.is_ready() or _device_of(id) == null:
+	if spec.is_empty() or rig == null or not rig.is_ready():
+		return false
+	# Full-body specials (boarding ladder, worn gear) deliberately have no held
+	# device node. Their own driver owns reach and motion after the world-space
+	# catalog has already selected them.
+	if int(spec.get("kind", GripMap.Kind.GESTURE)) == GripMap.Kind.SPECIAL:
+		return true
+	if _device_of(id) == null:
 		return false
 	var gate: String = str(spec.get("gate", ""))
 	if gate != "" and not bool(boat.call("switch_state", gate)):
@@ -377,6 +385,27 @@ func set_sea_ladder(on: bool, feet_y: float) -> void:
 	_ladder_driver.set_state(on, feet_y)
 
 
+func _enter_full_body_override() -> void:
+	## Ladder/swim drivers own both arms. Leave no stale gesture, rail ownership,
+	## contact freeze or rifle grip lock behind for the next cabin interaction.
+	for side: String in ["L", "R"]:
+		var old_id := str(_claim.get(side, ""))
+		if old_id != "":
+			_unlock_held(old_id)
+		_claim[side] = ""
+		_gesture[side] = null
+		rig.clear_held_attachment(side)
+		rig.set_contact_frozen(side, false)
+		rig.set_grip_locked(side, false)
+		rig.set_reach_bias(side, 0.0)
+		rig.set_reach_assist(side, 0.0)
+		rig.set_contact_target(side, null)
+		rig.release(side)
+	_multi_required.clear()
+	_multi_contact.clear()
+	_inspect = ""
+
+
 func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		swimming: bool) -> void:
 	boat = p_boat
@@ -400,9 +429,12 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 			_rest_t["R"] = 0.0
 		_finish(delta)
 		return
+	var full_body_override := (_ladder_driver.is_active() or swimming) and _active
+	if full_body_override and not _full_body_override_active:
+		_enter_full_body_override()
+	_full_body_override_active = full_body_override
 	if _ladder_driver.is_active() and _active and boat != null:
 		rig.set_visible_hands(true)
-		_claim = {"L": "", "R": ""}
 		rig.set_contact_target("L", null)
 		rig.set_contact_target("R", null)
 		_inspect = ""
@@ -413,7 +445,6 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 		return
 	if swimming and _active:
 		rig.set_visible_hands(true)
-		_claim = {"L": "", "R": ""}
 		rig.set_contact_target("L", null)
 		rig.set_contact_target("R", null)
 		_inspect = ""
@@ -843,7 +874,12 @@ func _drive_bag_hand(_delta: float) -> void:
 		rig.clear_held_attachment("R")
 		# Solve from the rig's measured index-tip offset. This accounts for both
 		# finger length and the index knuckle's thumb-side position in the palm.
-		var point_frame: Dictionary = rig.point_frame("R", object_point)
+		# Keep the back/side of the hand readable to the player across every slot;
+		# deriving roll from each target made slot 1 hide the pointing finger.
+		var readable_palm := (-_cam.global_basis.z \
+				+ _cam.global_basis.x * 0.16).normalized()
+		var point_frame: Dictionary = rig.point_frame(
+				"R", object_point, readable_palm)
 		contact = point_frame["contact"] as Vector3
 		axes = {
 			"fingers": point_frame["fingers"] as Vector3,
@@ -1058,14 +1094,12 @@ func _drive_rifle_support() -> void:
 	}
 	var support_palm: Transform3D = rig.solved_palm_global("L")
 	var support_lock_ready: bool = bool(rig.grip_locked("L")) \
-			# A support palm compresses against a broad wooden fore-end; allow the
-			# last few millimetres of skin/pad seating before welding it to the rifle.
-			or support_palm.origin.distance_to(support_world.origin) < 0.009
+			or support_palm.origin.distance_to(support_world.origin) < 0.005
 	rig.set_grip_locked("L", weapon_pin_requested and support_lock_ready)
 	# The centred ADS support point is slightly farther across the rifle than the
 	# imported port-edge marker. Let the left shoulder follow it so the palm seats
 	# under the wood instead of stopping short and appearing to slide off.
-	rig.set_reach_bias("L", 0.165 if weapon_pin_requested else 0.0)
+	rig.set_reach_bias("L", 0.155 if weapon_pin_requested else 0.0)
 	if device != null and _rifle_support_target.has_meta("contact_bounds"):
 		rig.set_contact_target_bounds("L", device,
 				# A wrapped fore-end bears through finger pads, not mathematical

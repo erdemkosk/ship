@@ -133,10 +133,8 @@ func _build_model() -> void:
 			# The measured WRAD left-hand semantic frame is quarter-turned relative
 			# to this import. This authored K/P/F frame produces rendered fingers
 			# ACROSS the fore-end while the palm continues to carry it from below.
-			Basis(Vector3.LEFT, Vector3.UP, Vector3.FORWARD))
-	# ADS contact belongs beneath the centre of the fore-end, not on its port
-	# edge. Reload code temporarily removes this correction for its work pose.
-	_support_grip.position.x += 0.014
+			Basis(Vector3.LEFT, Vector3.UP, Vector3.FORWARD).rotated(
+					Vector3.FORWARD, deg_to_rad(6.0)))
 	_aim_anchor = _marker("AimAnchor", SOURCE_REAR_SIGHT, Basis.IDENTITY)
 	_front_sight = _marker("FrontSight", SOURCE_FRONT_SIGHT, Basis.IDENTITY)
 	_muzzle = _marker("Muzzle", SOURCE_MUZZLE, Basis.IDENTITY)

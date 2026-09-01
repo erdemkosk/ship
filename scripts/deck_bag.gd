@@ -50,6 +50,14 @@ var _rifle_aim := 0.0
 var _rifle_aim_goal := false
 var _rifle_ads_settle := 0.0
 var _rifle_reload_blend := 0.0
+## Worn-bag dynamics. The camera supplies the shoulder frame; this state is the
+## delayed mass hanging below two strap attachments, never a decorative bob.
+var _sling_angle := Vector2.ZERO
+var _sling_velocity := Vector2.ZERO
+var _sling_last_anchor := Vector3.ZERO
+var _sling_last_velocity := Vector3.ZERO
+var _sling_ready := false
+var _shoulder_strap_parts: Array[MeshInstance3D] = []
 # The raise itself already consumes about 0.24 s. After the sights cross the
 # shoulder threshold, one short 60 ms seating window is enough before the
 # weapon-space lock may engage; surface/contact checks still prevent an early
@@ -101,7 +109,7 @@ func update_camera_pose(delta: float, camera: Camera3D, amount: float) -> void:
 		# while the four quick-access pockets stay clear of the carrying forearm.
 		# The long-gun sling now hangs well below the canvas. Lift the complete
 		# inspection composition enough to keep the low rifle selectable on screen.
-		var inspect := Vector3(0.050, 0.135, -0.570)
+		var inspect := Vector3(0.050, 0.135, -0.535)
 		var a := shoulder.lerp(round_ribs, ease)
 		var b := round_ribs.lerp(inspect, ease)
 		var pos := a.lerp(b, ease)
@@ -115,10 +123,89 @@ func update_camera_pose(delta: float, camera: Camera3D, amount: float) -> void:
 			deg_to_rad(lerpf(18.0, -5.0, ease) + weight_arc * 8.0),
 			deg_to_rad(lerpf(-108.0, 0.0, ease)),
 			deg_to_rad(weight_arc * -13.0 + sin(_clock * 1.15) * 0.8 * settled))
-		global_transform = camera.global_transform * Transform3D(Basis.from_euler(rot), pos)
+		var anchor_xf := camera.global_transform * Transform3D(Basis.from_euler(rot), pos)
+		_update_sling_physics(delta, camera, anchor_xf, ease)
 		reset_physics_interpolation()
+		_update_physical_shoulder_strap(ease)
 	_update_knife_release(delta)
 	_update_active_item(delta, camera, u)
+
+
+func _update_sling_physics(delta: float, camera: Camera3D,
+		anchor_xf: Transform3D, open_amount: float) -> void:
+	## A constrained two-axis pendulum. Camera/boat acceleration supplies inertia;
+	## gravity/stiffness returns the load and damping represents leather rubbing on
+	## clothing. Opening the inventory progressively braces the bag in both hands.
+	if delta <= 0.0 or delta > 0.10 or not _sling_ready:
+		_sling_last_anchor = anchor_xf.origin
+		_sling_last_velocity = Vector3.ZERO
+		_sling_velocity = Vector2.ZERO
+		_sling_angle = Vector2.ZERO
+		_sling_ready = true
+		global_transform = anchor_xf
+		return
+	var anchor_velocity := (anchor_xf.origin - _sling_last_anchor) / delta
+	var acceleration := (anchor_velocity - _sling_last_velocity) / delta
+	_sling_last_anchor = anchor_xf.origin
+	_sling_last_velocity = anchor_velocity
+	var local_accel := camera.global_basis.inverse() * acceleration
+	var forcing := Vector2(-local_accel.z, local_accel.x) * 0.010
+	forcing.x = clampf(forcing.x, -3.2, 3.2)
+	forcing.y = clampf(forcing.y, -3.2, 3.2)
+	var brace := smoothstep(0.58, 1.0, open_amount)
+	var stiffness := lerpf(18.0, 48.0, brace)
+	var damping := lerpf(5.8, 12.0, brace)
+	_sling_velocity += (forcing - _sling_angle * stiffness
+			- _sling_velocity * damping) * delta
+	_sling_angle += _sling_velocity * delta
+	_sling_angle.x = clampf(_sling_angle.x, -0.24, 0.24)
+	_sling_angle.y = clampf(_sling_angle.y, -0.31, 0.31)
+	# Once the bag is presented for selection both hands brace it: retain the
+	# physical swing during the shoulder arc, but remove the final residual angle
+	# so grip targets cannot slide away under planted fingers.
+	var applied_angle := _sling_angle * (1.0 - brace)
+	var swing_basis := Basis.from_euler(Vector3(applied_angle.x,
+			0.0, applied_angle.y))
+	var travel := Vector3(_sling_angle.y * 0.085,
+			-(absf(_sling_angle.x) + absf(_sling_angle.y)) * 0.018,
+			_sling_angle.x * 0.070) * (1.0 - brace)
+	global_transform = anchor_xf * Transform3D(swing_basis, travel)
+
+
+func _update_physical_shoulder_strap(open_amount: float) -> void:
+	const STRAP_SEGMENTS := 48
+	if _shoulder_strap_parts.size() != STRAP_SEGMENTS:
+		return
+	# Both ends remain riveted to the brass rings. The slack middle lags opposite
+	# the bag's angular motion; when braced open it settles back into a broad U.
+	var lag := Vector3(-_sling_angle.y * 0.16, -absf(_sling_angle.x) * 0.05,
+			-_sling_angle.x * 0.11) * (1.0 - smoothstep(0.65, 1.0, open_amount))
+	var points := PackedVector3Array()
+	for i in STRAP_SEGMENTS + 1:
+		var t := float(i) / float(STRAP_SEGMENTS)
+		var x := lerpf(-0.218, 0.218, t)
+		var sag := 4.0 * t * (1.0 - t)
+		var asym := sin(t * PI) * (1.0 - absf(t * 2.0 - 1.0) * 0.25)
+		# The fixed ends disappear behind the reinforced lower seam. The first
+		# quarter therefore leaves the canvas almost vertically before the loose
+		# hide rounds into its hanging U.
+		points.append(Vector3(x, -0.155 - 0.34 * sag,
+				0.038 + lag.z * asym) + Vector3(lag.x, lag.y, 0.0) * asym)
+	for i in STRAP_SEGMENTS:
+		_set_flat_strap_piece(_shoulder_strap_parts[i], points[i], points[i + 1])
+
+
+func _set_flat_strap_piece(piece: MeshInstance3D, from: Vector3, to: Vector3) -> void:
+	var delta := to - from
+	var xy := Vector2(delta.x, delta.y)
+	piece.position = from.lerp(to, 0.5)
+	piece.rotation = Vector3(0.0, -atan2(delta.z, maxf(xy.length(), 0.0001)),
+			atan2(delta.y, delta.x))
+	var mesh := piece.mesh as BoxMesh
+	if mesh != null:
+		# A slight overlap hides the square gaps between articulated pieces while
+		# retaining the live pendulum curve.
+		mesh.size.x = delta.length() * 1.12
 
 
 func slot_count() -> int:
@@ -543,10 +630,6 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 		var support_grip := rifle.call("support_grip_node") as Node3D
 		var primary_target := weapon_frame * primary_grip.transform
 		var support_local := support_grip.transform
-		if reloading:
-			# Reload keeps the earlier work-hand landmark; the +X correction belongs
-			# specifically to the shouldered support hold.
-			support_local.origin.x -= 0.014
 		var support_target := weapon_frame * support_local
 		_rifle_support_target.set_meta("held_grip_transform", support_local)
 		var placing_in_sling := _preview_slot == RIFLE_SLOT and bag_amount > 0.62
@@ -1012,43 +1095,50 @@ func _build() -> void:
 				0.010, aged_leather if index % 3 != 1 else leather_edge,
 				"AgedCarryStrap%02d" % index)
 
-	# Real open brass rings for the long shoulder strap. Short leather ears join
-	# each ring directly to the canvas seam; no floating attachment points.
-	for x in [-0.225, 0.225]:
-		_box(Vector3(0.035, 0.075, 0.014), Vector3(x, 0.176, 0.060),
-				Vector3(0.0, 0.0, -7.0 * signf(x)), leather,
+	# The shoulder strap is sewn around the lower canvas roll, not pinned to an
+	# arbitrary point on the face. Reinforced ears visibly travel behind the bag,
+	# curl under its bottom edge and finish in load-bearing brass rings.
+	for x in [-0.218, 0.218]:
+		_flat_strap_piece(Vector3(x, -0.105, 0.072),
+				Vector3(x, -0.190, 0.050), 0.040, 0.012, leather_edge,
+				"ShoulderUnderwrap")
+		_box(Vector3(0.048, 0.080, 0.016), Vector3(x, -0.157, 0.050),
+				Vector3(8.0, 0.0, -4.0 * signf(x)), leather,
 				"ShoulderStrapEar")
-		_cylinder(0.006, 0.008, Vector3(x, 0.151, 0.071),
-				Vector3(90.0, 0.0, 0.0), brass, "ShoulderEarRivet", 10)
-		_ring(0.014, 0.021, Vector3(x, 0.207, 0.062),
+		for rivet_y in [-0.130, -0.166]:
+			_cylinder(0.006, 0.009, Vector3(x, rivet_y, 0.061),
+					Vector3(90.0, 0.0, 0.0), brass, "ShoulderEarRivet", 10)
+		_ring(0.014, 0.022, Vector3(x, -0.184, 0.047),
 				Vector3(90.0, 0.0, 0.0), brass, "ShoulderStrapRing")
 	# The long shoulder strap is still attached while the bag is swung into the
 	# lap. It falls in a broad U behind the rifle rather than hovering beside the
 	# wrist. Alternating worn panels break the procedural-perfect silhouette.
 	var shoulder_curve := PackedVector3Array()
+	_shoulder_strap_parts.clear()
 	var left_curve := [
-		Vector3(-0.225, 0.207, 0.052),
-		Vector3(-0.355, 0.060, 0.048),
-		Vector3(-0.315, -0.405, 0.055),
-		Vector3(0.000, -0.432, 0.060),
+		Vector3(-0.218, -0.155, 0.038),
+		Vector3(-0.300, -0.255, 0.040),
+		Vector3(-0.270, -0.485, 0.052),
+		Vector3(0.000, -0.495, 0.058),
 	]
 	var right_curve := [
-		Vector3(0.000, -0.432, 0.060),
-		Vector3(0.315, -0.405, 0.055),
-		Vector3(0.355, 0.060, 0.048),
-		Vector3(0.225, 0.207, 0.052),
+		Vector3(0.000, -0.495, 0.058),
+		Vector3(0.270, -0.485, 0.052),
+		Vector3(0.300, -0.255, 0.040),
+		Vector3(0.218, -0.155, 0.038),
 	]
-	for sample in 17:
+	for sample in 25:
 		shoulder_curve.append(_cubic_strap_point(left_curve[0], left_curve[1],
-				left_curve[2], left_curve[3], float(sample) / 16.0))
-	for sample in range(1, 17):
+				left_curve[2], left_curve[3], float(sample) / 24.0))
+	for sample in range(1, 25):
 		shoulder_curve.append(_cubic_strap_point(right_curve[0], right_curve[1],
-				right_curve[2], right_curve[3], float(sample) / 16.0))
+				right_curve[2], right_curve[3], float(sample) / 24.0))
 	for index in shoulder_curve.size() - 1:
-		_flat_strap_piece(shoulder_curve[index], shoulder_curve[index + 1],
-				0.032, 0.009,
-				aged_leather if floori(float(index) / 7.0) % 3 != 1 else leather,
+		var strap_piece := _flat_strap_piece(shoulder_curve[index], shoulder_curve[index + 1],
+				0.034, 0.007,
+				aged_leather if floori(float(index) / 10.0) % 3 != 1 else leather,
 				"AgedShoulderStrap%02d" % index)
+		_shoulder_strap_parts.append(strap_piece)
 
 	# Exterior quick-access fittings: each tool has its own root and physical
 	# slot. These are the exact meshes the right hand removes; no inventory icon
@@ -1119,6 +1209,21 @@ func _build() -> void:
 	# under the wood/receiver, and a front leather face touching the weapon. The
 	# aft loop sits farther onto the stock instead of ending in empty air beside it.
 	for x in [-0.355, 0.285]:
+		var muzzle_loop: bool = float(x) > 0.0
+		# The starboard restraint carries only the slim barrel. It must not reuse
+		# the stock-sized U on the left: leave just enough leather clearance for
+		# the bore tube and its wrapping.
+		var band_w := 0.036 if muzzle_loop else 0.055
+		var leg_h := 0.045 if muzzle_loop else 0.125
+		# Barrel centre sits above the rifle wrapper origin. Raise the compact U as
+		# a whole so its short legs actually flank the muzzle instead of hanging
+		# below it in empty space.
+		var leg_y := -0.274 if muzzle_loop else -0.320
+		var rear_z := 0.123 if muzzle_loop else 0.112
+		var front_z := 0.168 if muzzle_loop else 0.180
+		var under_y := -0.303 if muzzle_loop else -0.382
+		var under_d := 0.048 if muzzle_loop else 0.074
+		var top_y := leg_y + leg_h * 0.5
 		# The cradle is wider than the canvas body. A diagonal load strap joins
 		# each loop to a reinforced lower corner instead of leaving it floating.
 		var bag_x := 0.205 * signf(x)
@@ -1127,18 +1232,22 @@ func _build() -> void:
 		_cylinder(0.008, 0.012, Vector3(bag_x, -0.174, 0.124),
 				Vector3(90.0, 0.0, 0.0), brass, "RifleSlingAnchorRivet", 10)
 		_flat_strap_piece(Vector3(bag_x, -0.185, 0.120),
-				Vector3(x, -0.265, 0.116), 0.046, 0.018, leather,
+				Vector3(x, top_y, rear_z + 0.004),
+				0.034 if muzzle_loop else 0.046, 0.018, leather,
 				"RifleSlingConnection")
 		# Hidden/rear leg against the bag.
-		_box(Vector3(0.055, 0.125, 0.018), Vector3(x, -0.320, 0.112),
+		_box(Vector3(band_w, leg_h, 0.018), Vector3(x, leg_y, rear_z),
 				Vector3.ZERO, leather_edge, "RifleSlingRear")
 		# Lower return closes the U beneath the rifle rather than leaving two tabs.
-		_box(Vector3(0.055, 0.018, 0.074), Vector3(x, -0.382, 0.145),
+		_box(Vector3(band_w, 0.018, under_d), Vector3(x, under_y,
+				(rear_z + front_z) * 0.5),
 				Vector3.ZERO, leather_edge, "RifleSlingUnder")
 		# Camera-facing band crosses the actual stock/receiver surface.
-		_box(Vector3(0.055, 0.125, 0.020), Vector3(x, -0.320, 0.180),
+		_box(Vector3(band_w, leg_h, 0.020), Vector3(x, leg_y, front_z),
 				Vector3.ZERO, leather, "RifleSlingFront")
-		_cylinder(0.009, 0.060, Vector3(x, -0.258, 0.178),
+		_cylinder(0.009 if not muzzle_loop else 0.007,
+				0.060 if not muzzle_loop else 0.040,
+				Vector3(x, top_y, front_z - 0.002),
 				Vector3(0.0, 0.0, 90.0), brass, "RifleSlingRivet", 10)
 
 	# Worn salt bloom and hand repair.  Subtle raised patches catch the cabin

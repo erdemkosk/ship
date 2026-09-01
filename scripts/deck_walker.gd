@@ -426,30 +426,29 @@ func _hull_keel(z: float) -> float:
 
 
 func _hull_escape(p: Vector3) -> Vector3:
-	## Ladder pocket is the way back aboard — do not shove off the rungs.
-	if absf(p.x - 0.72) < 0.58 and p.z > 5.28 and p.y < 0.85:
+	## The ladder pocket begins behind the physical transom. Do not punch a
+	## swimmer-sized tunnel through the hull merely to make the rungs reachable.
+	if absf(p.x - 0.72) < 0.58 and p.z > 5.62 and p.y < 0.85:
 		return p
 	if p.z < -4.92 or p.z > 5.62:
 		return p
 	var hb := _hull_half_beam(p.z)
 	if absf(p.x) > hb + 0.04:
 		return p
-	var y0 := _hull_keel(p.z)
 	var y1 := 3.40 if (p.z > -0.60 and p.z < 4.75) else 1.18
-	if p.y <= y0 or p.y >= y1:
+	if p.y >= y1:
 		return p
+	# Below the keel is still blocked for the swimming controller. Otherwise a
+	# downward-looking camera can cross beneath the centreline and then surface
+	# inside the boat. Treat the underwater hull footprint as one solid obstacle
+	# and resolve toward a side, bow or transom instead of resolving downward.
 	var sx := 1.0 if p.x >= 0.0 else -1.0
 	var d_side := hb + 0.10 - absf(p.x)
-	var d_down := p.y - y0
 	var d_fore := p.z + 4.92
 	var d_aft := 5.62 - p.z
 	var out := p
-	out.y = y0 - 0.05
-	var best := d_down
-	if d_side < best:
-		best = d_side
-		out = p
-		out.x = sx * (hb + 0.12)
+	out.x = sx * (hb + 0.12)
+	var best := d_side
 	if d_fore < best:
 		best = d_fore
 		out = p

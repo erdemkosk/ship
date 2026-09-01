@@ -219,8 +219,7 @@ func _start_catalog_interaction(id: String, spec: Dictionary) -> bool:
 				target.set(property, true)
 			return true
 		"ladder":
-			_walker.grab_sea_ladder(target)
-			return true
+			return bool(_walker.grab_sea_ladder(target))
 		"wear":
 			target.toggle_switch("divegear")
 			if _arms != null and _arms.has_method("face_gesture"):

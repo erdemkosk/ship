@@ -513,10 +513,14 @@ func natural_axes(side: String, contact: Vector3) -> Dictionary:
 	return {"fingers": F, "palm": P}
 
 
-func point_frame(side: String, tip_target: Vector3) -> Dictionary:
+func point_frame(side: String, tip_target: Vector3,
+		preferred_palm: Vector3 = Vector3.ZERO) -> Dictionary:
 	## Solve the PALM that places the real extended index tip on `tip_target`.
 	## Index knuckles sit toward the thumb side of the palm, so subtracting only
 	## an average length along F cannot point accurately across all bag slots.
+	## `preferred_palm` fixes the forearm roll without changing the pointing
+	## direction. This keeps the index silhouette readable when targets span the
+	## full width of the open bag instead of letting the wrist turn palm-away.
 	var contact := tip_target
 	var axes := natural_axes(side, contact)
 	var offset: Vector3 = _index_tip_from_palm_sem.get(side,
@@ -526,12 +530,20 @@ func point_frame(side: String, tip_target: Vector3) -> Dictionary:
 	for _iteration in 2:
 		var fingers := (axes["fingers"] as Vector3).normalized()
 		var palm := axes["palm"] as Vector3
+		if preferred_palm.length_squared() > 0.25:
+			var readable_palm := preferred_palm - preferred_palm.project(fingers)
+			if readable_palm.length_squared() > 0.0001:
+				palm = readable_palm.normalized()
 		palm = (palm - palm.project(fingers)).normalized()
 		var semantic := Basis(palm.cross(fingers).normalized(), palm, fingers)
 		contact = tip_target - semantic * offset
 		axes = natural_axes(side, contact)
 	var fingers := (axes["fingers"] as Vector3).normalized()
 	var palm := axes["palm"] as Vector3
+	if preferred_palm.length_squared() > 0.25:
+		var readable_palm := preferred_palm - preferred_palm.project(fingers)
+		if readable_palm.length_squared() > 0.0001:
+			palm = readable_palm.normalized()
 	palm = (palm - palm.project(fingers)).normalized()
 	var semantic := Basis(palm.cross(fingers).normalized(), palm, fingers)
 	contact = tip_target - semantic * offset
