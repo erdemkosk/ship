@@ -1260,6 +1260,8 @@ func _build() -> void:
 		# Local +Z is the bag's camera-facing normal in inspection pose. Four
 		# centimetres leaves the extended fingertip visibly clear of the prop.
 		pointer_anchor.position += Vector3(0.0, 0.0, 0.040)
+		if index == RIFLE_SLOT:
+			pointer_anchor.set_meta("centre_point_roll", true)
 		add_child(pointer_anchor)
 		_pointer_anchors.append(pointer_anchor)
 		var item: Node3D

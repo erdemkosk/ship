@@ -19,6 +19,9 @@ const PALM_SKIN_CLEARANCE := 0.002
 const ATTACK_DURATION := 0.62
 const HIT_WINDOW_START := 0.28
 const HIT_WINDOW_END := 0.56
+const WINDUP_END := 0.27
+const STRIKE_END := 0.47
+const FOLLOW_END := 0.60
 
 var _model: Node3D
 var _grip: Node3D
@@ -29,6 +32,9 @@ var _attack_elapsed := -1.0
 var _previous_tip := Vector3.ZERO
 var _previous_tip_valid := false
 var _hit_latched := false
+var _attack_serial := 0
+var _attack_variant := 0
+var _hit_reaction := 0.0
 
 
 func _init() -> void:
@@ -130,19 +136,26 @@ func model_mesh_count() -> int:
 func begin_attack() -> bool:
 	if _attack_elapsed >= 0.0:
 		return false
+	# Rotate through small, authored variations. Choosing once here keeps the
+	# gesture human without introducing frame-to-frame random jitter.
+	_attack_variant = _attack_serial % 3
+	_attack_serial += 1
 	_attack_elapsed = 0.0
 	_hit_latched = false
+	_hit_reaction = 0.0
 	_previous_tip_valid = false
 	return true
 
 
 func cancel_attack() -> void:
 	_attack_elapsed = -1.0
+	_hit_reaction = 0.0
 	_previous_tip_valid = false
 	_hit_latched = false
 
 
 func tick_attack(delta: float) -> void:
+	_hit_reaction = move_toward(_hit_reaction, 0.0, delta / 0.10)
 	if _attack_elapsed < 0.0:
 		return
 	_attack_elapsed += delta
@@ -161,24 +174,50 @@ func attack_phase() -> float:
 
 
 func hand_position_camera_local() -> Vector3:
-	## High-right preparation, a fast diagonal cut through centre, then a slower
-	## return. The wrist is never animated independently; the arm solver follows
-	## this palm contact and the knife stays welded to the solved palm.
+	## High-right preparation, a fast curved cut, a brief follow-through, then a
+	## weighted return. The arm solver follows this palm contact and the knife
+	## stays welded to the solved palm.
 	var idle := Vector3(0.235, -0.235, -0.455)
 	var phase := attack_phase()
 	if phase < 0.0:
 		return idle
-	var windup := Vector3(0.375, -0.055, -0.355)
-	var follow := Vector3(-0.155, -0.385, -0.610)
-	if phase < HIT_WINDOW_START:
-		var u := smoothstep(0.0, 1.0, phase / HIT_WINDOW_START)
-		return idle.lerp(windup, u)
-	if phase < HIT_WINDOW_END:
-		var cut_time := inverse_lerp(HIT_WINDOW_START, HIT_WINDOW_END, phase)
-		var u := 1.0 - pow(1.0 - cut_time, 3.0)
-		return windup.lerp(follow, u)
-	var u := smoothstep(HIT_WINDOW_END, 1.0, phase)
-	return follow.lerp(idle, u)
+	var side := 0.0
+	var lift := 0.0
+	var depth := 0.0
+	match _attack_variant:
+		0:
+			side = -0.012
+			lift = 0.008
+		1:
+			lift = -0.006
+			depth = 0.012
+		2:
+			side = 0.014
+			depth = -0.010
+	var windup := Vector3(0.375 + side, -0.055 + lift, -0.355 + depth)
+	var strike := Vector3(-0.115 - side * 0.5, -0.345, -0.585)
+	var follow := Vector3(-0.170 - side, -0.405 - lift * 0.5, -0.625)
+	var pos: Vector3
+	if phase < WINDUP_END:
+		var u := _ease_in_out(phase / WINDUP_END)
+		pos = _quadratic_bezier(idle,
+				Vector3(0.285, -0.205 + lift, -0.405), windup, u)
+	elif phase < STRIKE_END:
+		var u := 1.0 - pow(1.0 - inverse_lerp(WINDUP_END, STRIKE_END, phase), 3.4)
+		pos = _quadratic_bezier(windup,
+				Vector3(0.105 + side, -0.105, -0.455), strike, u)
+	elif phase < FOLLOW_END:
+		var u := _ease_out(inverse_lerp(STRIKE_END, FOLLOW_END, phase))
+		pos = _quadratic_bezier(strike,
+				Vector3(-0.155, -0.385, -0.615), follow, u)
+	else:
+		var u := _ease_in_out(inverse_lerp(FOLLOW_END, 1.0, phase))
+		pos = _quadratic_bezier(follow,
+				Vector3(0.075, -0.345, -0.565), idle, u)
+	# Contact compresses the arm very slightly instead of letting the blade pass
+	# through a surface with no physical acknowledgement.
+	pos += Vector3(0.012, 0.006, 0.025) * _hit_reaction
+	return pos
 
 
 func camera_kick() -> Vector3:
@@ -190,13 +229,24 @@ func camera_kick() -> Vector3:
 		return Vector3.ZERO
 	var prepared := Vector3(deg_to_rad(-1.0), deg_to_rad(0.7), deg_to_rad(2.6))
 	var cut := Vector3(deg_to_rad(1.6), deg_to_rad(-1.2), deg_to_rad(-4.8))
-	if phase < HIT_WINDOW_START:
-		return prepared * smoothstep(0.0, HIT_WINDOW_START, phase)
-	if phase < HIT_WINDOW_END:
+	var motion: Vector3
+	if phase < WINDUP_END:
+		motion = prepared * _ease_in_out(phase / WINDUP_END)
+	elif phase < STRIKE_END:
 		var u := 1.0 - pow(1.0 - inverse_lerp(
-				HIT_WINDOW_START, HIT_WINDOW_END, phase), 3.0)
-		return prepared.lerp(cut, u)
-	return cut.lerp(Vector3.ZERO, smoothstep(HIT_WINDOW_END, 1.0, phase))
+				WINDUP_END, STRIKE_END, phase), 3.0)
+		motion = prepared.lerp(cut, u)
+	elif phase < FOLLOW_END:
+		motion = cut.lerp(cut * 0.72,
+				_ease_out(inverse_lerp(STRIKE_END, FOLLOW_END, phase)))
+	else:
+		motion = (cut * 0.72).lerp(Vector3.ZERO,
+				_ease_in_out(inverse_lerp(FOLLOW_END, 1.0, phase)))
+	# A short rotational impulse at contact. It is layered over the existing
+	# shoulder motion, so misses retain the clean follow-through.
+	var hit_kick := Vector3(deg_to_rad(-0.65), deg_to_rad(0.35),
+			deg_to_rad(0.9)) * _hit_reaction
+	return motion + hit_kick
 
 
 func sample_sweep() -> Dictionary:
@@ -223,11 +273,27 @@ func mark_hit(collider: Object, position: Vector3, normal: Vector3) -> void:
 	if _hit_latched:
 		return
 	_hit_latched = true
+	_hit_reaction = 1.0
 	struck.emit(collider, position, normal)
 
 
 func hit_latched() -> bool:
 	return _hit_latched
+
+
+func _quadratic_bezier(a: Vector3, control: Vector3, b: Vector3, t: float) -> Vector3:
+	var ab := a.lerp(control, t)
+	var bc := control.lerp(b, t)
+	return ab.lerp(bc, t)
+
+
+func _ease_in_out(t: float) -> float:
+	return smoothstep(0.0, 1.0, clampf(t, 0.0, 1.0))
+
+
+func _ease_out(t: float) -> float:
+	var u := clampf(t, 0.0, 1.0)
+	return 1.0 - pow(1.0 - u, 2.4)
 
 
 func _count_meshes(node: Node) -> int:

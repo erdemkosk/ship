@@ -455,6 +455,17 @@ func _build_collision() -> void:
 	house.position = Vector3(0.0, 2.35, 1.3)
 	add_child(house)
 
+	# The mast mesh is built later, but its collider must be a direct child of
+	# this physics body. Match the visible mast's height, position and 3° rake.
+	var mast := CollisionShape3D.new()
+	var mast_shape := CylinderShape3D.new()
+	mast_shape.radius = 0.11
+	mast_shape.height = 5.20
+	mast.shape = mast_shape
+	mast.position = Vector3(0.0, 3.10, -2.35)
+	mast.rotation_degrees = Vector3(0.0, 0.0, 3.0)
+	add_child(mast)
+
 
 func _glass(size: Vector3, pos: Vector3, mat: ShaderMaterial = null) -> void:
 	## A pane, not a black rectangle. Both faces drawn, so it still reads as
@@ -1441,12 +1452,11 @@ func _build_visuals() -> void:
 	add_child(mast)
 	_cyl(0.11, 0.075, 5.20, Vector3.ZERO, Vector3.ZERO, trim, mast)
 	_box(Vector3(1.70, 0.07, 0.07), Vector3(0.0, 1.45, 0.0), Vector3.ZERO, trim, mast)
-	# Masthead steaming light: white, on the stick's own axis. The old red
-	# blinker sat up here like a navaid; a powerboat shows a white light.
+	# Red masthead warning beacon, on the stick's own axis.
 	_beacon_mat = StandardMaterial3D.new()
-	_beacon_mat.albedo_color = Color(0.72, 0.70, 0.62)
+	_beacon_mat.albedo_color = Color(0.42, 0.025, 0.018)
 	_beacon_mat.emission_enabled = true
-	_beacon_mat.emission = Color(1.0, 0.96, 0.88)
+	_beacon_mat.emission = Color(1.0, 0.025, 0.012)
 	_beacon_mat.emission_energy_multiplier = 0.0
 	var truck := 2.60
 	_cyl(0.10, 0.10, 0.12, Vector3(0.0, truck + 0.06, 0.0), Vector3.ZERO, metal, mast)
@@ -1454,7 +1464,7 @@ func _build_visuals() -> void:
 	_cyl(0.11, 0.02, 0.10, Vector3(0.0, truck + 0.37, 0.0), Vector3.ZERO, metal, mast)
 	_beacon = OmniLight3D.new()
 	_beacon.position = Vector3(0.0, truck + 0.22, 0.0)
-	_beacon.light_color = Color(1.0, 0.96, 0.88)
+	_beacon.light_color = Color(1.0, 0.035, 0.018)
 	_beacon.light_energy = 0.0
 	_beacon.omni_range = 32.0
 	_beacon.omni_attenuation = 1.3
@@ -4148,7 +4158,7 @@ func _update_wetness(delta: float) -> void:
 
 func _update_lantern(delta: float) -> void:
 	## Ship's lighting. Cabin, helm, floods, and the nav lights on the BEACON
-	## switch: steaming light, sidelights, sternlight. Steady, not a blinker.
+	## switch: blinking mast beacon plus steady sidelights and sternlight.
 
 	# Wiper: a steady metronome sweep while on; parked upright when off. The
 	# glass and rain state ride along to both glass materials.
@@ -4234,7 +4244,11 @@ func _update_lantern(delta: float) -> void:
 		_helm_glow.emission_energy_multiplier = 2.2 * _flicker if helm_live else 0.0
 
 	if _beacon != null:
-		var on := (1.0 * _flicker) if beacon_live else 0.0
+		# Two crisp warning flashes followed by a longer dark interval.
+		var beacon_phase := fmod(_t, 2.40)
+		var beacon_flash := 1.0 if (beacon_phase < 0.18 or \
+				(beacon_phase >= 0.38 and beacon_phase < 0.56)) else 0.0
+		var on := (beacon_flash * _flicker) if beacon_live else 0.0
 		_beacon.light_energy = lerpf(_beacon.light_energy, on * 4.8, 1.0 - exp(-10.0 * delta))
 		if _beacon_mat != null:
 			_beacon_mat.emission_energy_multiplier = _beacon.light_energy * 1.8

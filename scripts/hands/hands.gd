@@ -876,8 +876,16 @@ func _drive_bag_hand(_delta: float) -> void:
 		# finger length and the index knuckle's thumb-side position in the palm.
 		# Keep the back/side of the hand readable to the player across every slot;
 		# deriving roll from each target made slot 1 hide the pointing finger.
-		var readable_palm := (-_cam.global_basis.z \
-				+ _cam.global_basis.x * 0.16).normalized()
+		var readable_palm: Vector3
+		if bool(_bag_hand_target.get_meta("centre_point_roll", false)):
+			# Point at the low, centred rifle with the palm facing down. A slight
+			# camera-facing component keeps the index silhouette readable without
+			# rolling the wrist sideways as the bag settles.
+			readable_palm = (-_cam.global_basis.y \
+					- _cam.global_basis.z * 0.12).normalized()
+		else:
+			readable_palm = (-_cam.global_basis.z \
+					+ _cam.global_basis.x * 0.16).normalized()
 		var point_frame: Dictionary = rig.point_frame(
 				"R", object_point, readable_palm)
 		contact = point_frame["contact"] as Vector3
