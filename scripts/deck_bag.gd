@@ -58,6 +58,14 @@ var _sling_last_anchor := Vector3.ZERO
 var _sling_last_velocity := Vector3.ZERO
 var _sling_ready := false
 var _shoulder_strap_parts: Array[MeshInstance3D] = []
+## Cosmetic soft-body layer. Inventory anchors remain rigid and exact for the
+## hands; only the waxed canvas skin and loose hardware yield under its load.
+var _soft_canvas_parts: Array[MeshInstance3D] = []
+var _soft_canvas_rest: Dictionary = {}
+var _load_ring_parts: Array[MeshInstance3D] = []
+var _load_ring_rest: Dictionary = {}
+var _body_yield := Vector2.ZERO # x = lateral lean, y = downward compression
+var _body_yield_velocity := Vector2.ZERO
 # The raise itself already consumes about 0.24 s. After the sights cross the
 # shoulder threshold, one short 60 ms seating window is enough before the
 # weapon-space lock may engage; surface/contact checks still prevent an early
@@ -127,6 +135,7 @@ func update_camera_pose(delta: float, camera: Camera3D, amount: float) -> void:
 		_update_sling_physics(delta, camera, anchor_xf, ease)
 		reset_physics_interpolation()
 		_update_physical_shoulder_strap(ease)
+		_update_loaded_canvas(delta, ease)
 	_update_knife_release(delta)
 	_update_active_item(delta, camera, u)
 
@@ -206,6 +215,69 @@ func _set_flat_strap_piece(piece: MeshInstance3D, from: Vector3, to: Vector3) ->
 		# A slight overlap hides the square gaps between articulated pieces while
 		# retaining the live pendulum curve.
 		mesh.size.x = delta.length() * 1.12
+
+
+func _register_soft_canvas(part: MeshInstance3D) -> MeshInstance3D:
+	_soft_canvas_parts.append(part)
+	_soft_canvas_rest[part] = part.transform
+	return part
+
+
+func _register_load_ring(part: MeshInstance3D) -> MeshInstance3D:
+	_load_ring_parts.append(part)
+	_load_ring_rest[part] = part.transform
+	return part
+
+
+func _update_loaded_canvas(delta: float, open_amount: float) -> void:
+	## Waxed canvas yields by millimetres, never breathes like rubber. Stored
+	## objects determine both the downward load and its left/right distribution.
+	if delta <= 0.0 or delta > 0.10:
+		return
+	var total_load := 0.0
+	var moment := 0.0
+	var small_weights := [0.32, 0.24, 0.18, 0.36]
+	for index in RIFLE_SLOT:
+		if slot_occupied(index):
+			var weight: float = small_weights[index]
+			total_load += weight
+			moment += SLOT_POSITIONS[index].x * weight
+	if slot_occupied(RIFLE_SLOT):
+		total_load += 1.45
+		# Its steel action sits a little to port even though the rifle is centred.
+		moment -= 0.014
+	var target := Vector2(clampf(moment * 0.055, -0.006, 0.006),
+			clampf(total_load * 0.0048, 0.0, 0.012))
+	var brace := smoothstep(0.65, 1.0, open_amount)
+	var stiffness := lerpf(34.0, 55.0, brace)
+	var damping := lerpf(7.5, 11.5, brace)
+	_body_yield_velocity += (target - _body_yield) * stiffness * delta
+	_body_yield_velocity *= exp(-damping * delta)
+	_body_yield += _body_yield_velocity * delta
+
+	for part in _soft_canvas_parts:
+		if part == null or not is_instance_valid(part):
+			continue
+		var rest: Transform3D = _soft_canvas_rest[part]
+		var low_factor := clampf((0.20 - rest.origin.y) / 0.40, 0.10, 1.0)
+		part.transform = rest
+		part.position = rest.origin + Vector3(_body_yield.x * low_factor,
+				-_body_yield.y * low_factor, 0.0)
+		var compression := _body_yield.y * 0.75 * low_factor
+		part.scale = Vector3(1.0 + compression * 0.55,
+				1.0 - compression, 1.0 + compression * 0.30)
+
+	for ring in _load_ring_parts:
+		if ring == null or not is_instance_valid(ring):
+			continue
+		var rest: Transform3D = _load_ring_rest[ring]
+		ring.transform = rest
+		var side := signf(rest.origin.x)
+		ring.position = rest.origin + Vector3(_body_yield.x * 0.45,
+				-_body_yield.y * 0.55, 0.0)
+		# Metal follows the leather ear with restrained inertial lag.
+		ring.rotation.z += side * (_sling_angle.y * 0.18
+				+ _body_yield_velocity.y * 0.035)
 
 
 func slot_count() -> int:
@@ -1045,16 +1117,20 @@ func _build() -> void:
 
 	# Canvas volume.  Edge rolls soften the primitive silhouette and make the
 	# bag read as stuffed cloth rather than a metal case.
-	_box(Vector3(0.48, 0.34, 0.135), Vector3(0.0, -0.025, 0.0),
-			Vector3.ZERO, canvas, "CanvasBody")
-	_cylinder(0.040, 0.29, Vector3(-0.235, -0.025, 0.0), Vector3.ZERO,
-			canvas_dark, "LeftCanvasRoll")
-	_cylinder(0.040, 0.29, Vector3(0.235, -0.025, 0.0), Vector3.ZERO,
-			canvas_dark, "RightCanvasRoll")
-	_cylinder(0.038, 0.45, Vector3(0.0, -0.195, 0.0), Vector3(0.0, 0.0, 90.0),
-			canvas_dark, "BottomCanvasRoll")
-	_cylinder(0.033, 0.48, Vector3(0.0, 0.185, 0.005), Vector3(0.0, 0.0, 90.0),
-			canvas, "RolledMouth")
+	_register_soft_canvas(_box(Vector3(0.48, 0.34, 0.135),
+			Vector3(0.0, -0.025, 0.0), Vector3.ZERO, canvas, "CanvasBody"))
+	_register_soft_canvas(_cylinder(0.040, 0.29,
+			Vector3(-0.235, -0.025, 0.0), Vector3.ZERO,
+			canvas_dark, "LeftCanvasRoll"))
+	_register_soft_canvas(_cylinder(0.040, 0.29,
+			Vector3(0.235, -0.025, 0.0), Vector3.ZERO,
+			canvas_dark, "RightCanvasRoll"))
+	_register_soft_canvas(_cylinder(0.038, 0.45,
+			Vector3(0.0, -0.195, 0.0), Vector3(0.0, 0.0, 90.0),
+			canvas_dark, "BottomCanvasRoll"))
+	_register_soft_canvas(_cylinder(0.033, 0.48,
+			Vector3(0.0, 0.185, 0.005), Vector3(0.0, 0.0, 90.0),
+			canvas, "RolledMouth"))
 
 	# A broad flap and two old closure straps.  The flap stands a little proud
 	# of the body so its shadow survives the dim cabin lighting.
@@ -1132,8 +1208,9 @@ func _build() -> void:
 		for rivet_y in [-0.130, -0.166]:
 			_cylinder(0.006, 0.009, Vector3(x, rivet_y, 0.061),
 					Vector3(90.0, 0.0, 0.0), brass, "ShoulderEarRivet", 10)
-		_ring(0.014, 0.022, Vector3(x, -0.184, 0.047),
-				Vector3(90.0, 0.0, 0.0), brass, "ShoulderStrapRing")
+		_register_load_ring(_ring(0.014, 0.022,
+				Vector3(x, -0.184, 0.047),
+				Vector3(90.0, 0.0, 0.0), brass, "ShoulderStrapRing"))
 	# The long shoulder strap is still attached while the bag is swung into the
 	# lap. It falls in a broad U behind the rifle rather than hovering beside the
 	# wrist. Alternating worn panels break the procedural-perfect silhouette.

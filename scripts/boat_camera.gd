@@ -1092,7 +1092,8 @@ func _process_fps(delta: float) -> void:
 					float(weather.get("time_of_day")) if weather != null else 12.0,
 					float(_walker.get("swim_depth")))
 		if _arms.has_method("set_sea_ladder"):
-			_arms.set_sea_ladder(_flag(_walker, "on_sea_ladder"), _walker.pos.y)
+			_arms.set_sea_ladder(_flag(_walker, "on_sea_ladder"), _walker.pos.y,
+					float(_walker.get("sea_ladder_mantle")))
 		_arms.update(delta, target, engaged, walking, _flag(_walker, "swimming"))
 	_resolve_active_knife_sweep()
 	_update_warmth(delta)

@@ -655,7 +655,8 @@ const BLOCKERS: Array[AABB] = [
 const SEA_LADDER_X := 0.72
 const SEA_LADDER_Z := 5.86
 const SEA_LADDER_TOP := 0.66
-const SEA_LADDER_BOT := -1.30
+const SEA_LADDER_BOT := -0.58
+const SEA_LADDER_RUNGS := 5
 const LADDER := AABB(Vector3(0.0, -999.0, 0.0), Vector3(0.0, 0.0, 0.0))
 const LADDER_BAND := Vector2(0.0, 0.0)
 ## Where you stand to take the wheel, and where the wheel itself is.
@@ -4709,7 +4710,9 @@ func _build_deck_gear(trim: Material, metal: Material) -> void:
 	add_child(lad)
 	var lad_iron := _mat(Color(0.150, 0.115, 0.088), 0.90, 0.30)
 	for lsx in [-0.16, 0.16]:
-		_box(Vector3(0.045, 2.52, 0.045), Vector3(lsx, -0.11, 0.0),
+		# Stop at the hull's lower edge. The old 72 cm tail hung beneath the keel
+		# after the useful ladder had already ended and looked like a broken copy.
+		_box(Vector3(0.045, 1.78, 0.045), Vector3(lsx, 0.26, 0.0),
 				Vector3.ZERO, lad_iron, lad)
 		# Continue each stile over the transom to the deck grab. Previously the
 		# long ladder ended outboard while a second U was drawn on the cap, so an
@@ -4719,10 +4722,16 @@ func _build_deck_gear(trim: Material, metal: Material) -> void:
 				Vector3.ZERO, lad_iron, lad)
 		_cyl(0.031, 0.031, 0.055, Vector3(lsx, 1.145, -0.018),
 				Vector3.ZERO, lad_iron, lad)
-	var lad_n := 7
+	var lad_n := SEA_LADDER_RUNGS
 	for li in lad_n:
 		var ly: float = SEA_LADDER_TOP - 0.10 - float(li) * 0.27
 		_cyl(0.020, 0.020, 0.36, Vector3(0.0, ly, 0.0),
+				Vector3(0.0, 0.0, 90.0), lad_iron, lad)
+	# Continue the same rung rhythm through the formerly empty upper reach. The
+	# stiles already ran to the transom shoulder, but without these two steps they
+	# read as long unrelated bars when viewed from the water below.
+	for upper_y in [SEA_LADDER_TOP + 0.17, SEA_LADDER_TOP + 0.44]:
+		_cyl(0.020, 0.020, 0.36, Vector3(0.0, upper_y, 0.0),
 				Vector3(0.0, 0.0, 90.0), lad_iron, lad)
 	# The upper U is the deck end of those same continuous stiles. Matching tube
 	# thickness and collars make the assembly read as one welded ladder.

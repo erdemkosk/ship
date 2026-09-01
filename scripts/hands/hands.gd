@@ -381,8 +381,8 @@ func wipe_front() -> Vector2:
 	return _face_driver.wipe_front()
 
 
-func set_sea_ladder(on: bool, feet_y: float) -> void:
-	_ladder_driver.set_state(on, feet_y)
+func set_sea_ladder(on: bool, feet_y: float, mantle := 0.0) -> void:
+	_ladder_driver.set_state(on, feet_y, mantle)
 
 
 func _enter_full_body_override() -> void:

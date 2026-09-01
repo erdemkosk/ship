@@ -53,6 +53,7 @@ var vel := Vector3.ZERO
 var on_floor := false
 var on_ladder := false
 var on_sea_ladder := false
+var sea_ladder_mantle := 0.0
 var swimming := false
 ## The eye is under the surface, and how deep. Read by the camera (it stops
 ## clamping the view above the waves) and by the hands.
@@ -70,6 +71,7 @@ func spawn_at(p: Vector3) -> void:
 	on_floor = true
 	swimming = false
 	on_sea_ladder = false
+	sea_ladder_mantle = 0.0
 	submerged = false
 	swim_depth = 0.0
 	can_board = false
@@ -376,8 +378,9 @@ func _swim(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
 	# and take hold of it. Hauling yourself straight over a 1.5 m bulwark from
 	# the sea was a teleport wearing a prompt.
 	var lad: Vector3 = _sea_stand(boat, clampf(pos.y, float(boat.SEA_LADDER_BOT), 0.0))
+	# Feet remain well below the hand that reaches the new lowest rung.
 	can_board = Vector2(pos.x - lad.x, pos.z - lad.z).length() < 1.5 \
-			and pos.y > float(boat.SEA_LADDER_BOT) - 0.6
+			and pos.y > float(boat.SEA_LADDER_BOT) - 1.25
 	if can_board and want_jump:
 		grab_sea_ladder(boat)
 
@@ -484,6 +487,7 @@ func grab_sea_ladder(boat: Node3D) -> bool:
 	# low in it and the top of the ladder is a metre over their head.
 	var y: float = clampf(pos.y, bot, -0.05 if swimming else top)
 	on_sea_ladder = true
+	sea_ladder_mantle = 0.0
 	swimming = false
 	can_board = false
 	_grab = false
@@ -505,25 +509,29 @@ func _climb_sea_ladder(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
 		axes: Vector2, want_jump: bool) -> void:
 	var top: float = float(boat.SEA_LADDER_TOP)
 	var bot: float = float(boat.SEA_LADDER_BOT)
+	if sea_ladder_mantle > 0.0:
+		_advance_sea_ladder_mantle(delta, boat, top)
+		return
 	var y: float = pos.y + axes.y * SEA_CLIMB * delta
 	if y > top:
-		# Over the cap and aboard.
-		on_sea_ladder = false
-		pos = Vector3(float(boat.SEA_LADDER_X), 0.63, SEA_STEP_OFF)
-		vel = Vector3.ZERO
-		on_floor = true
-		submerged = false
-		swim_depth = 0.0
+		# Do not teleport across the transom. Plant the hands, lift the body over
+		# the cap, then set the feet down on deck over a short authored arc.
+		sea_ladder_mantle = 0.001
+		_advance_sea_ladder_mantle(delta, boat, top)
 		return
-	if y < bot or want_jump:
-		# Off the bottom rung, or you simply let go.
+	if want_jump:
+		# Let go deliberately. Reaching the short ladder's bottom is not itself a
+		# release: a held down key used to cross the boundary by one frame and turn
+		# a planted grip into an unexplained fall whenever the boat was moving.
 		on_sea_ladder = false
 		swimming = true
 		_swim_pos = xf * pos
-		_swim_vel = Vector3(0.0, -1.2 if want_jump else -0.4, 0.0)
+		_swim_vel = Vector3(0.0, -1.2, 0.0)
 		return
+	if y < bot:
+		y = bot
 	pos = _sea_stand(boat, y)
-	vel = Vector3(0.0, axes.y * SEA_CLIMB, 0.0)
+	vel = Vector3(0.0, axes.y * SEA_CLIMB if y > bot + 0.001 else 0.0, 0.0)
 	on_floor = false
 	on_ladder = false
 	# The bottom rungs are under water and she is moving under you, so the eye
@@ -532,3 +540,24 @@ func _climb_sea_ladder(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
 		var eye_w: Vector3 = xf * (pos + Vector3(0.0, EYE, 0.0))
 		swim_depth = maxf(float(ocean.get_height(eye_w)) - eye_w.y, 0.0)
 		submerged = swim_depth > 0.0
+
+
+func _advance_sea_ladder_mantle(delta: float, boat: Node3D, top: float) -> void:
+	const MANTLE_TIME := 0.82
+	sea_ladder_mantle = minf(sea_ladder_mantle + delta / MANTLE_TIME, 1.0)
+	var u := smoothstep(0.0, 1.0, sea_ladder_mantle)
+	var start := _sea_stand(boat, top)
+	var finish := Vector3(float(boat.SEA_LADDER_X), 0.63, SEA_STEP_OFF)
+	pos = start.lerp(finish, u)
+	# Rise before travelling inboard so the chest and camera clear the cap.
+	pos.y += sin(u * PI) * 0.48
+	vel = Vector3.ZERO
+	on_floor = false
+	on_ladder = false
+	submerged = false
+	swim_depth = 0.0
+	if sea_ladder_mantle >= 1.0:
+		sea_ladder_mantle = 0.0
+		on_sea_ladder = false
+		pos = finish
+		on_floor = true
