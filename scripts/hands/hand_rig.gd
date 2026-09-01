@@ -103,9 +103,12 @@ const POSES := {
 	# Trigger hand: middle/ring/pinky carry the wrist of the stock while the
 	# index remains shallow enough to sit on the animated trigger.
 	"rifle_primary": {
-		"thumb": [0.66, 0.86, 0.56], "index": [0.34, 0.46, 0.28],
-		"middle": [1.14, 1.42, 0.94], "ring": [1.20, 1.48, 1.00],
-		"pinky": [1.24, 1.52, 1.04],
+		# Thumb and lower fingers form the load-bearing power grasp. The index
+		# bends enough to meet the trigger instead of floating through its guard,
+		# while the fingertip remains lighter than the three gripping fingers.
+		"thumb": [0.58, 0.76, 0.50], "index": [0.34, 0.46, 0.28],
+		"middle": [0.88, 1.10, 0.74], "ring": [0.94, 1.16, 0.78],
+		"pinky": [0.98, 1.20, 0.82],
 	},
 	# Support hand under the fore-end: all four fingers carry the mass and the
 	# thumb locks across the opposite side.

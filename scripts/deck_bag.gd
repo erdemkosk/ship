@@ -56,10 +56,9 @@ var _rifle_reload_blend := 0.0
 # bad freeze.
 const RIFLE_ADS_GRIP_SETTLE := 0.06
 # The imported stock continues roughly 33 cm behind the rear sight. At 39 cm
-# that left its butt almost on the 5 cm near plane and the camera visibly sliced
-# into the wood. A 50 cm rear-sight distance keeps the complete rifle in front
-# of the eye while preserving a readable iron-sight picture.
-const RIFLE_ADS_REAR_DISTANCE := -0.500
+# the camera sliced into the wood; 47.5 cm is the closest safe seating point
+# for this stock and still brings the rifle subtly nearer than before.
+const RIFLE_ADS_REAR_DISTANCE := -0.475
 
 
 func _ready() -> void:
@@ -477,10 +476,10 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 		else:
 			_rifle_ads_settle = 0.0
 		var ads_grip_locked := _rifle_ads_settle >= RIFLE_ADS_GRIP_SETTLE
-		# Let the shoulder/forearms finish the raise before capturing their rigid
-		# weapon-space hold. Pinning at the first ADS frame freezes an arm that is
-		# still short of the stock; the brief settle is part of the raise, not sway.
-		var weapon_space_pinned := ads_grip_locked and not reloading
+		# Reconstruct the trigger palm from the live weapon in carry as well as ADS.
+		# hands.gd still waits until the palm is within 5 mm before locking, so the
+		# approach remains natural but independent hand lag cannot swim through wood.
+		var weapon_space_pinned := not reloading
 		_rifle_primary_target.set_meta("ads_locked", ads_grip_locked)
 		_rifle_support_target.set_meta("ads_locked", ads_grip_locked)
 		_rifle_primary_target.set_meta("weapon_space_pinned", weapon_space_pinned)
@@ -497,11 +496,16 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 					smoothstep(0.0, 1.0, _rifle_reload_blend))
 		elif _preview_slot == RIFLE_SLOT and bag_amount > 0.62:
 			_rifle_reload_blend = 0.0
-			# Keep the rifle physically in the right hand, lifted just clear of its
-			# sling. E completes the final short seating movement into the cradle.
+			# Keep the SLOT orientation but let the camera/right shoulder own the
+			# stock-wrist contact. Positioning the rifle root from the bag made the arm
+			# chase a point across the body; solve the root backwards from a stable
+			# camera-space palm instead. E still performs the final seating into the U.
 			var raised_slot := _slot_transform(RIFLE_SLOT)
-			raised_slot.origin += Vector3(0.0, 0.055, 0.075)
-			target = global_transform * raised_slot
+			var staged := global_transform * raised_slot
+			var staged_primary := rifle.call("primary_grip_node") as Node3D
+			var grip_frame := staged * staged_primary.transform
+			grip_frame.origin = camera.global_transform * Vector3(0.165, -0.255, -0.500)
+			target = grip_frame * staged_primary.transform.affine_inverse()
 		else:
 			_rifle_reload_blend = 0.0
 			# One-hand patrol carry: butt low at the right hip, muzzle safely above
@@ -532,13 +536,37 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 		var weapon_frame := target if reloading \
 				or (_rifle_aim > 0.82 and _preview_slot < 0) \
 				else _active_item.global_transform.interpolate_with(target, weapon_k)
+		if _preview_slot < 0 and not reloading:
+			weapon_frame = _resolve_rifle_obstruction(weapon_frame, rifle, camera)
 		_active_item.global_transform = weapon_frame
 		var primary_grip := rifle.call("primary_grip_node") as Node3D
 		var support_grip := rifle.call("support_grip_node") as Node3D
 		var primary_target := weapon_frame * primary_grip.transform
-		var support_target := weapon_frame * support_grip.transform
+		var support_local := support_grip.transform
+		if reloading:
+			# Reload keeps the earlier work-hand landmark; the +X correction belongs
+			# specifically to the shouldered support hold.
+			support_local.origin.x -= 0.014
+		var support_target := weapon_frame * support_local
+		_rifle_support_target.set_meta("held_grip_transform", support_local)
+		var placing_in_sling := _preview_slot == RIFLE_SLOT and bag_amount > 0.62
+		if placing_in_sling:
+			primary_target = weapon_frame * (rifle.call(
+					"sling_placement_grip_transform") as Transform3D)
+			# While lowering the rifle into the U-shaped sling the right hand supports
+			# it from underneath: palm contact stays on the stock, but knuckles and
+			# fingers turn upward.  Flipping K/F around semantic palm Y produces that
+			# real underhand placement without changing the rifle or its normal grip.
+			primary_target.basis = Basis(-primary_target.basis.x,
+					primary_target.basis.y, -primary_target.basis.z)
 		if not reloading:
 			_configure_normal_rifle_hand(rifle, primary_grip)
+			if placing_in_sling:
+				# This placement frame is intentionally different from the authored
+				# trigger grip, so the hand must follow the staged target this tick.
+				_rifle_primary_target.set_meta("weapon_space_pinned", false)
+				_rifle_primary_target.set_meta("contact_bounds", rifle.call(
+						"sling_placement_contact_bounds") as AABB)
 		if reloading:
 			_rifle_support_target.global_transform = support_target
 			_update_rifle_reload_hand(rifle, camera, target, primary_target)
@@ -557,6 +585,78 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 	_active_item.reset_physics_interpolation()
 
 
+func _resolve_rifle_obstruction(frame: Transform3D, rifle: Node3D,
+		camera: Camera3D) -> Transform3D:
+	## Keep the weapon rigid. A thick camera-to-muzzle sweep finds the first boat
+	## solid, then translates the complete rifle (and therefore both authored hand
+	## targets) back until the muzzle's safety shell sits in front of the surface.
+	## Applying this after interpolation prevents a fast turn from tunnelling for
+	## one rendered frame.
+	var boat := get_parent()
+	if boat == null or not boat.has_method("rifle_obstruction_fraction"):
+		return frame
+	if bool(boat.get_meta("rifle_test_ignore_obstruction", false)):
+		return frame
+	var muzzle := rifle.call("muzzle_node") as Node3D
+	if muzzle == null:
+		return frame
+	var muzzle_world := frame * muzzle.position
+	var eye := camera.global_position
+	var fraction := float(boat.call("rifle_obstruction_fraction",
+			eye, muzzle_world, 0.060))
+	fraction = minf(fraction, _world_rifle_obstruction_fraction(
+			eye, muzzle_world, boat, 0.060))
+	if fraction >= 0.999:
+		return frame
+	# First yield like a person: draw the stock toward the chest and lower the
+	# muzzle. This keeps the rifle visible and the shoulder believable instead of
+	# solving every wall by pushing the butt through the camera.
+	var obstruction := clampf((1.0 - fraction) * 3.0, 0.0, 1.0)
+	var lowered_basis := Basis.from_euler(Vector3(deg_to_rad(-52.0),
+			deg_to_rad(-9.0), deg_to_rad(-8.0)))
+	var lowered := camera.global_transform * Transform3D(lowered_basis,
+			Vector3(0.235, -0.255, -0.300))
+	frame = frame.interpolate_with(lowered, obstruction)
+	muzzle_world = frame * muzzle.position
+	fraction = float(boat.call("rifle_obstruction_fraction",
+			eye, muzzle_world, 0.060))
+	fraction = minf(fraction, _world_rifle_obstruction_fraction(
+			eye, muzzle_world, boat, 0.060))
+	if fraction >= 0.999:
+		return frame
+	var eye_to_muzzle := muzzle_world - eye
+	var distance := eye_to_muzzle.length()
+	if distance < 0.001:
+		return frame
+	# Six extra centimetres stop the visible barrel skin at the wall rather than
+	# stopping only its centreline. No maximum pull: collision integrity wins
+	# even when the player presses their face directly against a bulkhead.
+	var allowed := maxf(distance * fraction - 0.060, 0.04)
+	var pull := distance - allowed
+	frame.origin -= eye_to_muzzle.normalized() * pull
+	return frame
+
+
+func _world_rifle_obstruction_fraction(from: Vector3, to: Vector3,
+		boat: Node, radius: float) -> float:
+	## Boat joinery is procedural and uses the local AABB contract above. This
+	## companion sphere cast covers every other physics object in the world, so
+	## crates, loose rigid bodies and future props gain the same guarantee without
+	## needing a weapon-specific list.
+	if get_world_3d() == null:
+		return 1.0
+	var shape := SphereShape3D.new()
+	shape.radius = radius
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = shape
+	query.transform = Transform3D(Basis.IDENTITY, from)
+	query.motion = to - from
+	if boat is CollisionObject3D:
+		query.exclude = [(boat as CollisionObject3D).get_rid()]
+	var result := get_world_3d().direct_space_state.cast_motion(query)
+	return clampf(result[0], 0.0, 1.0) if result.size() >= 1 else 1.0
+
+
 func _configure_normal_rifle_hand(rifle: Node3D, primary_grip: Node3D) -> void:
 	_rifle_primary_target.remove_meta("held_device_target")
 	_rifle_primary_target.set_meta("held_device", rifle)
@@ -565,7 +665,13 @@ func _configure_normal_rifle_hand(rifle: Node3D, primary_grip: Node3D) -> void:
 			rifle.call("primary_contact_bounds") as AABB)
 	_rifle_primary_target.set_meta("hand_pose", "rifle_primary")
 	_rifle_primary_target.set_meta("hand_attachment", false)
-	_rifle_primary_target.set_meta("natural_grip_blend", 0.0)
+	# The imported marker supplies the exact stock contact, but forcing its full
+	# wrist rotation in ADS bends the right hand over the receiver. Preserve the
+	# palm position and blend only its axes toward the live shoulder/forearm line;
+	# the blend increases while shouldering, where the old corkscrew was visible.
+	_rifle_primary_target.set_meta("natural_grip_blend",
+			lerpf(0.10, 0.28, smoothstep(0.15, 0.90, _rifle_aim)))
+	_rifle_primary_target.set_meta("natural_grip_keep_fingers", true)
 	_rifle_primary_target.set_meta("palm_clearance", 0.0)
 	_rifle_primary_target.set_meta("control_forward_reach", 0.0)
 	_rifle_primary_target.set_meta("control_index_bias", 0.0)
@@ -1008,13 +1114,31 @@ func _build() -> void:
 			_box(Vector3(0.060, 0.018, 0.016), Vector3(x, y, tool_z + 0.020),
 					Vector3.ZERO, leather, "ToolLoop")
 
-	# Dedicated long-gun cradle below the ordinary inventory. The loop faces are
-	# just in front of the rifle's 14.5 cm depth plane, so they visibly retain it
-	# while the complete assembly remains behind both working hands.
-	for x in [-0.285, 0.285]:
-		_box(Vector3(0.055, 0.090, 0.022), Vector3(x, -0.228, 0.168),
-				Vector3.ZERO, leather, "RifleSling")
-		_cylinder(0.009, 0.060, Vector3(x, -0.185, 0.167),
+	# Dedicated long-gun cradle below the ordinary inventory. Each restraint is a
+	# real U around the rifle cross-section: rear leg attached to the bag, bridge
+	# under the wood/receiver, and a front leather face touching the weapon. The
+	# aft loop sits farther onto the stock instead of ending in empty air beside it.
+	for x in [-0.355, 0.285]:
+		# The cradle is wider than the canvas body. A diagonal load strap joins
+		# each loop to a reinforced lower corner instead of leaving it floating.
+		var bag_x := 0.205 * signf(x)
+		_box(Vector3(0.058, 0.072, 0.018), Vector3(bag_x, -0.165, 0.112),
+				Vector3.ZERO, leather_edge, "RifleSlingAnchorTab")
+		_cylinder(0.008, 0.012, Vector3(bag_x, -0.174, 0.124),
+				Vector3(90.0, 0.0, 0.0), brass, "RifleSlingAnchorRivet", 10)
+		_flat_strap_piece(Vector3(bag_x, -0.185, 0.120),
+				Vector3(x, -0.265, 0.116), 0.046, 0.018, leather,
+				"RifleSlingConnection")
+		# Hidden/rear leg against the bag.
+		_box(Vector3(0.055, 0.125, 0.018), Vector3(x, -0.320, 0.112),
+				Vector3.ZERO, leather_edge, "RifleSlingRear")
+		# Lower return closes the U beneath the rifle rather than leaving two tabs.
+		_box(Vector3(0.055, 0.018, 0.074), Vector3(x, -0.382, 0.145),
+				Vector3.ZERO, leather_edge, "RifleSlingUnder")
+		# Camera-facing band crosses the actual stock/receiver surface.
+		_box(Vector3(0.055, 0.125, 0.020), Vector3(x, -0.320, 0.180),
+				Vector3.ZERO, leather, "RifleSlingFront")
+		_cylinder(0.009, 0.060, Vector3(x, -0.258, 0.178),
 				Vector3(0.0, 0.0, 90.0), brass, "RifleSlingRivet", 10)
 
 	# Worn salt bloom and hand repair.  Subtle raised patches catch the cabin

@@ -149,6 +149,9 @@ var _sky_params := {}
 var _tex_drop: ImageTexture
 var _splash_fx: GPUParticles3D
 var _splash_pm: ParticleProcessMaterial
+var _bullet_splash_fx: GPUParticles3D
+var _bullet_splash_pm: ParticleProcessMaterial
+var _bullet_splash_audio: AudioStreamPlayer3D
 var _spindrift: GPUParticles3D
 var _spindrift_pm: ParticleProcessMaterial
 var _bow_spray: GPUParticles3D
@@ -1073,6 +1076,97 @@ func splash(world_pos: Vector3, strength := 1.0) -> void:
 				0.8 + 0.4 * s, 0.9 + 1.5 * s)
 
 
+func bullet_impact(world_pos: Vector3, direction: Vector3) -> void:
+	## A rifle round makes a narrow, fast crown—not the broad body/anchor splash.
+	## The small pressure packet also enters the same CPU/GPU water field as every
+	## other impact, so the ring rides the live wave rather than a flat decal.
+	if _bullet_splash_fx == null:
+		_build_bullet_splash()
+	var surface := Vector3(world_pos.x, get_height(world_pos) + 0.025, world_pos.z)
+	# A bullet displaces only a cupful of water.  Keep a real positive surface
+	# impulse (the centre briefly rises), but do not feed the broad, heavy-object
+	# wave that made the sea look as if a stone had been dropped into it.
+	_add_impact(Vector2(surface.x, surface.z), 0.075,
+			7.4, 0.052, 0.075, 1.15, 0.10)
+	var incidence := clampf(-direction.normalized().y, 0.08, 1.0)
+	_bullet_splash_pm.initial_velocity_min = lerpf(3.4, 4.2, incidence)
+	_bullet_splash_pm.initial_velocity_max = lerpf(5.2, 6.8, incidence)
+	_bullet_splash_fx.global_position = surface
+	_bullet_splash_fx.restart()
+	_bullet_splash_fx.emitting = true
+	if _bullet_splash_audio != null:
+		_bullet_splash_audio.global_position = surface
+		_bullet_splash_audio.pitch_scale = randf_range(0.94, 1.07)
+		_bullet_splash_audio.play()
+
+
+func _build_bullet_splash() -> void:
+	_ensure_splash_tex()
+	_bullet_splash_fx = GPUParticles3D.new()
+	_bullet_splash_fx.name = "BulletWaterColumn"
+	_bullet_splash_fx.amount = 20
+	_bullet_splash_fx.lifetime = 0.48
+	_bullet_splash_fx.one_shot = true
+	_bullet_splash_fx.explosiveness = 1.0
+	_bullet_splash_fx.fixed_fps = 45
+	_bullet_splash_fx.local_coords = false
+	_bullet_splash_fx.emitting = false
+	_bullet_splash_fx.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_bullet_splash_fx.visibility_aabb = AABB(Vector3(-2.5, -1.0, -2.5),
+			Vector3(5.0, 8.0, 5.0))
+	_bullet_splash_pm = ParticleProcessMaterial.new()
+	_bullet_splash_pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	_bullet_splash_pm.emission_sphere_radius = 0.014
+	_bullet_splash_pm.direction = Vector3.UP
+	_bullet_splash_pm.spread = 11.0
+	_bullet_splash_pm.initial_velocity_min = 3.6
+	_bullet_splash_pm.initial_velocity_max = 6.0
+	_bullet_splash_pm.gravity = Vector3(0.0, -18.5, 0.0)
+	_bullet_splash_pm.radial_accel_min = 0.12
+	_bullet_splash_pm.radial_accel_max = 0.48
+	_bullet_splash_pm.scale_min = 0.22
+	_bullet_splash_pm.scale_max = 0.52
+	_bullet_splash_pm.color_ramp = _ramp(
+			PackedColorArray([Color(0.90, 0.95, 0.97, 0.82),
+					Color(0.62, 0.76, 0.82, 0.42), Color(0.55, 0.68, 0.72, 0.0)]),
+			PackedFloat32Array([0.0, 0.36, 1.0]))
+	_bullet_splash_fx.process_material = _bullet_splash_pm
+	_bullet_splash_fx.draw_pass_1 = _droplet_quad(Vector2(0.018, 0.052))
+	add_child(_bullet_splash_fx)
+
+	_bullet_splash_audio = AudioStreamPlayer3D.new()
+	_bullet_splash_audio.name = "BulletWaterImpactAudio"
+	_bullet_splash_audio.stream = _make_bullet_splash_sound()
+	_bullet_splash_audio.volume_db = -4.0
+	_bullet_splash_audio.max_distance = 140.0
+	_bullet_splash_audio.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	add_child(_bullet_splash_audio)
+
+
+func _make_bullet_splash_sound() -> AudioStreamWAV:
+	## Short deterministic noise burst: hard wet entry followed by a damped hiss.
+	## Generated once, avoiding a missing external asset and remaining positional.
+	var rate := 22050
+	var frames := int(rate * 0.19)
+	var bytes := PackedByteArray()
+	bytes.resize(frames * 2)
+	var state := 19349663
+	for i in frames:
+		state = int((state * 1103515245 + 12345) & 0x7fffffff)
+		var noise := float((state >> 8) & 0xffff) / 32767.5 - 1.0
+		var t := float(i) / float(rate)
+		var envelope := exp(-t * 27.0)
+		var click := exp(-t * 115.0) * sin(t * 720.0)
+		var sample := clampf(noise * envelope * 0.52 + click * 0.30, -1.0, 1.0)
+		bytes.encode_s16(i * 2, int(sample * 32767.0))
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = rate
+	wav.stereo = false
+	wav.data = bytes
+	return wav
+
+
 func hull_slam(world_pos: Vector3, local_contact: Vector3, strength := 1.0) -> void:
 	## A hull strike is an extended moving contact, not a stone dropped at one
 	## point. Keep the directional spray, but deliberately skip `_add_impact` and
@@ -1119,7 +1213,8 @@ func _emit_splash_particles(world_pos: Vector3, strength: float) -> void:
 
 
 func _add_impact(pos: Vector2, strength: float,
-		speed := 3.8, width := 0.34, width_growth := 0.16, damping := 0.52) -> void:
+		speed := 3.8, width := 0.34, width_growth := 0.16, damping := 0.52,
+		local_radius := 0.32) -> void:
 	## The render and physics surfaces read this same impulse list. This radial
 	## packet is for genuinely point-like entries (person, anchor, debris, rain),
 	## never for the boat hull; hull_slam() owns that extended contact.
@@ -1133,7 +1228,7 @@ func _add_impact(pos: Vector2, strength: float,
 		# The analytic packet carries metres and remains CPU-visible.  A sharper
 		# velocity kick in the local solver supplies the crown of micro ripples and
 		# aerated water that the broad packet intentionally omits.
-		_local_field.inject(pos, maxf(width * 1.35, 0.32), strength * 0.18)
+		_local_field.inject(pos, maxf(width * 1.35, local_radius), strength * 0.18)
 	if _impacts.size() > MAX_IMPACTS:
 		_impacts.resize(MAX_IMPACTS)
 

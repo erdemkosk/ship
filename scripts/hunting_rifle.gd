@@ -10,7 +10,11 @@ const MODEL_SCENE := preload("res://art/models/hunting_rifle_animation.glb")
 const SHOT_AUDIO_PATH := "res://assets/audio/kar98_shot.mp3"
 const RELOAD_AUDIO_PATH := "res://assets/audio/kar98_reload.mp3"
 const SOURCE_SLOT_CENTER := Vector3(0.407, -0.005, 0.0)
-const SOURCE_PRIMARY_GRIP := Vector3(0.258, -0.038, 0.022)
+# Seat the trigger palm on the narrow stock wrist, behind and below the action.
+# The previous point was too high/forward: the palm technically touched wood,
+# but the closed fingers climbed over the receiver and made the right wrist look
+# folded onto the top of the rifle.
+const SOURCE_PRIMARY_GRIP := Vector3(0.205, -0.068, 0.022)
 const SOURCE_SUPPORT_GRIP := Vector3(0.525, -0.025, -0.022)
 const SOURCE_REAR_SIGHT := Vector3(0.335, 0.068, 0.0)
 const SOURCE_FRONT_SIGHT := Vector3(0.790, 0.069, 0.0)
@@ -49,6 +53,9 @@ const CARTRIDGE_OVERALL_LENGTH := 0.082
 # The round sits on the right hand's radial (thumb/index) side, not on the palm
 # centreline where the middle finger would catch it first.
 const CARTRIDGE_PALM_LOCAL := Vector3(0.0, -0.004, 0.005)
+# A semantic palm centre has thickness; it cannot occupy the stock surface.
+# This places skin outside the wood while curled pads can still wrap around it.
+const PRIMARY_PALM_CLEARANCE := 0.018
 
 var _model: Node3D
 var _body_mesh: MeshInstance3D
@@ -121,11 +128,15 @@ func _build_model() -> void:
 
 	_primary_grip = _marker("PrimaryGrip", SOURCE_PRIMARY_GRIP,
 			Basis(Vector3.BACK, Vector3.LEFT, Vector3.DOWN))
+	_primary_grip.position += Vector3(PRIMARY_PALM_CLEARANCE, 0.0, 0.0)
 	_support_grip = _marker("SupportGrip", SOURCE_SUPPORT_GRIP,
 			# The measured WRAD left-hand semantic frame is quarter-turned relative
 			# to this import. This authored K/P/F frame produces rendered fingers
 			# ACROSS the fore-end while the palm continues to carry it from below.
 			Basis(Vector3.LEFT, Vector3.UP, Vector3.FORWARD))
+	# ADS contact belongs beneath the centre of the fore-end, not on its port
+	# edge. Reload code temporarily removes this correction for its work pose.
+	_support_grip.position.x += 0.014
 	_aim_anchor = _marker("AimAnchor", SOURCE_REAR_SIGHT, Basis.IDENTITY)
 	_front_sight = _marker("FrontSight", SOURCE_FRONT_SIGHT, Basis.IDENTITY)
 	_muzzle = _marker("Muzzle", SOURCE_MUZZLE, Basis.IDENTITY)
@@ -139,7 +150,21 @@ func _build_model() -> void:
 	_find_animation_player(_model)
 	_build_fire_only_animation()
 	_build_cartridge()
+	_build_compact_muzzle_feedback()
 	_build_shot_audio()
+
+
+func _build_compact_muzzle_feedback() -> void:
+	## No drawn flash geometry. The ignition exists only as a short-lived real
+	## light, so at night the rifle, hands, deck and cabin receive the event while
+	## the player never sees a billboard, sphere or stylised fireball at the bore.
+	_flash_light = OmniLight3D.new()
+	_flash_light.name = "MuzzleReportLight"
+	_flash_light.light_color = Color(1.0, 0.43, 0.12)
+	_flash_light.omni_range = 7.0
+	_flash_light.light_energy = 0.0
+	_flash_light.shadow_enabled = false
+	_muzzle.add_child(_flash_light)
 
 
 func _find_mesh(root: Node, token: String) -> MeshInstance3D:
@@ -653,6 +678,28 @@ func support_grip_node() -> Node3D:
 	return _support_grip
 
 
+func sling_placement_grip_transform() -> Transform3D:
+	## Underhand balance point used only while lowering the rifle into its sling.
+	## Keep the proven primary-hand clearance/orientation, but move the palm from
+	## the stock wrist to the middle of the complete rifle.
+	var grip := _primary_grip.transform
+	# The trigger grip is deliberately offset to the rifle's right face.  That
+	# offset is wrong for an underhand lift and left a visible air gap beside the
+	# weapon. Centre the palm and raise it until the finger pads bear on the stock.
+	grip.origin.x = 0.0
+	grip.origin.y += 0.035
+	grip.origin.z = 0.0
+	return grip
+
+
+func sling_placement_contact_bounds() -> AABB:
+	## Central underside of the stock/receiver assembly.  The lower face begins
+	## just above the staged palm, giving the upward-facing fingers a real surface
+	## to close against instead of allowing their joints inside the model.
+	return AABB(Vector3(-0.030, -0.073, -0.105),
+			Vector3(0.075, 0.105, 0.210))
+
+
 func aim_anchor_node() -> Node3D:
 	return _aim_anchor
 
@@ -742,7 +789,10 @@ func primary_contact_bounds() -> AABB:
 	var size := Vector3(0.060, 0.105, 0.075)
 	# The right palm meets the right FACE of the stock wrist. A centred box put
 	# the palm three centimetres inside wood and forced the contact solver open.
-	var centre := _primary_grip.position + Vector3(-size.x * 0.5, 0.030, 0.0)
+	# Undo the palm clearance for the collision box: the hand moves out, but the
+	# stock volume remains exactly where the imported wood is.
+	var centre := _primary_grip.position + Vector3(
+			-PRIMARY_PALM_CLEARANCE - size.x * 0.5, 0.030, 0.0)
 	return AABB(centre - size * 0.5, size)
 
 
@@ -767,10 +817,9 @@ func begin_fire() -> bool:
 		return false
 	_loaded = false
 	_fire_elapsed = 0.0
-	_flash_left = 0.0
+	_flash_left = FLASH_DURATION
 	_shot_serial += 1
-	# No procedural muzzle geometry: the supplied report, recoil and pressure
-	# impulse carry the shot. The former billboard/cone burst was visibly gamey.
+	# Only a real scene light carries the ignition. There is no visible mesh.
 	_configure_shot_audio_mix()
 	_shot_audio.play()
 	if _shot_body_audio.volume_db > -45.0:
@@ -867,7 +916,10 @@ func tick(delta: float) -> void:
 		_fire_elapsed += delta
 		if _fire_elapsed >= FIRE_DURATION:
 			_fire_elapsed = -1.0
-	_flash_left = 0.0
+	_flash_left = maxf(_flash_left - delta, 0.0)
+	var flash := flash_energy()
+	if _flash_light != null:
+		_flash_light.light_energy = flash * flash * 12.0
 	if _reload_elapsed >= 0.0:
 		_reload_elapsed += delta
 		if _cartridge != null:
@@ -924,7 +976,10 @@ func is_firing() -> bool:
 
 
 func flash_energy() -> float:
-	return 0.0
+	if _flash_left <= 0.0:
+		return 0.0
+	var age := FLASH_DURATION - _flash_left
+	return clampf(exp(-age * 34.0), 0.0, 1.0)
 
 
 func pressure_amount() -> float:

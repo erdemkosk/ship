@@ -730,6 +730,57 @@ func update_deck_bag_pose(delta: float, camera: Camera3D, amount: float) -> void
 		_deck_bag.call("update_camera_pose", delta, camera, amount)
 
 
+func rifle_obstruction_fraction(from_world: Vector3, to_world: Vector3,
+		radius := 0.055) -> float:
+	## Thick segment against the same boat-local solids that stop the player.
+	## Furniture and moving doors are included; floor/deckhead get thin slabs so
+	## looking sharply up or down cannot put the long gun through them either.
+	var from_local := to_local(from_world)
+	var to_local_point := to_local(to_world)
+	var solids: Array = BLOCKERS + door_blockers + aim_blockers
+	for floor_data in FLOORS:
+		var rect: Rect2 = floor_data[0]
+		var y: float = floor_data[1]
+		solids.append(AABB(Vector3(rect.position.x, y - 0.055,
+				rect.position.y), Vector3(rect.size.x, 0.055, rect.size.y)))
+	for ceiling_data in CEILINGS:
+		var rect: Rect2 = ceiling_data[0]
+		var y: float = ceiling_data[1]
+		solids.append(AABB(Vector3(rect.position.x, y,
+				rect.position.y), Vector3(rect.size.x, 0.065, rect.size.y)))
+	var fraction := 1.0
+	for solid: AABB in solids:
+		fraction = minf(fraction, _segment_aabb_entry_fraction(from_local,
+				to_local_point, solid.grow(radius)))
+	return fraction
+
+
+func _segment_aabb_entry_fraction(from: Vector3, to: Vector3, box: AABB) -> float:
+	var direction := to - from
+	var enter := 0.0
+	var leave := 1.0
+	for axis in 3:
+		var origin: float = from[axis]
+		var delta: float = direction[axis]
+		var minimum: float = box.position[axis]
+		var maximum: float = box.end[axis]
+		if absf(delta) < 0.000001:
+			if origin < minimum or origin > maximum:
+				return 1.0
+			continue
+		var first := (minimum - origin) / delta
+		var last := (maximum - origin) / delta
+		if first > last:
+			var swap := first
+			first = last
+			last = swap
+		enter = maxf(enter, first)
+		leave = minf(leave, last)
+		if enter > leave:
+			return 1.0
+	return clampf(enter, 0.0, 1.0)
+
+
 func helm_wheel() -> Node3D:
 	return _wheel
 
@@ -1661,7 +1712,11 @@ func _build_console(trim: Material, metal: Material) -> void:
 	# --- throttle: a lever ON the console, right-hand end --------------------
 	# No freestanding pedestal — it read as a bar stool in the middle of the
 	# room. The lever grows out of the console where your right hand falls.
-	_box(Vector3(0.18, 0.10, 0.20), Vector3(0.70, 3.59, 0.02), Vector3.ZERO, metal)
+	# The moving pivot sits forward of the raked dashboard.  Give it a proper
+	# cast-metal saddle all the way back to the console; without this bridge the
+	# shaft and knob looked like a loose lever suspended in the wheelhouse.
+	_box(Vector3(0.18, 0.17, 0.25), Vector3(0.58, 3.545, 0.175), Vector3.ZERO, metal)
+	_box(Vector3(0.14, 0.055, 0.24), Vector3(0.58, 3.625, 0.185), Vector3.ZERO, bronze)
 	_thr_lever = Node3D.new()
 	# Inboard and aft of where it was. A telegraph you cannot reach without
 	# letting go of the wheel is a telegraph nobody uses; 8 cm in and 20 cm aft
@@ -1669,6 +1724,12 @@ func _build_console(trim: Material, metal: Material) -> void:
 	# starboard console where it belongs.
 	_thr_lever.position = Vector3(0.58, 3.62, 0.30)
 	add_child(_thr_lever)
+	# Fixed bearing around the animated pivot.  Its rear half disappears into
+	# the saddle and its front cap surrounds the root of the moving shaft.
+	_cyl(0.052, 0.052, 0.22, Vector3(0.58, 3.62, 0.22),
+			Vector3(90.0, 0.0, 0.0), metal)
+	_cyl(0.043, 0.043, 0.018, Vector3(0.58, 3.62, 0.325),
+			Vector3(90.0, 0.0, 0.0), bronze)
 	var lever := MeshInstance3D.new()
 	var lm := CylinderMesh.new()
 	lm.top_radius = 0.020
@@ -1736,7 +1797,11 @@ func _build_console(trim: Material, metal: Material) -> void:
 	# Ignition. A key in a barrel, not a switch on a panel — you turn it, you
 	# wait, and the diesel catches. Same place your right hand already is.
 	var ign := Vector3(0.42, 3.64, 0.24)
-	_box(Vector3(0.07, 0.04, 0.07), ign + Vector3(0.0, -0.02, 0.0), Vector3.ZERO, metal)
+	# A short plinth carries the barrel from the console skin to the key.  Keep
+	# the key pivot where the hand rig expects it and mount the hardware to it,
+	# rather than moving the interaction into the dashboard.
+	_box(Vector3(0.10, 0.17, 0.20), Vector3(ign.x, 3.545, 0.145), Vector3.ZERO, metal)
+	_box(Vector3(0.075, 0.045, 0.075), ign + Vector3(0.0, -0.02, 0.0), Vector3.ZERO, bronze)
 	_cyl(0.022, 0.022, 0.04, ign, Vector3.ZERO, bronze)
 	_cyl(0.010, 0.010, 0.03, ign + Vector3(0.0, 0.018, 0.0), Vector3.ZERO, metal)
 	_ign_key = Node3D.new()

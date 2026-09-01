@@ -116,6 +116,7 @@ var _bag_focus := 0.0
 var _bag_saved_yaw := 0.0
 var _bag_saved_pitch := 0.0
 var _bag_selected := 0
+var _bag_last_tool := 0
 
 
 func _ready() -> void:
@@ -318,12 +319,20 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 	if mode == Mode.FPS and _bag_open and _bag_focus > 0.58:
-		if event.is_action_pressed("bag_previous"):
-			_shift_bag_selection(-1)
+		if event.is_action_pressed("bag_left"):
+			_move_bag_selection(Vector2i.LEFT)
 			get_viewport().set_input_as_handled()
 			return
-		if event.is_action_pressed("bag_next"):
-			_shift_bag_selection(1)
+		if event.is_action_pressed("bag_right"):
+			_move_bag_selection(Vector2i.RIGHT)
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_pressed("bag_up"):
+			_move_bag_selection(Vector2i.UP)
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_pressed("bag_down"):
+			_move_bag_selection(Vector2i.DOWN)
 			get_viewport().set_input_as_handled()
 			return
 		if event.is_action_pressed("use"):
@@ -448,6 +457,30 @@ func _shift_bag_selection(direction: int) -> void:
 	if count <= 0:
 		return
 	_bag_selected = posmod(_bag_selected + direction, count)
+
+
+func _move_bag_selection(direction: Vector2i) -> void:
+	## Four tools form the upper row; the rifle is the full-width lower row.
+	## Down/S always reaches it in one press. Up/W returns to the exact tool the
+	## player came from, while A/D stays within the upper row.
+	var bag := _deck_bag()
+	if bag == null or int(bag.call("slot_count")) < 5:
+		return
+	if direction.y > 0:
+		if _bag_selected >= 0 and _bag_selected < 4:
+			_bag_last_tool = _bag_selected
+		_bag_selected = 4
+		return
+	if direction.y < 0:
+		if _bag_selected == 4:
+			_bag_selected = clampi(_bag_last_tool, 0, 3)
+		return
+	if direction.x != 0:
+		if _bag_selected == 4:
+			_bag_selected = 0 if direction.x > 0 else 3
+		else:
+			_bag_selected = posmod(_bag_selected + direction.x, 4)
+		_bag_last_tool = _bag_selected
 
 
 func _activate_bag_selection() -> bool:
@@ -1083,6 +1116,13 @@ func _resolve_active_rifle_shot(bag: Node3D) -> void:
 	if target is CollisionObject3D:
 		query.exclude = [(target as CollisionObject3D).get_rid()]
 	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	var solid_distance := origin.distance_to(hit.get("position") as Vector3) \
+			if not hit.is_empty() else 900.0
+	var water_hit := _rifle_water_intersection(origin, direction, solid_distance)
+	if water_hit != Vector3.INF:
+		if ocean != null and ocean.has_method("bullet_impact"):
+			ocean.call("bullet_impact", water_hit, direction)
+		return
 	if hit.is_empty():
 		return
 	var collider: Object = hit.get("collider") as Object
@@ -1092,6 +1132,45 @@ func _resolve_active_rifle_shot(bag: Node3D) -> void:
 	if collider is RigidBody3D:
 		(collider as RigidBody3D).apply_impulse(direction * 22.0,
 				point - (collider as RigidBody3D).global_position)
+
+
+func _rifle_water_intersection(origin: Vector3, direction: Vector3,
+		maximum_distance: float) -> Vector3:
+	## Find the first crossing of the live displaced surface. This is evaluated
+	## only once per shot, so a coarse bracket plus bisection is both cheap and
+	## robust across steep FFT waves; a flat y=0 plane would visibly miss crests.
+	if ocean == null or not ocean.has_method("get_height") \
+			or direction.y >= -0.0001 or maximum_distance <= 0.05:
+		return Vector3.INF
+	var previous_t := 0.05
+	var previous_point := origin + direction * previous_t
+	var previous_gap := previous_point.y - float(ocean.get_height(previous_point))
+	if previous_gap <= 0.0:
+		return Vector3.INF
+	const STEPS := 96
+	for i in range(1, STEPS + 1):
+		var t := maximum_distance * float(i) / float(STEPS)
+		var point := origin + direction * t
+		var gap := point.y - float(ocean.get_height(point))
+		if gap <= 0.0 and previous_gap > 0.0:
+			var low := previous_t
+			var high := t
+			for _iteration in 12:
+				var middle := (low + high) * 0.5
+				var middle_point := origin + direction * middle
+				var middle_gap := middle_point.y \
+						- float(ocean.get_height(middle_point))
+				if middle_gap > 0.0:
+					low = middle
+				else:
+					high = middle
+			var hit_t := (low + high) * 0.5
+			var result := origin + direction * hit_t
+			result.y = float(ocean.get_height(result))
+			return result
+		previous_t = t
+		previous_gap = gap
+	return Vector3.INF
 
 
 func _active_bag_item_kind() -> String:

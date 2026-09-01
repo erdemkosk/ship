@@ -479,8 +479,12 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 			if _can_take("L", "helm"):
 				_take("L", "helm")
 		if _claim["R"] == "" and _inspect == "" and _bag_hand_target == null:
-			if _can_take("R", "telegraph"):
-				_take("R", "telegraph")
+			# This is the authored helm station: its standing point and lever were
+			# measured as one combined two-control posture.  Do not make the returning
+			# right hand pass the generic free-standing interaction gate every frame;
+			# small boat motion/IK settling could reject it and leave the hand floating.
+			# Hard-held items still block this branch through `_bag_hand_target` above.
+			_take("R", "telegraph")
 	elif engaged == "telegraph":
 		if _claim["R"] == "" and _bag_hand_target == null:
 			if _can_take("R", "telegraph"):
@@ -937,8 +941,13 @@ func _drive_bag_hand(_delta: float) -> void:
 			var authored_p := axes["palm"] as Vector3
 			var natural_f := natural["fingers"] as Vector3
 			var natural_p := natural["palm"] as Vector3
-			var blended_f := authored_f.slerp(natural_f,
-					smoothstep(0.0, 1.0, natural_blend)).normalized()
+			# Firearm grips must keep the authored finger direction so the digits
+			# continue to wrap the stock/trigger.  They may still roll the palm toward
+			# the forearm, which removes the broken-looking wrist without losing contact.
+			var keep_fingers := bool(_bag_hand_target.get_meta(
+					"natural_grip_keep_fingers", false)) and pose == "rifle_primary"
+			var blended_f := authored_f if keep_fingers else authored_f.slerp(
+					natural_f, smoothstep(0.0, 1.0, natural_blend)).normalized()
 			var blended_p := authored_p.slerp(natural_p,
 					smoothstep(0.0, 1.0, natural_blend))
 			blended_p -= blended_p.project(blended_f)
@@ -950,10 +959,16 @@ func _drive_bag_hand(_delta: float) -> void:
 		rig.set_grip_locked("R", weapon_pin_requested and primary_lock_ready)
 		# A properly spaced sight picture puts the stock farther from the camera.
 		# Bring the shoulder girdle into that hold instead of stretching either arm.
-		rig.set_reach_bias("R", 0.085 if weapon_pin_requested else 0.0)
+		# The trigger palm now sits lower/rearward on the actual stock wrist. Let
+		# the right shoulder follow that shouldered contact instead of leaving the
+		# palm a centimetre short and visually hovering above the grip.
+		rig.set_reach_bias("R", 0.115 if weapon_pin_requested else 0.0)
 		if rifle_device != null and _bag_hand_target.has_meta("contact_bounds"):
 			rig.set_contact_target_bounds("R", rifle_device,
-					_bag_hand_target.get_meta("contact_bounds") as AABB, 0.006)
+					# Eight millimetres represents the compressible finger-pad shell,
+					# not a gap. It lets the palm-side phalanges bear on wood without
+					# requiring their bone endpoints to enter the solid stock volume.
+					_bag_hand_target.get_meta("contact_bounds") as AABB, 0.008)
 			if pose == "bolt_grip":
 				rig.seed_contact_closure("R", 0.94)
 			var primary_report: Dictionary = rig.finger_contact_report("R")
@@ -1010,7 +1025,11 @@ func _drive_bag_hand(_delta: float) -> void:
 	_last_pose["R"] = pose
 	_rest_t["R"] = 0.0
 	if _bag_hand_mode == "rifle":
-		rig.set_elbow_hint("R", 0.25, 0.19)
+		# Keep the trigger elbow near the ribs.  The former outboard hint made the
+		# forearm arrive from beyond the right edge even though the shoulder had
+		# already advanced to the stock.  A slightly lower, tucked elbow leaves a
+		# visible bend instead of drawing one fully stretched outside arm.
+		rig.set_elbow_hint("R", 0.28, 0.12)
 	_bag_hand_report = rig.consider("R", contact, axes["fingers"], axes["palm"])
 	rig.grip("R", contact, axes["fingers"], axes["palm"], 1.0, pose,
 			pose_amount, false)
@@ -1039,9 +1058,14 @@ func _drive_rifle_support() -> void:
 	}
 	var support_palm: Transform3D = rig.solved_palm_global("L")
 	var support_lock_ready: bool = bool(rig.grip_locked("L")) \
-			or support_palm.origin.distance_to(support_world.origin) < 0.005
+			# A support palm compresses against a broad wooden fore-end; allow the
+			# last few millimetres of skin/pad seating before welding it to the rifle.
+			or support_palm.origin.distance_to(support_world.origin) < 0.009
 	rig.set_grip_locked("L", weapon_pin_requested and support_lock_ready)
-	rig.set_reach_bias("L", 0.155 if weapon_pin_requested else 0.0)
+	# The centred ADS support point is slightly farther across the rifle than the
+	# imported port-edge marker. Let the left shoulder follow it so the palm seats
+	# under the wood instead of stopping short and appearing to slide off.
+	rig.set_reach_bias("L", 0.165 if weapon_pin_requested else 0.0)
 	if device != null and _rifle_support_target.has_meta("contact_bounds"):
 		rig.set_contact_target_bounds("L", device,
 				# A wrapped fore-end bears through finger pads, not mathematical
@@ -1060,7 +1084,10 @@ func _drive_rifle_support() -> void:
 	_last_axes["L"] = axes.duplicate()
 	_last_pose["L"] = "rifle_support"
 	_rest_t["L"] = 0.0
-	rig.set_elbow_hint("L", 0.25, 0.15)
+	# Let the support elbow settle a little lower and farther outboard. The palm
+	# remains welded beneath the fore-end, but the forearm now meets it at a small
+	# anatomical wrist angle instead of forming one unnaturally straight beam.
+	rig.set_elbow_hint("L", 0.32, 0.22)
 	rig.grip("L", contact, axes["fingers"], axes["palm"], 1.0,
 			"rifle_support", 1.0, false)
 

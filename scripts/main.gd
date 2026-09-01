@@ -28,11 +28,15 @@ func _enter_tree() -> void:
 	_add_action("watch", [KEY_B])
 	# Body-worn deck bag: one press brings it round, the next shoulders it.
 	_add_action("backpack", [KEY_I])
-	# Once the bag is in the lap, the arrow keys move the physical pointing
-	# finger between its four loops. They intentionally share keys with walking;
-	# boat_camera consumes them while the bag has focus.
+	# Once the bag is in the lap, arrows and WASD move the physical pointing
+	# finger. They share keys with walking; boat_camera consumes them while the
+	# bag has focus, and Down/S descends directly to the long rifle cradle.
 	_add_action("bag_previous", [KEY_LEFT, KEY_UP])
 	_add_action("bag_next", [KEY_RIGHT, KEY_DOWN])
+	_add_action("bag_left", [KEY_A, KEY_LEFT])
+	_add_action("bag_right", [KEY_D, KEY_RIGHT])
+	_add_action("bag_up", [KEY_W, KEY_UP])
+	_add_action("bag_down", [KEY_S, KEY_DOWN])
 	_add_mouse_action("knife_attack", MOUSE_BUTTON_LEFT)
 	_add_mouse_action("rifle_fire", MOUSE_BUTTON_LEFT)
 	_add_mouse_action("rifle_aim", MOUSE_BUTTON_RIGHT)
@@ -1169,6 +1173,17 @@ func _rifle_test(rig: Node3D, boat: RigidBody3D) -> void:
 	## The contract includes geometric sight alignment and exclusive-slot rules,
 	## not merely the presence of a model node.
 	rig.call("set_mode", 1)
+	# Randomly spawned flotsam must not make the deterministic hand/ADS contract
+	# lower the rifle. Boat-local wall collision remains active and asserted.
+	boat.set_meta("rifle_test_ignore_obstruction", true)
+	# The ordinary rifle contract needs an unobstructed sight line. Collision has
+	# a separate geometric assertion; the helm console correctly lowers the gun
+	# and therefore cannot simultaneously be used to assert sight alignment.
+	rig.get("_walker").call("spawn_at", Vector3(0.0, 0.63, -2.20))
+	rig.set("yaw", PI * 0.5)
+	rig.set("pitch", 0.0)
+	rig.set("_look_yaw", PI * 0.5)
+	rig.set("_look_pitch", 0.0)
 	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
 	if panel != null:
 		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
@@ -1179,6 +1194,19 @@ func _rifle_test(rig: Node3D, boat: RigidBody3D) -> void:
 	rig.call("set_bag_open", true)
 	await get_tree().create_timer(0.95).timeout
 	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	# Known dashboard crossing: proves the thick local collision query sees fitted
+	# furniture, not only the outer hull or physics props.
+	var wall_fraction := float(boat.call("rifle_obstruction_fraction",
+			boat.to_global(Vector3(0.0, 3.80, 0.80)),
+			boat.to_global(Vector3(0.0, 3.80, -0.50)), 0.060))
+	var collision_contract := wall_fraction < 0.95
+	var test_ocean := rig.get("ocean") as Node3D
+	var water_probe_origin := boat.global_position + Vector3(18.0, 14.0, 11.0)
+	var water_probe := rig.call("_rifle_water_intersection", water_probe_origin,
+			Vector3.DOWN, 40.0) as Vector3
+	var water_contract := test_ocean != null and water_probe != Vector3.INF \
+			and absf(water_probe.y - float(test_ocean.call("get_height",
+					water_probe))) < 0.015
 	var slot_label := str(bag.call("slot_label", 4))
 	var rifle_slot_node := bag.call("slot_target", 4) as Node3D
 	var quick_slot_node := bag.call("slot_target", 2) as Node3D
@@ -1281,7 +1309,7 @@ func _rifle_test(rig: Node3D, boat: RigidBody3D) -> void:
 	rig.call("_unhandled_input", fire_event)
 	await get_tree().create_timer(0.012).timeout
 	var fired := bool(rifle.call("is_firing"))
-	var no_muzzle_flash := float(rifle.call("flash_energy")) <= 0.001 \
+	var muzzle_light_only := float(rifle.call("flash_energy")) > 0.05 \
 			and not bool(rifle.call("blast_visible"))
 	var shot_sound := bool(rifle.call("shot_audio_playing"))
 	var pressure := float(rifle.call("pressure_amount")) > 0.20
@@ -1404,13 +1432,14 @@ func _rifle_test(rig: Node3D, boat: RigidBody3D) -> void:
 	await get_tree().create_timer(0.20).timeout
 	var restored := placed and bool(bag.call("slot_occupied", 4)) \
 			and bag.call("active_item_node") == null
-	var complete := slot_label == "Hunting rifle" and rifle_below_tools \
+	var complete := collision_contract \
+			and slot_label == "Hunting rifle" and rifle_below_tools \
 			and rifle_stowed_in_sling \
 			and taken and imported \
 			and animated and exclusive and one_hand_carry and two_hands and weapon_owned \
 			and grip_contact_ok and sight_aligned and camera_clear_of_rifle \
 			and ads_locked and palms_pinned \
-			and pressure and no_muzzle_flash and shot_sound and acoustic_variants \
+			and pressure and muzzle_light_only and shot_sound and acoustic_variants \
 			and shot_palms_pinned and carry_restored \
 			and fired and clip_playing and automatic_bolt_suppressed and recoil \
 			and empty_after_shot and dry_fire_blocked and reload_started \
@@ -1422,7 +1451,7 @@ func _rifle_test(rig: Node3D, boat: RigidBody3D) -> void:
 			and round_attached and insertion_aligned \
 			and left_carries_reload and bolt_work and reload_ready \
 			and reopened and restored
-	print("[rifle] label=%s below=%s stow=%s/%s take=%s imported=%s clips=%s exclusive=%s carry_1h=%s aim_2h=%s carry_restored=%s weapon_owned=%s grip_err=%.4f/%.4f contacts=%d/%d penetration=%d/%d nearest=%.4f/%.4f local=%s/%s bounds=%s/%s aim=%.2f rear=%s front=%s muzzle=%s camera_clear=%s/%.3f aligned=%s locked=%s hand_lock=%s palms=%.4f/%.4f shot_palms=%.4f fire=%s sound=%s no_flash=%s acoustic=%s anim=%s auto_bolt_off=%s recoil=%s empty=%s dry_block=%s reload=%s order=%s/%s open=%.3f reload_sound=%s round=%s round_mesh=%s round_contact=%d/%d round_digits=%s round_wrist=%.2f/%.2f round_weld=%.4f/%.2f insert=%.4f/%.3f/%s left_hold=%s bolt=%s bolt_contact=%d/%d digits=%s sync=%.4f/%s wrist=%.2f/%.2f neutral=%s ready=%s place=%s restored=%s complete=%s" % [
+	print("[rifle] label=%s below=%s stow=%s/%s take=%s imported=%s clips=%s exclusive=%s carry_1h=%s aim_2h=%s carry_restored=%s weapon_owned=%s grip_err=%.4f/%.4f contacts=%d/%d penetration=%d/%d nearest=%.4f/%.4f local=%s/%s bounds=%s/%s aim=%.2f rear=%s front=%s muzzle=%s camera_clear=%s/%.3f aligned=%s locked=%s hand_lock=%s palms=%.4f/%.4f shot_palms=%.4f fire=%s sound=%s flash=%s acoustic=%s anim=%s auto_bolt_off=%s recoil=%s empty=%s dry_block=%s reload=%s order=%s/%s open=%.3f reload_sound=%s round=%s round_mesh=%s round_contact=%d/%d round_digits=%s round_wrist=%.2f/%.2f round_weld=%.4f/%.2f insert=%.4f/%.3f/%s left_hold=%s bolt=%s bolt_contact=%d/%d digits=%s sync=%.4f/%s wrist=%.2f/%.2f neutral=%s ready=%s place=%s restored=%s complete=%s" % [
 			slot_label, rifle_below_tools, rifle_stowed_in_sling, rifle_slot_local,
 			taken, imported, clips, exclusive,
 			one_hand_carry, two_hands,
@@ -1440,7 +1469,7 @@ func _rifle_test(rig: Node3D, boat: RigidBody3D) -> void:
 			muzzle_local, camera_clear_of_rifle, closest_rifle_z,
 			sight_aligned, ads_locked, hand_lock, primary_palm_error,
 			support_palm_error,
-			shot_palm_error, fired, shot_sound, no_muzzle_flash, acoustic_variants,
+			shot_palm_error, fired, shot_sound, muzzle_light_only, acoustic_variants,
 			clip_playing, automatic_bolt_suppressed, recoil, empty_after_shot,
 			dry_fire_blocked, reload_started,
 			bolt_opens_first, bolt_held_for_round, held_open_amount,
