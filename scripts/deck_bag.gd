@@ -33,6 +33,11 @@ const RELOAD_DURATION := 3.30
 
 var _slot_anchors: Array[Node3D] = []
 var _pointer_anchors: Array[Node3D] = []
+var _pointer_target: Node3D
+var _pointer_pending := 0
+var _pointer_transition := 1.0
+var _pointer_from := Vector3.ZERO
+const POINTER_TRANSITION_DURATION := 0.19
 ## Deliberately untyped: an empty physical slot is represented by null.
 var _slot_items: Array = []
 var _active_item: Node3D
@@ -50,6 +55,21 @@ var _rifle_aim := 0.0
 var _rifle_aim_goal := false
 var _rifle_ads_settle := 0.0
 var _rifle_reload_blend := 0.0
+const TAKE_GRASP_DURATION := 0.12
+const TAKE_EXTRACT_DURATION := 0.34
+const KNIFE_CLEAR_DURATION := 0.16
+# The knife sits behind the retaining leather, not pasted over it. One centimetre
+# keeps the model clear of the canvas skin while leaving the straps visibly in
+# front of the blade and handle.
+const KNIFE_SLOT_PROUD := 0.010
+const KNIFE_CLEAR_PULL := 0.105
+var _take_elapsed := -1.0
+var _take_source_slot := -1
+var _take_grip_start := Transform3D.IDENTITY
+var _tool_loop_parts := {}
+var _tool_loop_rest := {}
+var _rifle_sling_parts: Array[MeshInstance3D] = []
+var _rifle_sling_rest := {}
 ## Worn-bag dynamics. The camera supplies the shoulder frame; this state is the
 ## delayed mass hanging below two strap attachments, never a decorative bob.
 var _sling_angle := Vector2.ZERO
@@ -83,6 +103,12 @@ func _ready() -> void:
 	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	visible = false
 	_build()
+	_pointer_target = Node3D.new()
+	_pointer_target.name = "SlotPointerTransition"
+	add_child(_pointer_target)
+	if not _pointer_anchors.is_empty():
+		_pointer_target.transform = _pointer_anchors[0].transform
+		_pointer_from = _pointer_target.position
 	_knife_hand_target = Node3D.new()
 	_knife_hand_target.name = "KnifeHandTarget"
 	_knife_hand_target.top_level = true
@@ -136,6 +162,8 @@ func update_camera_pose(delta: float, camera: Camera3D, amount: float) -> void:
 		reset_physics_interpolation()
 		_update_physical_shoulder_strap(ease)
 		_update_loaded_canvas(delta, ease)
+	_update_pointer_transition(delta)
+	_update_slot_restraints(delta)
 	_update_knife_release(delta)
 	_update_active_item(delta, camera, u)
 
@@ -280,6 +308,48 @@ func _update_loaded_canvas(delta: float, open_amount: float) -> void:
 				+ _body_yield_velocity.y * 0.035)
 
 
+func _update_pointer_transition(delta: float) -> void:
+	if _pointer_target == null or _pointer_anchors.is_empty():
+		return
+	_pointer_transition = minf(_pointer_transition + delta / POINTER_TRANSITION_DURATION, 1.0)
+	var t := _pointer_transition
+	var goal := _pointer_anchors[_pointer_pending].position
+	var retract := Vector3(0.0, 0.0, 0.055)
+	if t < 0.32:
+		_pointer_target.position = _pointer_from.lerp(_pointer_from + retract,
+				smoothstep(0.0, 1.0, t / 0.32))
+	elif t < 0.70:
+		_pointer_target.position = (_pointer_from + retract).lerp(goal + retract,
+				smoothstep(0.0, 1.0, inverse_lerp(0.32, 0.70, t)))
+	else:
+		_pointer_target.position = (goal + retract).lerp(goal,
+				smoothstep(0.0, 1.0, inverse_lerp(0.70, 1.0, t)))
+	_pointer_target.basis = _pointer_anchors[_pointer_pending].basis
+	_pointer_target.set_meta("centre_point_roll", _pointer_pending == RIFLE_SLOT)
+
+
+func _update_slot_restraints(_delta: float) -> void:
+	var flex := 0.0
+	if _take_elapsed >= 0.0 and _take_source_slot >= 0 \
+			and not take_extraction_complete():
+		var p := clampf((_take_elapsed - TAKE_GRASP_DURATION) / TAKE_EXTRACT_DURATION,
+				0.0, 1.0)
+		flex = sin(p * PI)
+	for slot in _tool_loop_parts:
+		for part: MeshInstance3D in _tool_loop_parts[slot]:
+			var rest: Transform3D = _tool_loop_rest[part]
+			part.transform = rest
+			if int(slot) == _take_source_slot:
+				part.position.z += flex * 0.014
+				part.scale.x = 1.0 + flex * 0.16
+	for part: MeshInstance3D in _rifle_sling_parts:
+		var rest: Transform3D = _rifle_sling_rest[part]
+		part.transform = rest
+		if _take_source_slot == RIFLE_SLOT:
+			part.position.z += flex * 0.020
+			part.scale.z = 1.0 + flex * 0.10
+
+
 func slot_count() -> int:
 	return SLOT_POSITIONS.size()
 
@@ -301,7 +371,15 @@ func slot_pointer_target(index: int) -> Node3D:
 	## open hand reaching through them instead of an index indicating a choice.
 	if index < 0 or index >= _pointer_anchors.size():
 		return null
-	return _pointer_anchors[index]
+	if index != _pointer_pending:
+		_pointer_from = _pointer_target.position
+		_pointer_pending = index
+		_pointer_transition = 0.0
+	return _pointer_target
+
+
+func take_extraction_complete() -> bool:
+	return _take_elapsed >= TAKE_GRASP_DURATION + TAKE_EXTRACT_DURATION
 
 
 func slot_label(index: int) -> String:
@@ -403,6 +481,8 @@ func take_slot(index: int) -> Node3D:
 	_slot_items[index] = null
 	_active_item = item
 	_active_label = str(item.get_meta("item_label", SLOT_LABELS[index]))
+	_take_source_slot = index
+	_take_elapsed = 0.0
 	_preview_slot = -1
 	_knife_draw = 0.0
 	_knife_release_left = 0.0
@@ -423,10 +503,13 @@ func take_slot(index: int) -> Node3D:
 		var grip := knife.grip_node()
 		_knife_hand_target.global_transform = item.global_transform \
 				* (grip.transform if grip != null else Transform3D.IDENTITY)
+		_take_grip_start = _knife_hand_target.global_transform
 		_knife_hand_target.set_meta("held_device", item)
 		_knife_hand_target.set_meta("held_grip_transform",
 				grip.transform if grip != null else Transform3D.IDENTITY)
-		_knife_hand_target.set_meta("authored_grip_frame", false)
+		# Keep the stored vertical frame until the blade has cleared both
+		# retaining loops; only then may the wrist turn it into the carry grip.
+		_knife_hand_target.set_meta("authored_grip_frame", true)
 		_knife_hand_target.set_meta("grip_closure", 1.0)
 	elif active_item_kind() == "hunting_rifle":
 		var rifle: Node3D = _active_item
@@ -591,6 +674,9 @@ func mark_active_knife_hit(collider: Object, position: Vector3,
 func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> void:
 	if _active_item == null or not is_instance_valid(_active_item):
 		return
+	if _take_elapsed >= 0.0 and not take_extraction_complete():
+		_take_elapsed = minf(_take_elapsed + delta,
+				TAKE_GRASP_DURATION + TAKE_EXTRACT_DURATION)
 	var target: Transform3D
 	if _preview_slot >= 0 and bag_amount > 0.62:
 		# Hover a few centimetres in front of the empty loop.  The hand and item
@@ -603,6 +689,12 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 				deg_to_rad(-4.0), deg_to_rad(-8.0)))
 		target = camera.global_transform * Transform3D(carry_rot,
 				Vector3(0.205, -0.205, -0.40))
+	# Hold the prop in its webbing for a short finger-closing beat. The existing
+	# draw interpolation then becomes the visible extraction rather than an
+	# immediate inventory transfer.
+	var grasping := _take_elapsed >= 0.0 and _take_elapsed < TAKE_GRASP_DURATION
+	if grasping:
+		target = _active_item.global_transform
 	if _active_item is UtilityKnife3D:
 		var knife := _active_item as UtilityKnife3D
 		knife.tick_attack(delta)
@@ -616,12 +708,26 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 							grip_target, return_k)
 			_knife_hand_target.set_meta("authored_grip_frame", true)
 		else:
-			_knife_hand_target.set_meta("authored_grip_frame", false)
-			_knife_draw = minf(_knife_draw + delta / 0.38, 1.0)
-			var palm_target := camera.global_transform * Transform3D(Basis.IDENTITY,
-					knife.hand_position_camera_local())
-			_knife_hand_target.global_transform = _knife_hand_target.global_transform \
-					.interpolate_with(palm_target, smoothstep(0.0, 1.0, _knife_draw))
+			var extraction_time := maxf(_take_elapsed - TAKE_GRASP_DURATION, 0.0) \
+					if _take_source_slot == 2 else TAKE_EXTRACT_DURATION
+			if _take_source_slot == 2 and extraction_time < KNIFE_CLEAR_DURATION:
+				# Pull straight out along the bag face normal without rotating. This
+				# keeps the fist below the lower loop and the blade clear of the leather.
+				var clear_u := smoothstep(0.0, 1.0,
+						extraction_time / KNIFE_CLEAR_DURATION)
+				_knife_hand_target.set_meta("authored_grip_frame", true)
+				_knife_hand_target.global_transform = _take_grip_start
+				_knife_hand_target.global_position += global_basis.z * (KNIFE_CLEAR_PULL * clear_u)
+			else:
+				_knife_hand_target.set_meta("authored_grip_frame", false)
+				if not grasping:
+					var turn_duration := TAKE_EXTRACT_DURATION - KNIFE_CLEAR_DURATION \
+							if _take_source_slot == 2 else TAKE_EXTRACT_DURATION
+					_knife_draw = minf(_knife_draw + delta / turn_duration, 1.0)
+				var palm_target := camera.global_transform * Transform3D(Basis.IDENTITY,
+						knife.hand_position_camera_local())
+				_knife_hand_target.global_transform = _knife_hand_target.global_transform \
+						.interpolate_with(palm_target, smoothstep(0.0, 1.0, _knife_draw))
 	elif active_item_kind() == "hunting_rifle":
 		var rifle: Node3D = _active_item
 		rifle.call("tick", delta)
@@ -685,7 +791,8 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 			target = carry.interpolate_with(aimed,
 					smoothstep(0.0, 1.0, _rifle_aim))
 			target *= rifle.call("recoil_local_transform") as Transform3D
-		_rifle_draw = minf(_rifle_draw + delta / 0.46, 1.0)
+		if not grasping:
+			_rifle_draw = minf(_rifle_draw + delta / TAKE_EXTRACT_DURATION, 1.0)
 		# Advance the weapon once, here, before deriving either hand target. Both
 		# palms must solve to the exact frame that will be rendered this tick. The
 		# former code advanced the rifle after the hands and let each hand chase a
@@ -995,9 +1102,12 @@ func _slot_transform(index: int) -> Transform3D:
 	var basis := Basis.IDENTITY
 	var origin: Vector3 = SLOT_POSITIONS[index]
 	if index == 2:
-		# Blade down, grip up, flush with the same two leather retaining loops.
-		basis = Basis(Vector3.BACK, deg_to_rad(-90.0))
-		origin.y += 0.055
+		# Keep the knife vertical in its original slot with the handle below. Rotate
+		# it around that long axis so the cutting edge points to screen-left. Its
+		# shallow Z offset leaves both leather retainers visibly in front.
+		basis = Basis(Vector3.UP, Vector3.BACK, Vector3.LEFT)
+		origin.y -= 0.055
+		origin.z += KNIFE_SLOT_PROUD
 	elif index == RIFLE_SLOT:
 		# Wrapper -Z is muzzle-forward; rotate it across the bag with the muzzle
 		# to starboard. The model is centred, so both sling loops share the load.
@@ -1303,9 +1413,13 @@ func _build() -> void:
 	# Retaining loops around each tool. They are deliberately few and broad;
 	# repeated webbing would turn the silhouette into a modern tactical pack.
 	for x in [-0.178, -0.060, 0.060, 0.174]:
+		var slot := [-0.178, -0.060, 0.060, 0.174].find(x)
+		_tool_loop_parts[slot] = []
 		for y in [-0.105, 0.015]:
-			_box(Vector3(0.060, 0.018, 0.016), Vector3(x, y, tool_z + 0.020),
-					Vector3.ZERO, leather, "ToolLoop")
+			var loop := _box(Vector3(0.060, 0.018, 0.016),
+					Vector3(x, y, tool_z + 0.020), Vector3.ZERO, leather, "ToolLoop")
+			_tool_loop_parts[slot].append(loop)
+			_tool_loop_rest[loop] = loop.transform
 
 	# Dedicated long-gun cradle below the ordinary inventory. Each restraint is a
 	# real U around the rifle cross-section: rear leg attached to the bag, bridge
@@ -1339,15 +1453,17 @@ func _build() -> void:
 				0.034 if muzzle_loop else 0.046, 0.018, leather,
 				"RifleSlingConnection")
 		# Hidden/rear leg against the bag.
-		_box(Vector3(band_w, leg_h, 0.018), Vector3(x, leg_y, rear_z),
-				Vector3.ZERO, leather_edge, "RifleSlingRear")
+		var sling_rear := _box(Vector3(band_w, leg_h, 0.018),
+				Vector3(x, leg_y, rear_z), Vector3.ZERO, leather_edge, "RifleSlingRear")
 		# Lower return closes the U beneath the rifle rather than leaving two tabs.
-		_box(Vector3(band_w, 0.018, under_d), Vector3(x, under_y,
-				(rear_z + front_z) * 0.5),
-				Vector3.ZERO, leather_edge, "RifleSlingUnder")
+		var sling_under := _box(Vector3(band_w, 0.018, under_d), Vector3(x, under_y,
+				(rear_z + front_z) * 0.5), Vector3.ZERO, leather_edge, "RifleSlingUnder")
 		# Camera-facing band crosses the actual stock/receiver surface.
-		_box(Vector3(band_w, leg_h, 0.020), Vector3(x, leg_y, front_z),
-				Vector3.ZERO, leather, "RifleSlingFront")
+		var sling_front := _box(Vector3(band_w, leg_h, 0.020),
+				Vector3(x, leg_y, front_z), Vector3.ZERO, leather, "RifleSlingFront")
+		for sling_part in [sling_rear, sling_under, sling_front]:
+			_rifle_sling_parts.append(sling_part)
+			_rifle_sling_rest[sling_part] = sling_part.transform
 		_cylinder(0.009 if not muzzle_loop else 0.007,
 				0.060 if not muzzle_loop else 0.040,
 				Vector3(x, top_y, front_z - 0.002),

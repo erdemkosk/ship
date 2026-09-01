@@ -117,6 +117,7 @@ var _bag_saved_yaw := 0.0
 var _bag_saved_pitch := 0.0
 var _bag_selected := 0
 var _bag_last_tool := 0
+var _bag_take_pending := false
 
 
 func _ready() -> void:
@@ -436,6 +437,7 @@ func set_bag_open(open: bool) -> bool:
 				if empty >= 0:
 					_bag_selected = empty
 	else:
+		_bag_take_pending = false
 		var bag := _deck_bag()
 		if bag != null:
 			bag.call("set_preview_slot", -1)
@@ -496,7 +498,9 @@ func _activate_bag_selection() -> bool:
 		if active == null:
 			return false
 		_set_active_bag_item_hands(bag)
-		set_bag_open(false)
+		# Keep the bag presented while the fingers close and the prop clears its
+		# restraint. The ordinary close begins only after that physical extraction.
+		_bag_take_pending = true
 		return true
 	if bool(bag.call("slot_occupied", _bag_selected)) \
 			or not bool(bag.call("can_place_active", _bag_selected)):
@@ -592,6 +596,9 @@ func _update_deck_bag(delta: float) -> void:
 		_camera_attrs.dof_blur_amount = 0.18 * blur
 	var bag := _deck_bag()
 	if bag != null:
+		if _bag_take_pending and bool(bag.call("take_extraction_complete")):
+			_bag_take_pending = false
+			set_bag_open(false)
 		var active := bag.call("active_item_node") as Node3D
 		var preview := -1
 		if active != null and _bag_open and _bag_focus > 0.58 \

@@ -928,7 +928,10 @@ func _drive_bag_hand(_delta: float) -> void:
 				else Transform3D.IDENTITY
 		if held_device != null and held_device.has_method("grip_contact_bounds"):
 			rig.set_contact_target_bounds("R", held_device,
-					held_device.call("grip_contact_bounds") as AABB, 0.006)
+					# Use the rig's real fingertip thickness around the broad knife
+					# scales. The old 6 mm shell protected only the joint endpoints,
+					# allowing the rendered phalanx meshes to enter the yellow handle.
+					held_device.call("grip_contact_bounds") as AABB, 0.018)
 		else:
 			rig.set_contact_target("R", null)
 		if _bag_hand_mode == "knife" and held_device != null:
