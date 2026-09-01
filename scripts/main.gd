@@ -2071,20 +2071,24 @@ func _stance_test(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 
 
 func _ladder_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
-	## The hands on the rungs, in daylight, looking level.
+	## The hands and ladder head from the climber's real upward view.
 	var w: RefCounted = rig.get("_walker")
+	# Let the imported arm skeleton finish setup before entering FPS. Calling
+	# set_mode on frame zero leaves the verification route inactive even though
+	# the actual player path (which starts from the menu) is fine.
+	await get_tree().create_timer(0.45).timeout
 	rig.set_mode(1)
 	var pnl: Node = get_tree().get_first_node_in_group("ui_panel")
 	if pnl != null:
 		var pc: CanvasItem = pnl.get("_panel") as CanvasItem
 		if pc != null:
 			pc.visible = false
-	await get_tree().create_timer(2.2).timeout
+	await get_tree().create_timer(1.75).timeout
 	boat.set("helm_engaged", false)
 	w.call("spawn_at", Vector3(0.72, 0.63, 5.05))
 	var aft: Vector3 = boat.global_basis.z
 	rig.set("yaw", atan2(-aft.x, -aft.z))
-	rig.set("pitch", -0.34)
+	rig.set("pitch", 0.42)
 	await get_tree().create_timer(0.5).timeout
 	w.call("grab_sea_ladder", boat)
 	await get_tree().create_timer(0.6).timeout

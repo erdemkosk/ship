@@ -4689,6 +4689,17 @@ func _build_deck_gear(trim: Material, metal: Material) -> void:
 	# The one way back aboard. Rungs carry on well below the waterline because
 	# the bottom one has to be there when she rolls away from you, and a ladder
 	# you can only reach at the top of a swell is a ladder that drowns people.
+	# Two timber cheeks frame the ladder head.  The upper hand targets live on
+	# the outside faces of the iron stiles; without solid structure behind those
+	# stiles the fingers were anatomically correct but read as grasping empty air
+	# when viewed from below.  These boards are outside the climbing lane and are
+	# through-bolted into the transom, so they add context without narrowing it.
+	for cheek_x in [SEA_LADDER_X - 0.25, SEA_LADDER_X + 0.25]:
+		_box(Vector3(0.12, 0.72, 0.085), Vector3(cheek_x, 0.80, 5.705),
+				Vector3(-6.0, 0.0, 0.0), wood)
+		for bolt_y in [0.52, 0.80, 1.08]:
+			_cyl(0.015, 0.015, 0.012, Vector3(cheek_x, bolt_y, 5.755),
+					Vector3(90.0, 0.0, 0.0), metal)
 	# One parent, six degrees of rake: stiles, rungs and the grab sit in the
 	# same plane. Rotate the parts independently and the rungs hang in a
 	# zigzag that is not a ladder.

@@ -141,9 +141,12 @@ const POSES := {
 	# close fully beneath the strap; leaving them half open makes a six-kilo bag
 	# look as if it is hanging from the wrist by magic.
 	"bag_handle": {
-		"thumb": [0.64, 0.82, 0.54], "index": [1.08, 1.38, 0.92],
-		"middle": [1.16, 1.46, 0.98], "ring": [1.20, 1.50, 1.02],
-		"pinky": [1.22, 1.52, 1.04],
+		# Side-loop carry is a compact power grasp: the four fingertips close
+		# behind the webbing and the opposed thumb seals the visible gap.  The old
+		# shallower values read as an unloaded C-shaped hand in front view.
+		"thumb": [0.78, 1.02, 0.68], "index": [1.22, 1.52, 1.00],
+		"middle": [1.28, 1.58, 1.06], "ring": [1.32, 1.62, 1.10],
+		"pinky": [1.34, 1.64, 1.12],
 	},
 	# Precision pinch: thumb and index meet; unused fingers are curled safely
 	# away instead of floating open through the key or cartridge.

@@ -1095,6 +1095,30 @@ func _build() -> void:
 				0.010, aged_leather if index % 3 != 1 else leather_edge,
 				"AgedCarryStrap%02d" % index)
 
+	# Short side carry loop from the user's physical reference.  This is a real
+	# load path stitched into the reinforced left roll: the palm lands on the
+	# outer vertical run, leaving every front pocket readable and selectable.
+	var side_carry_curve := PackedVector3Array([
+		Vector3(-0.232, 0.116, 0.078),
+		Vector3(-0.274, 0.120, 0.080),
+		Vector3(-0.305, 0.094, 0.084),
+		Vector3(-0.305, 0.052, 0.084),
+		Vector3(-0.302, 0.012, 0.083),
+		Vector3(-0.272, -0.010, 0.080),
+		Vector3(-0.232, 0.000, 0.078),
+	])
+	for index in side_carry_curve.size() - 1:
+		_flat_strap_piece(side_carry_curve[index], side_carry_curve[index + 1],
+				0.026, 0.009,
+				aged_leather if index % 2 == 0 else leather_edge,
+				"SideCarryLoop%02d" % index)
+	_box(Vector3(0.050, 0.150, 0.014), Vector3(-0.231, 0.054, 0.072),
+			Vector3.ZERO, leather, "SideCarryReinforcement")
+	for stitch_y in [0.010, 0.052, 0.094]:
+		_stitch_line(Vector3(-0.238, stitch_y, 0.080),
+				Vector3(-0.218, stitch_y, 0.080), 2, thread,
+				"SideCarryStitch")
+
 	# The shoulder strap is sewn around the lower canvas roll, not pinned to an
 	# arbitrary point on the face. Reinforced ears visibly travel behind the bag,
 	# curl under its bottom edge and finish in load-bearing brass rings.

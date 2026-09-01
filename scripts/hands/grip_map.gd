@@ -135,9 +135,10 @@ const ENTRIES := {
 		# The bag owns its shoulder-to-lap camera arc.  The hand follows this
 		# authored handle and must not be remapped through the boat interpolation.
 		"camera_space": true,
-		# Left hand takes the left third of the real aged-leather arch. Its forearm can then
-		# descend outside the bag instead of lying diagonally over slot one.
-		"pos": Vector3(-0.075, 0.252, 0.081),
+		# Reference carry: the left fist takes the short SIDE loop, not the arch on
+		# top.  Keeping the palm beyond the canvas edge lets the forearm rise beside
+		# the bag instead of laying diagonally over quick-access slot one.
+		"pos": Vector3(-0.305, 0.052, 0.084),
 		"fingers": Vector3(0.0, -1.0, 0.0),
 		"palm": Vector3(0.0, 0.0, -1.0),
 	},
