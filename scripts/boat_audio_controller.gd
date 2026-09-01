@@ -1,8 +1,10 @@
 class_name BoatAudioController
 extends RefCounted
-## Owns incidental sounds made by the boat's moving structure.
-## Engine playback stays on the boat because it is part of propulsion state;
-## this controller handles doors, hull working and the helm mechanism.
+## Owns sounds made by the boat. Propulsion state stays on the rigid body;
+## playback, buses and mix state live here.
+
+const BoatAudio := preload("res://scripts/boat_audio_factory.gd")
+const AudioMix := preload("res://scripts/audio_mix.gd")
 
 var _host: Node3D
 var _door_players: Array[AudioStreamPlayer3D] = []
@@ -18,6 +20,14 @@ var _heel_ready := false
 var _helm_player: AudioStreamPlayer3D
 var _prev_wheel_z := 0.0
 var _wheel_ready := false
+var _starter: AudioStreamPlayer3D
+var _engine: AudioStreamPlayer3D
+var _engine_load: AudioStreamPlayer3D
+var _engine_reverse: AudioStreamPlayer3D
+var _engine_strain: AudioStreamPlayer3D
+var _ignition: AudioStreamPlayer3D
+var _engine_low_pass: AudioEffectLowPassFilter
+var _engine_open := 1.0
 
 
 func setup(host: Node3D) -> void:
@@ -25,6 +35,62 @@ func setup(host: Node3D) -> void:
 	_build_door_players()
 	_build_hull_creak()
 	_build_helm_player()
+	_build_engine_players()
+
+
+func begin_engine_crank() -> void:
+	play_ignition()
+	if _starter != null:
+		_starter.play()
+	if _engine != null:
+		_engine.stop()
+
+
+func stop_engine() -> void:
+	play_ignition()
+	if _starter != null:
+		_starter.stop()
+
+
+func engine_caught() -> void:
+	if _starter != null:
+		_starter.stop()
+	if _engine != null and not _engine.playing:
+		_engine.play()
+
+
+func play_ignition() -> void:
+	if _ignition != null:
+		_ignition.play()
+
+
+func tick_engine(delta: float, running: bool, rpm: float, throttle: float,
+		speed_ahead: float, aground: bool, openness: float) -> void:
+	if _engine == null:
+		return
+	_engine_open = lerpf(_engine_open, openness, 1.0 - exp(-6.5 * delta))
+	if _engine_low_pass != null:
+		_engine_low_pass.cutoff_hz = lerpf(720.0, 1900.0, _engine_open)
+	if running:
+		if not _engine.playing:
+			_engine.play()
+		var load := clampf(absf(rpm), 0.0, 1.0)
+		var astern := smoothstep(0.02, 0.38, maxf(-rpm, 0.0))
+		_engine.pitch_scale = lerpf(_engine.pitch_scale,
+				lerpf(0.76 + load * 0.40, 0.72 + load * 0.26, astern),
+				1.0 - exp(-2.4 * delta))
+		var volume := lerpf(-15.0, -12.5, _engine_open) \
+				+ load * lerpf(4.0, 5.0, _engine_open)
+		_engine.volume_db = lerpf(_engine.volume_db, minf(volume, -7.5),
+				1.0 - exp(-2.2 * delta))
+		_tick_engine_layers(delta, load, astern, throttle, speed_ahead, aground)
+	elif _engine.playing:
+		_tick_engine_layers(delta, 0.0, 0.0, throttle, speed_ahead, aground)
+		_engine.volume_db = lerpf(_engine.volume_db, -52.0, 1.0 - exp(-5.0 * delta))
+		if _engine.volume_db < -44.0:
+			_engine.stop()
+			_engine.volume_db = -16.0
+			_engine.pitch_scale = 0.78
 
 
 func play_hinge(where: Vector3) -> void:
@@ -150,6 +216,99 @@ func _build_helm_player() -> void:
 	_helm_player.max_distance = 7.0
 	_helm_player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
 	_host.add_child(_helm_player)
+
+
+func _build_engine_players() -> void:
+	AudioMix.ensure_master_headroom()
+	_ensure_engine_bus()
+	_starter = _new_player("Starter", Vector3(0.0, 0.42, 3.70),
+			BoatAudio.starter(), "Engine", 2.4, 14.0, -8.0)
+	var motor_recording: AudioStreamMP3 = load("res://assets/audio/motor.mp3")
+	if motor_recording != null:
+		motor_recording.loop = true
+	_engine = _new_player("Diesel", Vector3(-1.05, 1.10, 2.16),
+			motor_recording if motor_recording != null else BoatAudio.diesel_idle(),
+			"Engine", 2.8, 26.0, -16.0)
+	_engine.pitch_scale = 0.78
+	_engine_load = _engine_layer("EngineLoad", BoatAudio.diesel_load())
+	_engine_reverse = _engine_layer("EngineAstern", BoatAudio.reverse_gear())
+	_engine_strain = _engine_layer("EngineStrain", BoatAudio.diesel_strain())
+	var ignition_recording: AudioStream = load("res://assets/audio/ignition.mp3")
+	_ignition = _new_player("Ignition", Vector3(0.50, 3.62, 0.06),
+			ignition_recording if ignition_recording != null else BoatAudio.ignition_click(),
+			"Master", 1.6, 8.0, -4.0)
+
+
+func _new_player(player_name: String, player_position: Vector3, stream: AudioStream,
+		bus: StringName, unit_size: float, max_distance: float,
+		volume_db: float) -> AudioStreamPlayer3D:
+	var player := AudioStreamPlayer3D.new()
+	player.name = player_name
+	player.position = player_position
+	player.stream = stream
+	player.bus = bus
+	player.unit_size = unit_size
+	player.max_distance = max_distance
+	player.max_db = 0.0
+	player.volume_db = volume_db
+	player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	_host.add_child(player)
+	return player
+
+
+func _engine_layer(layer_name: String, stream: AudioStream) -> AudioStreamPlayer3D:
+	var player := _new_player(layer_name, Vector3(-1.05, 1.10, 2.16), stream,
+			"Engine", 2.8, 26.0, -60.0)
+	player.play()
+	return player
+
+
+func _ensure_engine_bus() -> void:
+	var bus_index := AudioServer.get_bus_index("Engine")
+	if bus_index < 0:
+		AudioServer.add_bus()
+		bus_index = AudioServer.bus_count - 1
+		AudioServer.set_bus_name(bus_index, "Engine")
+		AudioServer.set_bus_send(bus_index, "Master")
+	if AudioServer.get_bus_effect_count(bus_index) == 0:
+		_engine_low_pass = AudioEffectLowPassFilter.new()
+		_engine_low_pass.cutoff_hz = 900.0
+		_engine_low_pass.resonance = 0.28
+		AudioServer.add_bus_effect(bus_index, _engine_low_pass)
+	else:
+		_engine_low_pass = AudioServer.get_bus_effect(bus_index, 0) as AudioEffectLowPassFilter
+
+
+func _tick_engine_layers(delta: float, load: float, astern: float,
+		throttle: float, speed_ahead: float, aground: bool) -> void:
+	var expected_speed := load * 8.0
+	var prop_slip := clampf((expected_speed - absf(speed_ahead)) \
+			/ maxf(expected_speed, 1.0), 0.0, 1.0) * load
+	var command_lag := maxf(absf(throttle) - load, 0.0)
+	var strain := maxf(command_lag * 0.85, prop_slip * 0.72)
+	if aground and absf(throttle) > 0.10:
+		strain = maxf(strain, 0.92)
+	_set_engine_layer(_engine_load,
+			linear_to_db(maxf(pow(load, 0.78) * 0.34, 0.001)),
+			lerpf(0.88, 1.10, load), delta, 3.4)
+	_set_engine_layer(_engine_reverse,
+			linear_to_db(maxf(astern * 0.24, 0.001)),
+			lerpf(0.82, 1.02, astern), delta, 4.2)
+	_set_engine_layer(_engine_strain,
+			linear_to_db(maxf(strain * 0.25, 0.001)),
+			lerpf(0.86, 1.02, load), delta, 5.0)
+
+
+func _set_engine_layer(player: AudioStreamPlayer3D, target_db: float,
+		target_pitch: float, delta: float, response: float) -> void:
+	if player == null:
+		return
+	if not player.playing:
+		player.play()
+	var response_weight := 1.0 - exp(-response * delta)
+	player.volume_db = lerpf(player.volume_db, clampf(target_db, -60.0, -8.5),
+			response_weight)
+	player.pitch_scale = lerpf(player.pitch_scale, target_pitch, response_weight)
 
 
 func _pick_creak(pool: Array[AudioStream]) -> AudioStream:

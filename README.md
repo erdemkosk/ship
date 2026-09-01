@@ -1,6 +1,6 @@
 # Karanlık Deniz
 
-Godot 4.6 ile yapılmış, ayarlanabilir hava durumlu, sandal sürülebilen gerçekçi 3D deniz sahnesi.
+Godot 4.7 ile yapılmış, ayarlanabilir hava durumlu, sandal sürülebilen gerçekçi 3D deniz sahnesi.
 
 ## Çalıştırma
 
@@ -655,6 +655,170 @@ boyundan büyük; yoksa tavan çözümü zemin çözümüyle kavga ediyor ve gö
 çatının üstüne çıkıyor.
 
 ## Teknik
+
+### Kod yapısı
+
+- `scripts/main.gd` yalnızca sahne bileşimini, giriş aksiyonlarını, başlangıç
+  yerleşimini ve menü geçişini yönetir.
+- Varsayılan klavye/fare sözleşmesi `scripts/input_actions.gd`, sahne
+  sistemlerinin bağlanması ve dünya başlangıcı `scripts/world_setup.gd`
+  tarafından yönetilir.
+- Teknenin bütün ses kaynakları ve motor miksajı
+  `scripts/boat_audio_controller.gd` içindedir; `boat.gd` yalnızca motorun
+  fiziksel durumunu ve devir değerini üretir.
+- Kontak geçişi, marş süresi, ileri/geri spool eğrileri; telgraf kolu, kontak
+  anahtarı/LED'i, şaft, motor pivotu, dümen simidi ve pervane köpüğü
+  `scripts/boat_engine_controller.gd` tarafından yürütülür. Motorun mekânsal
+  ses miksajı yine ayrı `boat_audio_controller.gd` bileşeninde kalır.
+- Prob başına kaldırma kuvveti, gövde altındaki ortalama dalga düzlemi, swell
+  heave geçmişi ve gövde çarpması `scripts/boat_buoyancy_controller.gd`
+  içindedir. Deniz tabanı teması, Coulomb sürtünmesi ve tekneyi eğim aşağı
+  kurtaran kuvvetler ise `scripts/boat_grounding_controller.gd` tarafından
+  bağımsız yürütülür.
+- Dalga yüzeyine hizalanma, yalpa/pitch/yaw sönümü, akıntı ve orbital su
+  hızına göre gövde sürüklemesi, leeway, rüzgâr, pervane itkisi ve tersine
+  çevrilebilir dümen akışı `scripts/boat_hydrodynamics_controller.gd` içinde
+  toplanır. `boat.gd` fizik karesi yalnızca bu üç deniz bileşenini sıralar.
+- Yağmur siper hacimleri, off-screen cam damlası alanı, silecek hareketi ve
+  gövde ıslaklığı `scripts/boat_weather_effects.gd` tarafından yönetilir.
+- Besleme sarkması/blackout titreşimi ile kamara, dümen evi, harita, flood,
+  çift çakışlı mast beacon'ı ve seyir fenerlerinin enerji/emissive çıktıları
+  `scripts/boat_lighting_controller.gd` tarafından birlikte sürülür.
+- Pusula, parakete, iskandil, zincir göstergeleri ve motor telgraf çubuğunun
+  çalışma mantığı `scripts/boat_console_instruments.gd` içindedir; konsolun
+  fiziksel meshlerini kuran kod bu durum mantığından bağımsız kalır. Analog
+  kadran, ibre, etiket ve pusula meshleri
+  `scripts/boat_console_visual_builder.gd` tarafından açık bir runtime referans
+  sözleşmesiyle üretilir.
+- Konsolun flood/wiper anahtarları, gaz kolu, şaft güç segmentleri, talep
+  ibresi, kontak anahtarı ve kontak LED'i
+  `scripts/boat_helm_controls_visual_builder.gd` tarafından kurulur; motor
+  controller'a gereken hareketli referanslar sözlük sözleşmesiyle döner.
+- Fiziksel harita kâğıdı/shader'ı, konum pini, seyir araçları ve kapüşonlu
+  harita lambası `scripts/boat_chart_table_visual_builder.gd`; dümen kolonu,
+  çemberi, altı kolu ve göbeği `scripts/boat_helm_visual_builder.gd` içinde
+  kurulur. Wheelhouse builder bu mobilyaları callback olarak kompoze eder.
+- Silah/tekne engel kesişimi, kapı açıklığına bağlı dış hava sesi, akustik oda
+  sınıflandırması ve kabin ısı dağılımı `scripts/boat_interior_environment.gd`
+  içindeki saf mekânsal modelden hesaplanır.
+- Elektrikli sobanın ısınma/soğuma eğrisi ile ışık, kor, sıcak hava parçacığı ve
+  çalışma sesi `scripts/boat_stove_controller.gd` tarafından sürülür.
+- Kapı kolunun oyuncuya bakan yüzü ile hareketli sigorta kapağı, kartuş,
+  anahtar, soba ve motor kapağı hedefleri
+  `scripts/boat_interaction_locator.gd` tarafından o anki node dönüşümlerinden
+  çözülür; etkileşim kataloğu sabit koordinat kopyalamaz.
+- Kapıların, sigorta kapağının ve dalış dolabının yumuşak geçişleri; kapalı
+  kapıların yürüme blocker'ları, açık sigorta kapağının nişan blocker'ı ve
+  giyilen maske/tüp görünürlüğü `scripts/boat_access_controller.gd` içinde
+  birlikte yönetilir.
+- Dalış dolabı, hareketli dolap kapağı, tüp, maske ile sobanın sıcak hava ve
+  3B ses node'larını `scripts/boat_interior_visual_builder.gd` üretir. Builder
+  runtime tarafından ihtiyaç duyulan node referanslarını açık bir sözlük
+  sözleşmesiyle `boat.gd`'ye geri verir.
+- Alt deckhouse kabuğu, kabin mobilyaları, soba gövdesi/ışıkları, cam malzemesi
+  ve iki weathertight kapı `scripts/boat_cabin_visual_builder.gd` tarafından
+  kurulur. Sonraki wheelhouse üretiminin paylaştığı gasket, batten ve plate
+  malzemeleri de builder sözleşmesinden döner.
+- Camlı wheelhouse kabuğu, silecekli ön cam malzemesi, balkon kapağı ve dümen
+  evi lambası `scripts/boat_wheelhouse_visual_builder.gd` içindedir. Builder
+  chart, elektronik, switchboard, helm ve konsol alt-builder'larını aynı
+  kompozisyon sırasıyla çağırır.
+- Güverte merdiveni, koçboynuzları, fairlead'ler, halatlar, bobinler,
+  usturmaçalar, can simidi ve boathook
+  `scripts/boat_deck_visual_builder.gd` altında tek bir `DeckVisuals` hiyerarşisi
+  olarak üretilir; bunların prosedürel mesh kodu artık tekne fiziğiyle aynı
+  dosyada değildir.
+- Ana gövde kursları, kama biçimli baş, güverte plakaları, küpeşte ve ayna
+  kompozisyonu `scripts/boat_hull_visual_builder.gd` içindedir. Builder mevcut
+  mesh batcher callback'lerini kullandığı için ayrıştırma draw-call düzenini
+  değiştirmez.
+- Mast, seren, arma telleri/halatları, üç seyir feneri, foredeck ve deckhouse
+  emniyet korkulukları `scripts/boat_mast_visual_builder.gd` içinde kurulur;
+  beacon ışığı ve emissive malzemesi runtime güncellemesi için geri verilir.
+- On basamaklı companionway, eğimli motor kapağı ve iki ileri projektör
+  `scripts/boat_companionway_visual_builder.gd` tarafından oluşturulur;
+  hareketli kapak, spot ışıkları ve lens/ışın malzemeleri runtime sözleşmesidir.
+- Hareketli radar ve iskandil taşıyıcıları, ekran meshleri, VHF ahizesi ve
+  uzayan spiral kablo `scripts/boat_electronics_visual_builder.gd` tarafından
+  üretilir. Builder, statik parçalar için teknenin mesh batching callback'lerini
+  kullanır ve runtime'da hareket eden referansları tek sözlük sözleşmesiyle
+  `boat.gd`'ye döndürür.
+- Aynı cihazların radar tarama hızı, taşıyıcı/pivot interpolasyonu, erişim
+  mesafesinde otomatik bırakılması ve radar/VHF ses geçişleri
+  `scripts/boat_electronics_controller.gd` içinde yürütülür; `_process()` bu
+  bileşene yalnızca güncel güç ve oyuncu etkileşim durumunu aktarır.
+- VHF ahizesinin birinci şahıs pozuna yerleşmesi, sabit kablo boyunda gerilip
+  elden çıkması, cradle'a dönüşü ve spiral kablo segmentleri
+  `scripts/boat_radio_handset_controller.gd` tarafından yürütülür. Bu fiziksel
+  el/kablo davranışı artık teknenin genel runtime döngüsüne gömülü değildir.
+- Eski tesisatın hava ve düşey darbeye bağlı besleme çökmesi, rastlantısal
+  blackout süresi, iskandilin 64 örnekli geçmişi ve radar/haritanın ortak
+  konum-başlık shader verisi `scripts/boat_navigation_display_controller.gd`
+  tarafından güncellenir.
+- Konsoldaki flood/wiper anahtarlarıyla switchboard içindeki evre anahtarları,
+  sigorta kartuşları, gösterge LED'leri ve hareketli kapak
+  `scripts/boat_switchboard_visual_builder.gd` tarafından tek parça ailesi
+  olarak üretilir. Böylece iki panel aynı toggle geometrisini paylaşır ve
+  `boat.gd` yalnızca oluşan runtime sözlüklerini tüketir.
+- Anahtarların yaylı geçişi, canlı devre LED'lerinin blackout/supply parlaklığı,
+  soba mandalı, çıkarılan sigorta kartuşunun fiziksel hareketi ve ırgat güç
+  yönlendirmesi `scripts/boat_switchboard_controller.gd` içindedir.
+- Çapa zincirinin pile/feed görsel durumu `scripts/boat_chain_visual.gd`, sigorta
+  kartuşlarının saf durum ve topoloji sözleşmesi `scripts/boat_electrical_model.gd`
+  tarafından yönetilir.
+- Irgat tamburunun zincir hızına göre dönüşü ve dışarıdaki zincire bağlı locker
+  doluluk oranı `scripts/boat_windlass_controller.gd` tarafından hesaplanıp
+  zincir görseline aktarılır.
+- Ana şalter plakası, baş makarası, zincir loçası ve hareketli ırgat geometrisi
+  `scripts/boat_anchor_visual_builder.gd` içinde kurulur; animasyon için gereken
+  ırgat ve zincir bileşeni referansları açık sözlükle tekneye döner.
+- Kamera ekran efektlerinde kabin sıcaklığı `scripts/camera_warmth_effect.gd`,
+  waterline geçişi, sualtı renk geçişi ve ortam parçacıkları
+  `scripts/camera_underwater_effect.gd` tarafından yönetilir. İkisi mevcut
+  CanvasLayer'a bağlanarak sualtı → sıcaklık → fiziksel maske çizim sırasını
+  korur.
+- Maske buğusu, dış cam damlaları, regülatör nefes döngüsü ve dalgıcın kişisel
+  baloncukları `scripts/camera_mask_effect.gd` içindedir. `boat_camera.gd`, eski
+  probe senaryolarının `_fog/_wipe/_drops` erişimini property façade üzerinden
+  korur.
+- Birinci şahıs göz kırpma zamanlaması ve shader yaşam döngüsü
+  `scripts/camera_blink_effect.gd` içindedir; kamera yalnızca aktif görüş modunu
+  bileşene bildirir.
+- FPS crosshair hedeflemesinde sway toleransı, mevcut hedef hysteresis'i,
+  kapalı locker/fuse-well filtreleri, görüş engeli ve el erişim sözleşmesi
+  `scripts/camera_interaction_selector.gd` içinde değerlendirilir.
+- Çanta/eşya, yüzme/merdiven, kontrol istasyonu, maske, radyo, kapı, anahtar,
+  sigorta ve kontak durumlarının prompt önceliği ile kullanıcı metinleri
+  `scripts/camera_prompt_presenter.gd` içinde tek yerde üretilir.
+- FPS istasyon ayak kilidi ile tekne-yerel yürüme, yüzme ve merdiven girdisi
+  `scripts/camera_fps_locomotion.gd` üzerinden yürütülür. Kamera yalnızca bakış
+  eksenlerini ve arayüzün girdi engelleme durumunu bu bileşene aktarır.
+- Tekne-yerel göz yüksekliği yumuşatma, adım salınımı, uzanma sırasında beden
+  eğimi ve düşey ivmeye karşı diz süspansiyonu `scripts/camera_eye_motion.gd`
+  içinde stateful olarak tutulur.
+- Güverte çantasının yuva konumları ve özel ekipman indeksleri
+  `scripts/deck_bag_layout.gd` içindeki tek kaynaktan okunur. Çantanın prosedürel
+  mesh, kayış ve ekipman görsellerini `scripts/deck_bag_visual_builder.gd`
+  kurar; `scripts/deck_bag.gd` envanter ve eldeki ekipmanın çalışma durumunu
+  yönetir.
+- Çantanın açık/kapalı odağı, seçili yuvası ve iki sıralı seçim hareketi
+  `scripts/deck_bag_interaction_state.gd` içinde tutulur. Kamera, eski probe
+  property'lerini façade olarak koruyup yalnızca el/kamera orkestrasyonunu yapar.
+- Taşınan tüfeğin namlu güvenlik hacmini tekne joinery sözleşmesine ve fizik
+  dünyasına karşı süpürüp silahı tek parça geri çeken çözüm
+  `scripts/deck_bag_rifle_obstruction.gd` içindedir.
+- Tüfek reload zaman çizelgesindeki bolt, fişek, pinch-grip ve normal tutuş
+  geçişleri `scripts/deck_bag_rifle_reload_controller.gd` tarafından yönetilir;
+  çanta yalnızca canlı silah ve el hedeflerini bu denetleyiciye aktarır.
+- Komut satırı probe'ları, ekran görüntüsü senaryoları ve etkileşim kontrat
+  testleri `scripts/testing/verification_harness.gd` içinde tutulur. Harness
+  normal oyuncu başlangıcında oluşturulmaz; yalnızca kullanıcı argümanı olan
+  doğrulama çalıştırmalarında sahneye eklenir.
+- Oyun sistemlerinin test kancaları runtime başlangıç akışına eklenmemelidir;
+  yeni doğrulama bayrakları verification harness üzerinden yönlendirilmelidir.
+
+Windows'ta parser ve temel smoke testlerini tek komutla çalıştırmak için Godot
+console executable yolunu `GODOT_BIN` olarak verip `tools/verify.ps1` çalıştırılır.
 
 ### Dalgalar — FFT
 
