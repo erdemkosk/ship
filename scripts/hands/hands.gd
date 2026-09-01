@@ -62,6 +62,10 @@ var _gesture: Dictionary = {"L": null, "R": null}
 ## middle of the view, which reads as an arm stuck to the door it just opened.
 var _rest_t := {"L": 1.0, "R": 1.0}
 var _last_grip := {"L": Vector3.ZERO, "R": Vector3.ZERO}
+## Semantic K/P/F continuity at release. Position-only withdrawal made a hand
+## leave the rifle smoothly while its wrist snapped straight to the idle basis.
+var _last_axes := {"L": {}, "R": {}}
+var _last_pose := {"L": "open", "R": "open"}
 ## The chosen side is sticky per fitting. A competing arm must beat it by a
 ## meaningful quality margin, not by one noisy millimetre on a rolling boat.
 var _selection_side := {}
@@ -105,6 +109,7 @@ var _gait := 0.0
 var _bag_hand_target: Node3D
 var _bag_hand_mode := ""
 var _bag_hand_report := {}
+var _rifle_support_target: Node3D
 
 
 func debug_frames(n: int) -> void:
@@ -131,6 +136,8 @@ func set_active(on: bool) -> void:
 	if not _active:
 		_bag_hand_target = null
 		_bag_hand_mode = ""
+		_rifle_support_target = null
+		_restore_held_render_space("bag_rifle")
 		_watch_driver.force_lower()
 		for side: String in ["L", "R"]:
 			_unlock_held(str(_claim.get(side, "")))
@@ -263,6 +270,8 @@ func set_bag_hand(target: Node3D, mode := "") -> void:
 	## stale world-space point would visibly swim when the vessel rolls.
 	if target == null or mode != "knife":
 		_restore_held_render_space("bag_knife")
+	if mode != "rifle":
+		_clear_rifle_hands()
 	_bag_hand_target = target
 	_bag_hand_mode = mode if target != null else ""
 	if target != null and mode == "knife":
@@ -276,6 +285,53 @@ func set_bag_hand(target: Node3D, mode := "") -> void:
 			rig.set_contact_target("R", null)
 	if target != null and _claim.get("R", "") != "":
 		_release("R")
+
+
+func set_rifle_hands(primary: Node3D, support: Node3D) -> void:
+	if primary == null:
+		_clear_rifle_hands()
+		return
+	_restore_held_render_space("bag_knife")
+	_bag_hand_target = primary
+	_bag_hand_mode = "rifle"
+	var released_support := _rifle_support_target != null and support == null
+	_rifle_support_target = support
+	# A long gun is not a knife/viewmodel welded to one wrist. The weapon owns
+	# its shoulder/ADS transform; both arms independently solve to its stock.
+	# Reparenting it to the trigger wrist lets every IK correction rotate the
+	# sights, exactly the instability the player reported.
+	_restore_held_render_space("bag_rifle")
+	if rig != null:
+		rig.clear_held_attachment("R")
+		if released_support and _claim.get("L", "") == "":
+			rig.set_contact_frozen("L", false)
+			rig.set_grip_locked("L", false)
+			rig.set_reach_bias("L", 0.0)
+			rig.set_contact_target("L", null)
+	if _claim.get("R", "") != "":
+		_release("R")
+
+
+func _clear_rifle_hands() -> void:
+	if _bag_hand_mode != "rifle" and _rifle_support_target == null:
+		return
+	_restore_held_render_space("bag_rifle")
+	_rifle_support_target = null
+	if _bag_hand_mode == "rifle":
+		_bag_hand_target = null
+		_bag_hand_mode = ""
+	if rig != null:
+		rig.clear_held_attachment("R")
+		rig.set_contact_frozen("R", false)
+		rig.set_contact_frozen("L", false)
+		rig.set_grip_locked("R", false)
+		rig.set_grip_locked("L", false)
+		rig.set_reach_bias("R", 0.0)
+		rig.set_reach_bias("L", 0.0)
+		if _claim.get("R", "") == "":
+			rig.set_contact_target("R", null)
+		if _claim.get("L", "") == "":
+			rig.set_contact_target("L", null)
 
 
 func plan_world_grasp(contact: Vector3, fingers := Vector3.ZERO,
@@ -442,6 +498,8 @@ func update(delta: float, p_boat: Node3D, engaged: String, walking: float,
 			rig.set_contact_target("L", null)
 			_last_grip["L"] = _watch_driver.drive(_cam, rig)
 			_rest_t["L"] = 0.0
+		elif side == "L" and _rifle_support_target != null:
+			_drive_rifle_support()
 		elif side == "R" and _bag_hand_target != null:
 			_drive_bag_hand(delta)
 		else:
@@ -492,6 +550,8 @@ func _drop_instruments() -> void:
 ## on their own. Hard ones (radio, a held watch) cannot — the other hand goes.
 func _locked(side: String) -> bool:
 	if side == "L" and _watch_up():
+		return true
+	if side == "L" and _rifle_support_target != null:
 		return true
 	if side == "R" and _bag_hand_target != null:
 		return true
@@ -764,6 +824,9 @@ func _drive_bag_hand(_delta: float) -> void:
 	if _bag_hand_target == null or not is_instance_valid(_bag_hand_target):
 		_bag_hand_target = null
 		_bag_hand_mode = ""
+		rig.set_contact_frozen("R", false)
+		rig.set_grip_locked("R", false)
+		rig.set_reach_bias("R", 0.0)
 		_rest_hand("R")
 		return
 	var object_point := _bag_hand_target.global_position
@@ -824,18 +887,172 @@ func _drive_bag_hand(_delta: float) -> void:
 			rig.set_held_attachment("R", held_device, held_grip)
 		else:
 			rig.clear_held_attachment("R")
+	elif _bag_hand_mode == "rifle":
+		pose = str(_bag_hand_target.get_meta("hand_pose", "rifle_primary"))
+		var rifle_device := _bag_hand_target.get_meta("held_device") as Node3D \
+				if _bag_hand_target.has_meta("held_device") else null
+		var weapon_pin_requested := bool(_bag_hand_target.get_meta(
+				"weapon_space_pinned", false)) and rifle_device != null
+		# Once shouldered, bypass the intermediary target node completely. The
+		# semantic palm frame is reconstructed from the rifle's current transform
+		# and authored grip in this very update, eliminating any one-frame camera,
+		# recoil or process-order drift.
+		var primary_world := _bag_hand_target.global_transform
+		if weapon_pin_requested:
+			var primary_local: Transform3D = _bag_hand_target.get_meta(
+					"held_grip_transform", Transform3D.IDENTITY) as Transform3D
+			primary_world = rifle_device.global_transform * primary_local
+			contact = primary_world.origin
+			axes = {
+				"fingers": primary_world.basis.z.normalized(),
+				"palm": primary_world.basis.y.normalized(),
+			}
+		else:
+			axes = {
+				"fingers": _bag_hand_target.global_basis.z.normalized(),
+				"palm": _bag_hand_target.global_basis.y.normalized(),
+			}
+		# A moving bolt supplies position, never an arbitrary wrist rotation. Blend
+		# toward the arm solver's shoulder/contact frame on approach, stay fully
+		# anatomical while cycling, then blend back into the trigger grip. This
+		# makes a 180-degree wrist roll impossible by construction.
+		var natural_blend := float(_bag_hand_target.get_meta(
+				"natural_grip_blend", 0.0))
+		if natural_blend > 0.001:
+			# First derive the outward direction at the metal, move the palm centre
+			# clear of it, then solve the wrist axes at that final palm position.
+			# Solving the axes before the offset introduced a small but visible bend.
+			var metal_natural: Dictionary = rig.natural_axes("R", contact)
+			var metal_f := metal_natural["fingers"] as Vector3
+			var metal_p := metal_natural["palm"] as Vector3
+			var metal_k := metal_p.cross(metal_f).normalized()
+			contact -= metal_p * float(_bag_hand_target.get_meta(
+					"palm_clearance", 0.0))
+			contact -= metal_f * float(_bag_hand_target.get_meta(
+					"control_forward_reach", 0.0))
+			contact += metal_k * float(_bag_hand_target.get_meta(
+					"control_index_bias", 0.0))
+			var natural: Dictionary = rig.natural_axes("R", contact)
+			var authored_f := axes["fingers"] as Vector3
+			var authored_p := axes["palm"] as Vector3
+			var natural_f := natural["fingers"] as Vector3
+			var natural_p := natural["palm"] as Vector3
+			var blended_f := authored_f.slerp(natural_f,
+					smoothstep(0.0, 1.0, natural_blend)).normalized()
+			var blended_p := authored_p.slerp(natural_p,
+					smoothstep(0.0, 1.0, natural_blend))
+			blended_p -= blended_p.project(blended_f)
+			if blended_p.length_squared() > 0.001:
+				axes = {"fingers": blended_f, "palm": blended_p.normalized()}
+		var primary_palm: Transform3D = rig.solved_palm_global("R")
+		var primary_lock_ready: bool = bool(rig.grip_locked("R")) \
+				or primary_palm.origin.distance_to(primary_world.origin) < 0.005
+		rig.set_grip_locked("R", weapon_pin_requested and primary_lock_ready)
+		rig.set_reach_bias("R", 0.030 if weapon_pin_requested else 0.0)
+		if rifle_device != null and _bag_hand_target.has_meta("contact_bounds"):
+			rig.set_contact_target_bounds("R", rifle_device,
+					_bag_hand_target.get_meta("contact_bounds") as AABB, 0.006)
+			if pose == "bolt_grip":
+				rig.seed_contact_closure("R", 0.94)
+			var primary_report: Dictionary = rig.finger_contact_report("R")
+			var primary_seated := int(primary_report.get("touches", 0)) >= 6 \
+					and int(primary_report.get("penetrations", 1)) == 0
+			rig.set_contact_frozen("R", bool(_bag_hand_target.get_meta(
+					"ads_locked", false)) and primary_seated)
+			if bool(_bag_hand_target.get_meta("hand_attachment", false)):
+				var reload_grip: Transform3D = _bag_hand_target.get_meta(
+						"held_grip_transform", Transform3D.IDENTITY) as Transform3D
+				if _bag_hand_target.has_meta("held_device_target"):
+					# Small reload objects own their task-space orientation (the
+					# cartridge must follow the chamber axis), while the arm solver owns
+					# the wrist. Derive the device-local grip that makes both constraints
+					# true instead of rotating the forearm to imitate the cartridge.
+					var desired_device: Transform3D = _bag_hand_target.get_meta(
+							"held_device_target") as Transform3D
+					var grip_f := (axes["fingers"] as Vector3).normalized()
+					var grip_p := axes["palm"] as Vector3
+					grip_p = (grip_p - grip_p.project(grip_f)).normalized()
+					var desired_palm := Transform3D(Basis(
+							grip_p.cross(grip_f).normalized(), grip_p, grip_f),
+							contact)
+					reload_grip = desired_device.affine_inverse() * desired_palm
+					_bag_hand_target.set_meta("held_grip_transform", reload_grip)
+				# During the cartridge stage only, the tiny round is seated from the
+				# final solved pinch exactly like the knife. The rifle itself is never
+				# wrist-owned; the left hand and camera keep control of the long gun.
+				rig.set_held_attachment("R", rifle_device, reload_grip)
+			else:
+				rig.clear_held_attachment("R")
+		else:
+			rig.set_contact_frozen("R", false)
+			rig.set_contact_target("R", null)
+			rig.clear_held_attachment("R")
 	else:
 		# The item origin is authored at its grip zone.  A natural frame keeps the
 		# wrist straight across all four different silhouettes; the power pose
 		# supplies the actual cylindrical wrap.
 		rig.set_contact_target("R", null)
+		rig.set_grip_locked("R", false)
 		rig.clear_held_attachment("R")
 		axes = rig.natural_axes("R", contact)
 	_last_grip["R"] = contact
+	_last_axes["R"] = axes.duplicate()
+	_last_pose["R"] = pose
 	_rest_t["R"] = 0.0
+	if _bag_hand_mode == "rifle":
+		rig.set_elbow_hint("R", 0.25, 0.19)
 	_bag_hand_report = rig.consider("R", contact, axes["fingers"], axes["palm"])
 	rig.grip("R", contact, axes["fingers"], axes["palm"], 1.0, pose,
 			pose_amount, false)
+
+
+func _drive_rifle_support() -> void:
+	if _rifle_support_target == null or not is_instance_valid(_rifle_support_target):
+		_rifle_support_target = null
+		rig.set_contact_frozen("L", false)
+		rig.set_grip_locked("L", false)
+		rig.set_reach_bias("L", 0.0)
+		return
+	var device := _rifle_support_target.get_meta("held_device") as Node3D \
+			if _rifle_support_target.has_meta("held_device") else null
+	var weapon_pin_requested := bool(_rifle_support_target.get_meta(
+			"weapon_space_pinned", false)) and device != null
+	var support_world := _rifle_support_target.global_transform
+	if weapon_pin_requested:
+		var support_local: Transform3D = _rifle_support_target.get_meta(
+				"held_grip_transform", Transform3D.IDENTITY) as Transform3D
+		support_world = device.global_transform * support_local
+	var contact := support_world.origin
+	var axes := {
+		"fingers": support_world.basis.z.normalized(),
+		"palm": support_world.basis.y.normalized(),
+	}
+	var support_palm: Transform3D = rig.solved_palm_global("L")
+	var support_lock_ready: bool = bool(rig.grip_locked("L")) \
+			or support_palm.origin.distance_to(support_world.origin) < 0.005
+	rig.set_grip_locked("L", weapon_pin_requested and support_lock_ready)
+	rig.set_reach_bias("L", 0.110 if weapon_pin_requested else 0.0)
+	if device != null and _rifle_support_target.has_meta("contact_bounds"):
+		rig.set_contact_target_bounds("L", device,
+				# A wrapped fore-end bears through finger pads, not mathematical
+				# points; 12 mm matches the WRAD mesh's fleshy fingertip radius.
+				_rifle_support_target.get_meta("contact_bounds") as AABB, 0.012)
+		var support_report: Dictionary = rig.finger_contact_report("L")
+		var support_seated := int(support_report.get("touches", 0)) >= 2 \
+				and int(support_report.get("penetrations", 1)) == 0
+		rig.set_contact_frozen("L", bool(_rifle_support_target.get_meta(
+				"ads_locked", false)) and support_seated)
+	else:
+		rig.set_contact_frozen("L", false)
+		rig.set_contact_target("L", null)
+	rig.clear_held_attachment("L")
+	_last_grip["L"] = contact
+	_last_axes["L"] = axes.duplicate()
+	_last_pose["L"] = "rifle_support"
+	_rest_t["L"] = 0.0
+	rig.set_elbow_hint("L", 0.25, 0.15)
+	rig.grip("L", contact, axes["fingers"], axes["palm"], 1.0,
+			"rifle_support", 1.0, false)
 
 
 func _drive(side: String, delta: float) -> void:
@@ -920,6 +1137,16 @@ func _drive(side: String, delta: float) -> void:
 				or bool(g.get_meta("natural", false)):
 			fingers = ev["fingers"]
 			palm = ev["palm"]
+	_last_axes[side] = {"fingers": fingers, "palm": palm}
+	_last_pose[side] = pose
+	# The bag hangs from the hand, so its elbow stays tucked toward the ribs and
+	# visibly flexed. Restore the general-purpose hint for every other fitting.
+	if id == "deckbag":
+		# User reference: fist high on the handle, elbow visibly broken to the
+		# player's left. For side L, positive outboard moves the pole left.
+		rig.set_elbow_hint(side, 0.17, 0.34)
+	else:
+		rig.set_elbow_hint(side, 0.32, 0.24)
 	rig.grip(side, xf.origin, fingers, palm, 1.0, pose, hold, not welded)
 
 
@@ -1090,10 +1317,38 @@ func _rest_hand(side: String) -> void:
 	u = u * u * (3.0 - 2.0 * u)
 	var from: Vector3 = _last_grip[side] if u < 1.0 else home
 	var contact: Vector3 = from.lerp(home, u)
-	var fingers: Vector3 = c.basis * Vector3(out * 0.08, -0.86, -0.46)
-	var palm: Vector3 = c.basis * Vector3(-out * 0.95, -0.12, 0.16)
+	# Lower the released hand with its current forearm roll intact. The final
+	# idle axes are anatomical for the travelling palm, not a fixed authored
+	# basis that may sit 180 degrees away from the hold we just left.
+	var natural: Dictionary = rig.natural_axes(side, contact)
+	var fingers := natural["fingers"] as Vector3
+	var palm := natural["palm"] as Vector3
+	var previous: Dictionary = _last_axes.get(side, {}) as Dictionary
+	if u < 1.0 and previous.has("fingers") and previous.has("palm"):
+		# Rotation-minimising transport: follow the changing forearm direction but
+		# never add pronation/supination around it. This is the missing invariant
+		# that stops a released support hand showing its palm in the final frame.
+		var previous_f := (previous["fingers"] as Vector3).normalized()
+		var previous_p := (previous["palm"] as Vector3).normalized()
+		fingers = previous_f.slerp(fingers, u).normalized()
+		palm = Basis(Quaternion(previous_f, fingers)) * previous_p
+		palm -= palm.project(fingers)
+		if palm.length_squared() > 0.001:
+			palm = palm.normalized()
 	_last_grip[side] = contact
-	rig.grip(side, contact, fingers, palm, 1.0, "open", 0.18)
+	_last_axes[side] = {"fingers": fingers, "palm": palm}
+	var release_pose := str(_last_pose.get(side, "open"))
+	var release_amount := 0.18
+	if release_pose == "rifle_support":
+		# Keep the support grasp while clearing the stock. Fingers relax only in
+		# the lower half of withdrawal, where opening cannot masquerade as a palm
+		# flip in front of the receiver.
+		release_amount = 1.0 - smoothstep(0.48, 0.92, u) * 0.82
+	else:
+		release_pose = "open"
+	if u >= 1.0:
+		_last_pose[side] = "open"
+	rig.grip(side, contact, fingers, palm, 1.0, release_pose, release_amount)
 
 
 func _device_of(id: String) -> Node3D:

@@ -34,6 +34,9 @@ func _enter_tree() -> void:
 	_add_action("bag_previous", [KEY_LEFT, KEY_UP])
 	_add_action("bag_next", [KEY_RIGHT, KEY_DOWN])
 	_add_mouse_action("knife_attack", MOUSE_BUTTON_LEFT)
+	_add_mouse_action("rifle_fire", MOUSE_BUTTON_LEFT)
+	_add_mouse_action("rifle_aim", MOUSE_BUTTON_RIGHT)
+	_add_action("rifle_reload", [KEY_R])
 	# The circuits. Every one of these is also a physical switch under the fuse
 	# box lid — these are the shorthand the status panel prints beside each row,
 	# and the panel is lying if they are not bound.
@@ -210,6 +213,10 @@ func _ready() -> void:
 			_knife_test(rig, boat)
 		elif arg.begins_with("--knife-shot="):
 			_knife_shot(rig, boat, arg.get_slice("=", 1))
+		elif arg == "--rifle-test":
+			_rifle_test(rig, boat)
+		elif arg.begins_with("--rifle-shot="):
+			_rifle_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--probe-engine":
 			_probe_engine(boat)
 		elif arg == "--drift-test":
@@ -927,7 +934,7 @@ func _bag_cycle_test(rig: Node3D, boat: RigidBody3D) -> void:
 		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
 		if panel_view != null:
 			panel_view.visible = false
-	await get_tree().create_timer(0.35).timeout
+	await get_tree().create_timer(0.65).timeout
 	var opened: bool = bool(rig.call("set_bag_open", true))
 	await get_tree().create_timer(0.95).timeout
 	var bag: Node3D = boat.call("deck_bag_node") as Node3D
@@ -1145,6 +1152,330 @@ func _knife_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await _shot(dir, "knife4_release")
 	await get_tree().create_timer(0.30).timeout
 	await _shot(dir, "knife5_stowed")
+	get_tree().quit()
+
+
+func _rifle_test(rig: Node3D, boat: RigidBody3D) -> void:
+	## Dedicated sling -> two-hand shoulder -> sights -> animated shot -> sling.
+	## The contract includes geometric sight alignment and exclusive-slot rules,
+	## not merely the presence of a model node.
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("_bag_selected", 4)
+	await get_tree().create_timer(0.35).timeout
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var slot_label := str(bag.call("slot_label", 4))
+	var rifle_slot_node := bag.call("slot_target", 4) as Node3D
+	var quick_slot_node := bag.call("slot_target", 2) as Node3D
+	var rifle_below_tools := bag.to_local(rifle_slot_node.global_position).y \
+			< bag.to_local(quick_slot_node.global_position).y - 0.15
+	var taken := bool(rig.call("_activate_bag_selection"))
+	await get_tree().create_timer(1.05).timeout
+	var rifle := bag.call("active_item_node") as Node3D
+	var imported := rifle != null and int(rifle.call("model_mesh_count")) == 6
+	var clips: PackedStringArray = rifle.call("animation_names") \
+			if rifle != null else PackedStringArray()
+	var animated := false
+	for clip in clips:
+		animated = animated or "shoot" in str(clip).to_lower()
+	var exclusive := bool(bag.call("can_place_active", 4)) \
+			and not bool(bag.call("can_place_active", 0))
+	var arms: Node = rig.get("_arms")
+	var one_hand_carry := str(arms.get("_bag_hand_mode")) == "rifle" \
+			and arms.get("_rifle_support_target") == null \
+			and not bool(arms.call("_locked", "L"))
+	var hand_rig: Node = arms.get("rig")
+	var right_weld: Dictionary = hand_rig.call("held_attachment_report", "R")
+	var primary_target := bag.call("rifle_primary_target") as Node3D
+	var primary_grip := rifle.call("primary_grip_node") as Node3D
+	var primary_error := primary_target.global_position.distance_to(
+			rifle.global_transform * primary_grip.position)
+
+	Input.action_press("rifle_aim")
+	await get_tree().create_timer(0.34).timeout
+	var two_hands := str(arms.get("_bag_hand_mode")) == "rifle" \
+			and arms.get("_rifle_support_target") != null
+	var support_target := bag.call("rifle_support_target") as Node3D
+	var support_grip := rifle.call("support_grip_node") as Node3D
+	var support_error := support_target.global_position.distance_to(
+			rifle.global_transform * support_grip.position)
+	var primary_contact: Dictionary = hand_rig.call("finger_contact_report", "R")
+	var support_contact: Dictionary = hand_rig.call("finger_contact_report", "L")
+	var primary_bounds: AABB = rifle.call("primary_contact_bounds") as AABB
+	var support_bounds: AABB = rifle.call("support_contact_bounds") as AABB
+	var grip_contact_ok := int(primary_contact.get("touches", 0)) >= 6 \
+			and int(support_contact.get("touches", 0)) >= 2 \
+			and int(primary_contact.get("penetrations", 1)) == 0 \
+			and int(support_contact.get("penetrations", 1)) == 0
+	# Weapon drives both hands. An attachment report here means the old broken
+	# topology has returned: the trigger wrist is rotating the entire rifle.
+	var weapon_owned := right_weld.is_empty() and primary_error < 0.020 \
+			and support_error < 0.020
+	var aim_amount := float(bag.call("rifle_aim_amount"))
+	var cam := rig.get("_cam") as Camera3D
+	var rear := rifle.call("aim_anchor_node") as Node3D
+	var front := rifle.call("front_sight_node") as Node3D
+	var rear_local := cam.to_local(rear.global_position)
+	var front_local := cam.to_local(front.global_position)
+	var muzzle_local := cam.to_local(
+			(rifle.call("muzzle_node") as Node3D).global_position)
+	var sight_aligned := aim_amount > 0.94 \
+			and absf(rear_local.x) < 0.025 and absf(rear_local.y) < 0.060 \
+			and rear_local.z < -0.24 and rear_local.z > -0.42 \
+			and absf(front_local.x) < 0.030 \
+			and (front.global_position - rear.global_position).normalized().dot(
+					-cam.global_basis.z) > 0.985
+	# Let both arm IK chains settle for several rendered poses. They may move,
+	# but the rifle's camera-space sight anchor must remain invariant.
+	var rear_lock_sample := rear_local
+	await get_tree().create_timer(0.65).timeout
+	rear_local = cam.to_local(rear.global_position)
+	front_local = cam.to_local(front.global_position)
+	# Contact solver needs a few skeleton passes after the support hand joins.
+	primary_contact = hand_rig.call("finger_contact_report", "R")
+	support_contact = hand_rig.call("finger_contact_report", "L")
+	var hand_lock := bool(hand_rig.call("contact_frozen", "R")) \
+			and bool(hand_rig.call("contact_frozen", "L")) \
+			and bool(hand_rig.call("grip_locked", "R")) \
+			and bool(hand_rig.call("grip_locked", "L"))
+	var primary_palm := hand_rig.call("solved_palm_global", "R") as Transform3D
+	var support_palm := hand_rig.call("solved_palm_global", "L") as Transform3D
+	var primary_palm_error := primary_palm.origin.distance_to(
+			rifle.global_transform * primary_grip.position)
+	var support_palm_error := support_palm.origin.distance_to(
+			rifle.global_transform * support_grip.position)
+	var palm_lock_error := maxf(primary_palm_error, support_palm_error)
+	var palms_pinned := palm_lock_error < 0.006
+	grip_contact_ok = int(primary_contact.get("touches", 0)) >= 6 \
+			and int(support_contact.get("touches", 0)) >= 2 \
+			and int(primary_contact.get("penetrations", 1)) == 0 \
+			and int(support_contact.get("penetrations", 1)) == 0
+	var ads_locked := rear_local.distance_to(rear_lock_sample) < 0.004 \
+			and absf(front_local.x) < 0.030 and hand_lock
+
+	var fire_event := InputEventAction.new()
+	fire_event.action = "rifle_fire"
+	fire_event.pressed = true
+	rig.call("_unhandled_input", fire_event)
+	await get_tree().create_timer(0.012).timeout
+	var fired := bool(rifle.call("is_firing"))
+	var no_muzzle_flash := float(rifle.call("flash_energy")) <= 0.001 \
+			and not bool(rifle.call("blast_visible"))
+	var shot_sound := bool(rifle.call("shot_audio_playing"))
+	var pressure := float(rifle.call("pressure_amount")) > 0.20
+	var indoor_profile := rifle.call("acoustic_profile_for", 0.0) as Dictionary
+	var outdoor_profile := rifle.call("acoustic_profile_for", 1.0) as Dictionary
+	var acoustic_variants := float(indoor_profile["report_db"]) \
+			> float(outdoor_profile["report_db"]) + 5.0 \
+			and float(indoor_profile["report_pitch"]) \
+			< float(outdoor_profile["report_pitch"]) \
+			and float(indoor_profile["body_db"]) \
+			> float(outdoor_profile["body_db"]) + 40.0
+	var clip_playing := bool(rifle.call("shoot_animation_playing"))
+	var recoil := (bag.call("active_rifle_camera_kick") as Vector3).length() \
+			> deg_to_rad(1.0)
+	primary_palm = hand_rig.call("solved_palm_global", "R") as Transform3D
+	support_palm = hand_rig.call("solved_palm_global", "L") as Transform3D
+	var shot_palm_error := maxf(primary_palm.origin.distance_to(
+			rifle.global_transform * primary_grip.position),
+			support_palm.origin.distance_to(
+			rifle.global_transform * support_grip.position))
+	var shot_palms_pinned := shot_palm_error < 0.012
+	Input.action_release("rifle_aim")
+	var empty_after_shot := not bool(bag.call("rifle_loaded"))
+	var dry_fire_blocked := not bool(bag.call("begin_active_rifle_fire"))
+	var reload_started := bool(bag.call("begin_active_rifle_reload"))
+	await get_tree().create_timer(0.30).timeout
+	var cartridge := rifle.call("cartridge_node") as Node3D
+	var round_in_hand := cartridge != null and cartridge.visible \
+			and bool(primary_target.get_meta("hand_attachment", false)) \
+			and str(primary_target.get_meta("hand_pose", "")) == "pinch"
+	var round_visual := rifle.call("cartridge_visual_report") as Dictionary
+	var round_dimensioned := int(round_visual.get("mesh_count", 0)) >= 10 \
+			and absf(float(round_visual.get("case_length", 0.0)) - 0.057) < 0.0001 \
+			and absf(float(round_visual.get("overall_length", 0.0)) - 0.082) < 0.0001
+	var round_contact := hand_rig.call("finger_contact_report", "R") as Dictionary
+	var round_touch_map := round_contact.get("touches_by_finger", {}) as Dictionary
+	var round_tips := hand_rig.call("finger_endpoints_local", "R",
+			cartridge) as Dictionary
+	var round_samples := hand_rig.call("finger_samples_local", "R",
+			cartridge) as Dictionary
+	var round_palm := hand_rig.call("solved_palm_global", "R") as Transform3D
+	var round_anatomy := hand_rig.call("consider", "R", round_palm.origin,
+			round_palm.basis.z, round_palm.basis.y) as Dictionary
+	var round_wrist_neutral := float(round_anatomy.get("wrist_break", PI)) \
+			< deg_to_rad(4.0) and float(round_anatomy.get("palm_twist", PI)) \
+			< deg_to_rad(4.0)
+	var round_weld := hand_rig.call("held_attachment_report", "R") as Dictionary
+	var round_attached := float(round_weld.get("position_error", 1.0)) < 0.001 \
+			and float(round_weld.get("angle_error", PI)) < deg_to_rad(0.5)
+	var left_carries_reload := arms.get("_rifle_support_target") != null
+	# Sample the last visible insertion frame, while both the round and the hand
+	# still exist. Its case head must land at the authored breech centre and its
+	# +Z projectile axis must agree with the barrel/chamber axis.
+	await get_tree().create_timer(0.98).timeout
+	var chamber_node := rifle.call("chamber_node") as Node3D
+	var chamber_world := rifle.global_transform * chamber_node.transform
+	var insertion_root_error := cartridge.global_position.distance_to(
+			chamber_world.origin)
+	var insertion_axis_dot := cartridge.global_basis.z.normalized().dot(
+			chamber_world.basis.z.normalized())
+	var insertion_aligned := insertion_root_error < 0.012 \
+			and insertion_axis_dot > 0.995
+	await get_tree().create_timer(0.37).timeout
+	var bolt_work := not cartridge.visible \
+			and str(primary_target.get_meta("hand_pose", "")) == "bolt_grip" \
+			and bool(bag.call("rifle_reloading"))
+	var reload_sound_synced := bool(rifle.call("reload_audio_playing")) \
+			and absf(float(rifle.call("reload_sound_started_at")) - 1.42) < 0.04 \
+			and absf(float(rifle.call("reload_sound_pitch")) - 0.85) < 0.01
+	var bolt_contact := hand_rig.call("finger_contact_report", "R") as Dictionary
+	var bolt_touch_map := bolt_contact.get("touches_by_finger", {}) as Dictionary
+	var bolt_fingers_seated := int(bolt_touch_map.get(1, 0)) >= 1 \
+			and int(bolt_touch_map.get(3, 0)) == 0 \
+			and int(bolt_touch_map.get(4, 0)) == 0 \
+			and int(bolt_contact.get("penetrations", 1)) == 0
+	var bolt_palm := hand_rig.call("solved_palm_global", "R") as Transform3D
+	var live_bolt := rifle.global_transform \
+			* (rifle.call("bolt_grip_transform") as Transform3D)
+	var bolt_natural := hand_rig.call("natural_axes", "R", live_bolt.origin) as Dictionary
+	var bolt_expected_palm := live_bolt.origin \
+			- (bolt_natural["palm"] as Vector3) \
+			* float(primary_target.get_meta("palm_clearance", 0.0)) \
+			- (bolt_natural["fingers"] as Vector3) \
+			* float(primary_target.get_meta("control_forward_reach", 0.0)) \
+			+ (bolt_natural["palm"] as Vector3).cross(
+					bolt_natural["fingers"] as Vector3).normalized() \
+			* float(primary_target.get_meta("control_index_bias", 0.0))
+	var bolt_sync_error := bolt_palm.origin.distance_to(bolt_expected_palm)
+	var bolt_synced := bolt_sync_error < 0.008
+	var bolt_anatomy := hand_rig.call("consider", "R", bolt_expected_palm,
+			bolt_palm.basis.z, bolt_palm.basis.y) as Dictionary
+	var bolt_wrist_break := float(bolt_anatomy.get("wrist_break", PI))
+	var bolt_palm_twist := float(bolt_anatomy.get("palm_twist", PI))
+	var bolt_wrist_neutral := bolt_wrist_break < deg_to_rad(3.0) \
+			and bolt_palm_twist < deg_to_rad(3.0)
+	await get_tree().create_timer(1.25).timeout
+	var reload_ready := bool(bag.call("rifle_loaded")) \
+			and not bool(bag.call("rifle_reloading")) \
+			and str(primary_target.get_meta("hand_pose", "")) == "rifle_primary"
+	var carry_restored := arms.get("_rifle_support_target") == null \
+			and not bool(arms.call("_locked", "L"))
+	rig.set("_bag_selected", 4)
+	var reopened := bool(rig.call("set_bag_open", true))
+	await get_tree().create_timer(0.95).timeout
+	var placed := bool(rig.call("_activate_bag_selection"))
+	await get_tree().create_timer(0.20).timeout
+	var restored := placed and bool(bag.call("slot_occupied", 4)) \
+			and bag.call("active_item_node") == null
+	var complete := slot_label == "Hunting rifle" and rifle_below_tools \
+			and taken and imported \
+			and animated and exclusive and one_hand_carry and two_hands and weapon_owned \
+			and grip_contact_ok and sight_aligned and ads_locked and palms_pinned \
+			and pressure and no_muzzle_flash and shot_sound and acoustic_variants \
+			and shot_palms_pinned and carry_restored \
+			and fired and clip_playing and recoil \
+			and empty_after_shot and dry_fire_blocked and reload_started \
+			and bolt_synced and bolt_wrist_neutral and bolt_fingers_seated \
+			and reload_sound_synced \
+			and round_in_hand and round_dimensioned and round_wrist_neutral \
+			and round_attached and insertion_aligned \
+			and left_carries_reload and bolt_work and reload_ready \
+			and reopened and restored
+	print("[rifle] label=%s below=%s take=%s imported=%s clips=%s exclusive=%s carry_1h=%s aim_2h=%s carry_restored=%s weapon_owned=%s grip_err=%.4f/%.4f contacts=%d/%d penetration=%d/%d nearest=%.4f/%.4f local=%s/%s bounds=%s/%s aim=%.2f rear=%s front=%s muzzle=%s aligned=%s locked=%s hand_lock=%s palms=%.4f/%.4f shot_palms=%.4f fire=%s sound=%s no_flash=%s acoustic=%s anim=%s recoil=%s empty=%s dry_block=%s reload=%s reload_sound=%s round=%s round_mesh=%s round_contact=%d/%d round_digits=%s tips=%s samples=%s round_wrist=%.2f/%.2f round_weld=%.4f/%.2f insert=%.4f/%.3f/%s left_hold=%s bolt=%s bolt_contact=%d/%d digits=%s sync=%.4f/%s wrist=%.2f/%.2f neutral=%s ready=%s place=%s restored=%s complete=%s" % [
+			slot_label, rifle_below_tools, taken, imported, clips, exclusive,
+			one_hand_carry, two_hands,
+			carry_restored, weapon_owned,
+			primary_error, support_error,
+			int(primary_contact.get("touches", 0)), int(support_contact.get("touches", 0)),
+			int(primary_contact.get("penetrations", 0)),
+			int(support_contact.get("penetrations", 0)),
+			float(primary_contact.get("nearest", -1.0)),
+			float(support_contact.get("nearest", -1.0)),
+			primary_contact.get("nearest_local", Vector3.ZERO),
+			support_contact.get("nearest_local", Vector3.ZERO),
+			primary_bounds, support_bounds,
+			aim_amount, rear_local, front_local,
+			muzzle_local, sight_aligned, ads_locked, hand_lock, primary_palm_error,
+			support_palm_error,
+			shot_palm_error, fired, shot_sound, no_muzzle_flash, acoustic_variants,
+			clip_playing, recoil, empty_after_shot, dry_fire_blocked, reload_started,
+			reload_sound_synced,
+			round_in_hand, round_dimensioned,
+			int(round_contact.get("touches", 0)),
+			int(round_contact.get("penetrations", 0)), round_touch_map, round_tips,
+			round_samples,
+			rad_to_deg(float(round_anatomy.get("wrist_break", PI))),
+			rad_to_deg(float(round_anatomy.get("palm_twist", PI))),
+			float(round_weld.get("position_error", 1.0)),
+			rad_to_deg(float(round_weld.get("angle_error", PI))),
+			insertion_root_error, insertion_axis_dot, insertion_aligned,
+			left_carries_reload, bolt_work,
+			int(bolt_contact.get("touches", 0)),
+			int(bolt_contact.get("penetrations", 0)), bolt_touch_map,
+			bolt_sync_error, bolt_synced,
+			rad_to_deg(bolt_wrist_break), rad_to_deg(bolt_palm_twist),
+			bolt_wrist_neutral,
+			reload_ready,
+			placed, restored, complete])
+	if not complete:
+		push_error("hunting rifle sling/aim/fire/return contract incomplete")
+	get_tree().quit()
+
+
+func _rifle_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Deterministic visual audit of every state the player complained about.
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("_bag_selected", 4)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	await _shot(dir, "rifle0_sling")
+	rig.call("_activate_bag_selection")
+	await get_tree().create_timer(1.05).timeout
+	await _shot(dir, "rifle1_one_hand_carry")
+	Input.action_press("rifle_aim")
+	# Capture only after the measured weapon-space palm/contact locks are active.
+	await get_tree().create_timer(0.65).timeout
+	await _shot(dir, "rifle2_sights")
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	bag.call("begin_active_rifle_fire")
+	await get_tree().create_timer(0.025).timeout
+	await _shot(dir, "rifle3_shot")
+	await get_tree().create_timer(0.12).timeout
+	await _shot(dir, "rifle4_recoil")
+	Input.action_release("rifle_aim")
+	bag.call("begin_active_rifle_reload")
+	await get_tree().create_timer(0.45).timeout
+	await _shot(dir, "rifle5_round_in_hand")
+	await get_tree().create_timer(0.82).timeout
+	await _shot(dir, "rifle6_insert_round")
+	await get_tree().create_timer(0.52).timeout
+	await _shot(dir, "rifle7_bolt_back")
+	await get_tree().create_timer(0.64).timeout
+	await _shot(dir, "rifle8_bolt_close")
+	await get_tree().create_timer(0.10).timeout
+	await _shot(dir, "rifle8b_return_early")
+	await get_tree().create_timer(0.10).timeout
+	await _shot(dir, "rifle8c_return_mid")
+	await get_tree().create_timer(0.12).timeout
+	await _shot(dir, "rifle8d_regrip")
+	await get_tree().create_timer(0.26).timeout
+	await _shot(dir, "rifle9_ready")
+	rig.set("_bag_selected", 4)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	await _shot(dir, "rifle10_return")
 	get_tree().quit()
 
 

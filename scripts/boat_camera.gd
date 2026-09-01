@@ -301,6 +301,22 @@ func _unhandled_input(event: InputEvent) -> void:
 				== "utility_knife" and bool(attack_bag.call("begin_active_attack")):
 			get_viewport().set_input_as_handled()
 			return
+	if mode == Mode.FPS and _bag_focus < 0.08 and not _panel_open() \
+			and event.is_action_pressed("rifle_reload"):
+		var reload_bag := _deck_bag()
+		if reload_bag != null and str(reload_bag.call("active_item_kind")) \
+				== "hunting_rifle":
+			reload_bag.call("begin_active_rifle_reload")
+			get_viewport().set_input_as_handled()
+			return
+	if mode == Mode.FPS and _bag_focus < 0.08 and not _panel_open() \
+			and event.is_action_pressed("rifle_fire"):
+		var fire_bag := _deck_bag()
+		if fire_bag != null and str(fire_bag.call("active_item_kind")) \
+				== "hunting_rifle" and bool(fire_bag.call("begin_active_rifle_fire")):
+			_resolve_active_rifle_shot(fire_bag)
+			get_viewport().set_input_as_handled()
+			return
 	if mode == Mode.FPS and _bag_open and _bag_focus > 0.58:
 		if event.is_action_pressed("bag_previous"):
 			_shift_bag_selection(-1)
@@ -405,9 +421,12 @@ func set_bag_open(open: bool) -> bool:
 			_arms.set_body_hold("deckbag", true, "L")
 		var bag := _deck_bag()
 		if bag != null and bag.call("active_item_node") != null:
-			var empty := int(bag.call("first_empty_slot"))
-			if empty >= 0:
-				_bag_selected = empty
+			if str(bag.call("active_item_kind")) == "hunting_rifle":
+				_bag_selected = 4
+			else:
+				var empty := int(bag.call("first_empty_slot"))
+				if empty >= 0:
+					_bag_selected = empty
 	else:
 		var bag := _deck_bag()
 		if bag != null:
@@ -444,15 +463,13 @@ func _activate_bag_selection() -> bool:
 		active = bag.call("take_slot", _bag_selected) as Node3D
 		if active == null:
 			return false
-		if _arms != null and _arms.has_method("set_bag_hand"):
-			_arms.set_bag_hand(bag.call("active_hand_target") as Node3D,
-					str(bag.call("active_hand_mode")))
+		_set_active_bag_item_hands(bag)
 		set_bag_open(false)
 		return true
-	if bool(bag.call("slot_occupied", _bag_selected)):
+	if bool(bag.call("slot_occupied", _bag_selected)) \
+			or not bool(bag.call("can_place_active", _bag_selected)):
 		return false
-	if _arms != null and _arms.has_method("set_bag_hand"):
-		_arms.set_bag_hand(null, "")
+	_clear_active_bag_item_hands()
 	var placed := bool(bag.call("place_active_in_slot", _bag_selected))
 	if placed and _arms != null and _arms.has_method("set_bag_hand") \
 			and bool(bag.call("release_hand_active")):
@@ -461,24 +478,44 @@ func _activate_bag_selection() -> bool:
 	return placed
 
 
+func _set_active_bag_item_hands(bag: Node3D) -> void:
+	if _arms == null:
+		return
+	if str(bag.call("active_item_kind")) == "hunting_rifle" \
+			and _arms.has_method("set_rifle_hands"):
+		_arms.set_rifle_hands(bag.call("rifle_primary_target") as Node3D,
+				bag.call("rifle_support_target") as Node3D)
+	elif _arms.has_method("set_bag_hand"):
+		_arms.set_bag_hand(bag.call("active_hand_target") as Node3D,
+				str(bag.call("active_hand_mode")))
+
+
+func _clear_active_bag_item_hands() -> void:
+	if _arms == null:
+		return
+	if _arms.has_method("set_rifle_hands"):
+		_arms.set_rifle_hands(null, null)
+	if _arms.has_method("set_bag_hand"):
+		_arms.set_bag_hand(null, "")
+
+
 func _refresh_bag_hand() -> void:
 	if _arms == null or not _arms.has_method("set_bag_hand"):
 		return
 	var bag := _deck_bag()
 	if bag == null:
-		_arms.set_bag_hand(null, "")
+		_clear_active_bag_item_hands()
 		return
 	var active := bag.call("active_item_node") as Node3D
 	if bool(bag.call("release_hand_active")):
 		_arms.set_bag_hand(bag.call("release_hand_target") as Node3D,
 				"knife_release")
 	elif active != null:
-		_arms.set_bag_hand(bag.call("active_hand_target") as Node3D,
-				str(bag.call("active_hand_mode")))
+		_set_active_bag_item_hands(bag)
 	elif _bag_open and _bag_focus > 0.58:
 		_arms.set_bag_hand(bag.call("slot_target", _bag_selected) as Node3D, "point")
 	else:
-		_arms.set_bag_hand(null, "")
+		_clear_active_bag_item_hands()
 
 
 func _reset_deck_bag() -> void:
@@ -511,7 +548,11 @@ func _update_deck_bag(delta: float) -> void:
 		elif _bag_focus <= 0.035:
 			_arms.set_body_hold("deckbag", false, "L")
 	if _camera_attrs != null:
-		var blur := smoothstep(0.18, 0.86, _bag_focus)
+		var aim_blur := 0.0
+		var aim_bag := _deck_bag()
+		if aim_bag != null and aim_bag.has_method("rifle_aim_amount"):
+			aim_blur = float(aim_bag.call("rifle_aim_amount"))
+		var blur := maxf(smoothstep(0.18, 0.86, _bag_focus), aim_blur * 0.62)
 		_camera_attrs.dof_blur_far_enabled = blur > 0.01
 		_camera_attrs.dof_blur_far_distance = lerpf(2.4, 0.82, blur)
 		_camera_attrs.dof_blur_far_transition = lerpf(1.6, 0.42, blur)
@@ -521,9 +562,12 @@ func _update_deck_bag(delta: float) -> void:
 		var active := bag.call("active_item_node") as Node3D
 		var preview := -1
 		if active != null and _bag_open and _bag_focus > 0.58 \
-				and not bool(bag.call("slot_occupied", _bag_selected)):
+				and not bool(bag.call("slot_occupied", _bag_selected)) \
+				and bool(bag.call("can_place_active", _bag_selected)):
 			preview = _bag_selected
 		bag.call("set_preview_slot", preview)
+		bag.call("set_rifle_aim", mode == Mode.FPS and not _bag_open \
+				and Input.is_action_pressed("rifle_aim"))
 
 func _process(delta: float) -> void:
 	match mode:
@@ -736,6 +780,15 @@ func _process_fps(delta: float) -> void:
 			_prompt.visible = true
 		elif _active_bag_item_kind() == "utility_knife":
 			_prompt.text = "LMB — slash   ·   I — open bag"
+			_prompt.visible = true
+		elif _active_bag_item_kind() == "hunting_rifle":
+			var active_rifle_bag := _deck_bag()
+			if active_rifle_bag != null and bool(active_rifle_bag.call("rifle_reloading")):
+				_prompt.text = "Reloading — round / chamber / bolt   ·   I — open bag"
+			elif active_rifle_bag != null and not bool(active_rifle_bag.call("rifle_loaded")):
+				_prompt.text = "Empty   ·   R — load & cycle bolt   ·   I — open bag"
+			else:
+				_prompt.text = "RMB — sights   ·   LMB — fire   ·   R — reload   ·   I — open bag"
 			_prompt.visible = true
 		elif _walker.get("on_sea_ladder"):
 			_prompt.text = "W/S — climb   ·   SPACE — let go"
@@ -975,12 +1028,24 @@ func _process_fps(delta: float) -> void:
 	_roll = lerpf(_roll, clampf(heel * 0.24 + bag_roll, -0.11, 0.11),
 			1.0 - exp(-6.0 * delta))
 	var knife_kick := Vector3.ZERO
+	var rifle_kick := Vector3.ZERO
 	var held_bag := _deck_bag()
 	if held_bag != null and held_bag.has_method("active_knife_camera_kick"):
 		knife_kick = held_bag.call("active_knife_camera_kick") as Vector3
-	_cam.global_basis = Basis(Vector3.UP, yaw + knife_kick.y) \
-			* Basis(Vector3.RIGHT, pitch + knife_kick.x) \
-			* Basis(Vector3.BACK, _roll + knife_kick.z)
+	if held_bag != null and held_bag.has_method("active_rifle_camera_kick"):
+		rifle_kick = held_bag.call("active_rifle_camera_kick") as Vector3
+	var total_kick := knife_kick + rifle_kick
+	_cam.global_basis = Basis(Vector3.UP, yaw + total_kick.y) \
+			* Basis(Vector3.RIGHT, pitch + total_kick.x) \
+			* Basis(Vector3.BACK, _roll + total_kick.z)
+	var rifle_aim := float(held_bag.call("rifle_aim_amount")) \
+			if held_bag != null and held_bag.has_method("rifle_aim_amount") else 0.0
+	var rifle_pressure := float(held_bag.call("active_rifle_pressure")) \
+			if held_bag != null and held_bag.has_method("active_rifle_pressure") else 0.0
+	# The shock front briefly opens peripheral vision, then the sight picture
+	# settles back. This is optical concussion, not a zoom animation.
+	_cam.fov = lerpf(70.0, 52.0, smoothstep(0.0, 1.0, rifle_aim)) \
+			+ rifle_pressure * 4.2
 	if target.has_method("update_deck_bag_pose"):
 		target.update_deck_bag_pose(delta, _cam, _bag_focus)
 	_refresh_bag_hand()
@@ -998,6 +1063,34 @@ func _process_fps(delta: float) -> void:
 		_arms.update(delta, target, engaged, walking, _flag(_walker, "swimming"))
 	_resolve_active_knife_sweep()
 	_update_warmth(delta)
+
+
+func _resolve_active_rifle_shot(bag: Node3D) -> void:
+	if get_world_3d() == null or _cam == null:
+		return
+	var muzzle := bag.call("active_rifle_muzzle") as Node3D
+	var origin := muzzle.global_position if muzzle != null else _cam.global_position
+	# The sights own accuracy. Hip fire inherits a small deterministic shoulder
+	# cone; ADS sends the ray exactly through the centre line.
+	var aim := float(bag.call("rifle_aim_amount"))
+	var direction := -_cam.global_basis.z
+	if aim < 0.92:
+		var spread := deg_to_rad(1.35) * (1.0 - aim)
+		direction = direction.rotated(_cam.global_basis.y, sin(Time.get_ticks_msec() * 0.013) * spread)
+		direction = direction.rotated(_cam.global_basis.x, cos(Time.get_ticks_msec() * 0.017) * spread)
+	var query := PhysicsRayQueryParameters3D.create(origin, origin + direction * 900.0)
+	if target is CollisionObject3D:
+		query.exclude = [(target as CollisionObject3D).get_rid()]
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if hit.is_empty():
+		return
+	var collider: Object = hit.get("collider") as Object
+	var point: Vector3 = hit.get("position", origin + direction * 900.0)
+	if collider != null and collider.has_method("hit_by_rifle"):
+		collider.call("hit_by_rifle", 95.0, point, direction)
+	if collider is RigidBody3D:
+		(collider as RigidBody3D).apply_impulse(direction * 22.0,
+				point - (collider as RigidBody3D).global_position)
 
 
 func _active_bag_item_kind() -> String:

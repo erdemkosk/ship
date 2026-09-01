@@ -1,0 +1,2 @@
+art/models/*.glb filter=lfs diff=lfs merge=lfs -text
+art/models/*.png filter=lfs diff=lfs merge=lfs -text

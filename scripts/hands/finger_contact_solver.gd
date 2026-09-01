@@ -38,8 +38,11 @@ static func solve(skeleton: Skeleton3D, finger_chains: Dictionary,
 	var scales := previous.duplicate(true)
 	var touched := 0
 	var penetrations := 0
+	var touches_by_finger := {}
+	var penetrations_by_finger := {}
 	var samples := 0
 	var nearest := INF
+	var nearest_local := Vector3.ZERO
 	var grown := bounds.grow(maxf(pad, 0.0))
 	for finger: int in finger_chains:
 		var chain: PackedInt32Array = finger_chains[finger]
@@ -58,7 +61,10 @@ static func solve(skeleton: Skeleton3D, finger_chains: Dictionary,
 						* skeleton.get_bone_global_pose(chain[maxi(joint - 1, 0)])).origin
 				endpoint = last + (last - before) * 0.72
 			var local := device.to_local(endpoint)
-			nearest = minf(nearest, _distance_to_aabb(local, bounds))
+			var distance := _distance_to_aabb(local, bounds)
+			if distance < nearest:
+				nearest = distance
+				nearest_local = local
 			var inside := bounds.has_point(local)
 			var on_pad := grown.has_point(local)
 			var value := float(values[mini(joint, values.size() - 1)])
@@ -67,8 +73,12 @@ static func solve(skeleton: Skeleton3D, finger_chains: Dictionary,
 				# correction on the next skeleton pass.
 				value = maxf(value - delta * 8.5, 0.04)
 				penetrations += 1
+				penetrations_by_finger[finger] = int(
+						penetrations_by_finger.get(finger, 0)) + 1
 			elif on_pad:
 				touched += 1
+				touches_by_finger[finger] = int(
+						touches_by_finger.get(finger, 0)) + 1
 			else:
 				value = minf(value + delta * 3.8, 1.0)
 			values[joint] = value
@@ -76,7 +86,9 @@ static func solve(skeleton: Skeleton3D, finger_chains: Dictionary,
 		scales[finger] = values
 	return {"scales": scales, "touches": touched,
 			"penetrations": penetrations, "samples": samples,
-			"nearest": nearest,
+			"touches_by_finger": touches_by_finger,
+			"penetrations_by_finger": penetrations_by_finger,
+			"nearest": nearest, "nearest_local": nearest_local,
 			"quality": clampf(float(touched) / maxf(float(samples) * 0.34, 1.0)
 					- float(penetrations) * 0.12, 0.0, 1.0)}
 

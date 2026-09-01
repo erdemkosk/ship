@@ -80,6 +80,15 @@ const POSES := {
 		"middle": [0.62, 0.82, 0.72], "ring": [0.68, 0.88, 0.78],
 		"pinky": [0.72, 0.92, 0.82],
 	},
+	# Small bolt knob: fingertips hook around the metal instead of making the
+	# oversized closed fist used for crate handles. The thumb and index pinch the
+	# knob; the other three digits stay softly folded instead of drawing a rigid
+	# circle around it.
+	"bolt_grip": {
+		"thumb": [0.78, 1.06, 0.72], "index": [1.18, 1.52, 1.00],
+		"middle": [1.24, 1.58, 1.06], "ring": [1.28, 1.62, 1.10],
+		"pinky": [1.30, 1.64, 1.12],
+	},
 	# Slim utility-knife handle: a compact power grasp with the thumb opposed
 	# across the scales. The index is closed with the other fingers—this is a
 	# cutting grip, never the floating trigger-finger silhouette of a firearm.
@@ -90,6 +99,20 @@ const POSES := {
 		"thumb": [0.62, 0.85, 0.55], "index": [1.12, 1.46, 0.92],
 		"middle": [1.18, 1.52, 0.98], "ring": [1.22, 1.56, 1.02],
 		"pinky": [1.24, 1.58, 1.04],
+	},
+	# Trigger hand: middle/ring/pinky carry the wrist of the stock while the
+	# index remains shallow enough to sit on the animated trigger.
+	"rifle_primary": {
+		"thumb": [0.66, 0.86, 0.56], "index": [0.34, 0.46, 0.28],
+		"middle": [1.14, 1.42, 0.94], "ring": [1.20, 1.48, 1.00],
+		"pinky": [1.24, 1.52, 1.04],
+	},
+	# Support hand under the fore-end: all four fingers carry the mass and the
+	# thumb locks across the opposite side.
+	"rifle_support": {
+		"thumb": [0.72, 0.94, 0.62], "index": [1.08, 1.38, 0.92],
+		"middle": [1.14, 1.44, 0.98], "ring": [1.18, 1.48, 1.02],
+		"pinky": [1.20, 1.50, 1.04],
 	},
 	# A wheel rim is larger than a lever and needs a shallower, evenly loaded
 	# wrap.  This prevents the fingertips visibly tunnelling through the wood.
@@ -115,16 +138,17 @@ const POSES := {
 	# close fully beneath the strap; leaving them half open makes a six-kilo bag
 	# look as if it is hanging from the wrist by magic.
 	"bag_handle": {
-		"thumb": [0.54, 0.66, 0.46], "index": [0.84, 1.04, 0.94],
-		"middle": [0.92, 1.12, 1.02], "ring": [0.98, 1.18, 1.08],
-		"pinky": [1.02, 1.22, 1.12],
+		"thumb": [0.64, 0.82, 0.54], "index": [1.08, 1.38, 0.92],
+		"middle": [1.16, 1.46, 0.98], "ring": [1.20, 1.50, 1.02],
+		"pinky": [1.22, 1.52, 1.04],
 	},
 	# Precision pinch: thumb and index meet; unused fingers are curled safely
 	# away instead of floating open through the key or cartridge.
 	"pinch": {
-		"thumb": [0.52, 0.62, 0.42], "index": [0.50, 0.64, 0.48],
-		"middle": [0.72, 0.86, 0.78], "ring": [0.78, 0.92, 0.84],
-		"pinky": [0.82, 0.96, 0.88],
+		"thumb": [0.58, 0.72, 0.50], "thumb_splay": -0.78,
+		"index": [0.62, 0.82, 0.62],
+		"middle": [1.02, 1.28, 0.96], "ring": [1.06, 1.32, 1.00],
+		"pinky": [1.10, 1.36, 1.04],
 	},
 	"key": {
 		"thumb": [0.58, 0.68, 0.46], "index": [0.56, 0.72, 0.54],
@@ -165,6 +189,7 @@ var _poles := {}
 var _end_bone := {}
 var _fingers := {"R": {}, "L": {}}      # side -> finger -> PackedInt32Array
 var _curl_axis := {}                    # bone idx -> local axis Vector3
+var _splay_axis := {}                   # bone idx -> local palm-normal axis
 var _sem_inv := {}                      # side -> Basis, semantic->bone-local inverse
 var _palm_local := {}                   # side -> palm centre in bone local (scaled)
 var _shoulder_local := {}
@@ -175,6 +200,14 @@ var _pose_amt := {"R": 0.0, "L": 0.0}
 var _contact_target := {"R": null, "L": null}
 var _contact_bounds := {"R": AABB(), "L": AABB()}
 var _contact_pad := {"R": 0.018, "L": 0.018}
+## The closed-loop solver seats moving fingers while the rifle is raised. Once
+## the cheek weld is established its last clean curl must remain unchanged;
+## otherwise tiny bounds differences read as fingers breathing on the stock.
+var _contact_frozen := {"R": false, "L": false}
+## A shouldered long gun owns the final palm frames. This lock removes the
+## residual IK-weight/torso settling that is useful for ordinary reaches but
+## looks like hands sliding over a rifle after the sights are already aligned.
+var _grip_locked := {"R": false, "L": false}
 ## Persistent carried props are seated from the FINAL solved palm, after torso
 ## lag and wrist alignment. Without this last weld the prop follows the camera
 ## target while the wrist follows the body solver and visibly swims in fingers.
@@ -194,6 +227,15 @@ var _balance_offset := 0.0
 ## Per-hand, short-lived upper-body reach supplied by hands.gd when the player
 ## has deliberately aimed at a valid fitting. It is cleared on release.
 var _reach_assist := {"L": 0.0, "R": 0.0}
+## Authored shoulder engagement for braced two-hand holds. Unlike reach_assist
+## (which only raises the safety cap), this deliberately brings the torso a few
+## centimetres into a long gun so neither arm has to hover at full extension.
+var _reach_bias := {"L": 0.0, "R": 0.0}
+## Per-action elbow silhouette. Most interactions use the loose outboard bend;
+## the heavy deck bag pulls the elbow nearer the ribs so the upper arm and
+## forearm read as a loaded, bent limb in first person.
+var _elbow_down := {"L": 0.32, "R": 0.32}
+var _elbow_out := {"L": 0.24, "R": 0.24}
 var _ready_ok := false
 var _measured := {}
 ## The dive watch on the left wrist: its face material (the scripts feed it
@@ -291,6 +333,19 @@ func set_reach_assist(side: String, metres: float) -> void:
 
 func reach_assist(side: String) -> float:
 	return float(_reach_assist.get(side, 0.0))
+
+
+func set_reach_bias(side: String, metres: float) -> void:
+	if _reach_bias.has(side):
+		_reach_bias[side] = maxf(metres, 0.0)
+
+
+func set_elbow_hint(side: String, down: float, outboard: float) -> void:
+	if _elbow_down.has(side):
+		_elbow_down[side] = clampf(down, 0.08, 0.45)
+		# Negative values deliberately tuck the elbow across the shoulder line;
+		# useful for a heavy bag whose weight is braced against the torso.
+		_elbow_out[side] = clampf(outboard, -0.34, 0.34)
 
 
 ## The one entry point: put this hand's PALM on `contact`, palm facing `palm_n`,
@@ -452,6 +507,9 @@ func release(side: String) -> void:
 	_want[side] = 0.0
 	_pose[side] = "open"
 	_contact_target[side] = null
+	_contact_frozen[side] = false
+	_grip_locked[side] = false
+	_reach_bias[side] = 0.0
 	_finger_scales[side] = {}
 	_finger_report[side] = {}
 	clear_held_attachment(side)
@@ -477,10 +535,29 @@ func held_attachment_report(side: String) -> Dictionary:
 	return (_held_attachment_report.get(side, {}) as Dictionary).duplicate(true)
 
 
+func solved_palm_global(side: String) -> Transform3D:
+	## The exact semantic palm frame consumed by the renderer after IK and wrist
+	## alignment. Weapon tests compare this to the rifle's authored grip, rather
+	## than assuming the intent target is where the mesh actually finished.
+	if skeleton == null or _wrist == null or not _end_bone.has(side):
+		return Transform3D.IDENTITY
+	var wrist_bone: int = _end_bone[side]
+	if not _wrist.solved.has(wrist_bone):
+		return Transform3D.IDENTITY
+	var wrist: Transform3D = skeleton.global_transform \
+			* (_wrist.solved[wrist_bone] as Transform3D)
+	var wrist_basis := wrist.basis.orthonormalized()
+	var semantic_basis := (wrist_basis *
+			(_sem_inv[side] as Basis).inverse()).orthonormalized()
+	return Transform3D(semantic_basis, wrist.origin + wrist_basis \
+			* (_palm_local[side] as Vector3))
+
+
 func set_contact_target(side: String, device: Node3D) -> void:
 	if _contact_target.get(side) == device:
 		return
 	_contact_target[side] = device
+	_contact_frozen[side] = false
 	_finger_scales[side] = {}
 	_finger_report[side] = {}
 	if device != null:
@@ -495,14 +572,77 @@ func set_contact_target_bounds(side: String, device: Node3D, bounds: AABB,
 	## handle instead of the whole device AABB.
 	if _contact_target.get(side) != device:
 		_contact_target[side] = device
+		_contact_frozen[side] = false
 		_finger_scales[side] = {}
 		_finger_report[side] = {}
 	_contact_bounds[side] = bounds
 	_contact_pad[side] = maxf(pad, 0.0)
 
 
+func set_contact_frozen(side: String, frozen: bool) -> void:
+	if _contact_frozen.has(side):
+		_contact_frozen[side] = frozen and _contact_target.get(side) != null
+
+
+func contact_frozen(side: String) -> bool:
+	return bool(_contact_frozen.get(side, false))
+
+
+func set_grip_locked(side: String, locked: bool) -> void:
+	if not _grip_locked.has(side):
+		return
+	_grip_locked[side] = locked
+	if locked:
+		# No residual 0..1 influence blend after the cheek weld.
+		_weight[side] = 1.0
+		_want[side] = 1.0
+
+
+func grip_locked(side: String) -> bool:
+	return bool(_grip_locked.get(side, false))
+
+
 func finger_contact_report(side: String) -> Dictionary:
 	return (_finger_report.get(side, {}) as Dictionary).duplicate(true)
+
+
+func finger_endpoints_local(side: String, device: Node3D) -> Dictionary:
+	## Instrumentation for precision grips: return the same padded fingertip
+	## endpoints consumed by FingerContactSolver, expressed in device space.
+	var out := {}
+	if device == null or skeleton == null or not _fingers.has(side) \
+			or not _end_bone.has(side):
+		return out
+	var wrist_bone: int = _end_bone[side]
+	if not _wrist.solved.has(wrist_bone):
+		return out
+	var pre_wrist := skeleton.get_bone_global_pose(wrist_bone)
+	var pose_to_world: Transform3D = skeleton.global_transform \
+			* (_wrist.solved[wrist_bone] as Transform3D) \
+			* pre_wrist.affine_inverse()
+	for finger: int in _fingers[side]:
+		var chain: PackedInt32Array = _fingers[side][finger]
+		if chain.is_empty():
+			continue
+		var last := (pose_to_world * skeleton.get_bone_global_pose(
+				chain[chain.size() - 1])).origin
+		var before := (pose_to_world * skeleton.get_bone_global_pose(
+				chain[maxi(chain.size() - 2, 0)])).origin
+		out[finger] = device.to_local(last + (last - before) * 0.72)
+	return out
+
+
+func seed_contact_closure(side: String, amount: float) -> void:
+	## Tiny controls such as a bolt knob can touch an almost-open proximal joint
+	## before the fingertips arrive. Seed a real grasp once, then let the normal
+	## collision loop back individual joints off the metal. Never overwrite a
+	## closure that the solver has already started refining.
+	if not _finger_scales.has(side) or not (_finger_scales[side] as Dictionary).is_empty():
+		return
+	var seeded := {}
+	for finger: int in _fingers[side]:
+		seeded[finger] = [amount, amount, amount]
+	_finger_scales[side] = seeded
 
 
 func approach_origin(side: String) -> Vector3:
@@ -527,24 +667,34 @@ func update(delta: float) -> void:
 	if not _ready_ok:
 		return
 	for side in _want:
-		_weight[side] = move_toward(_weight[side], _want[side], delta * 5.0)
+		if bool(_grip_locked.get(side, false)):
+			_weight[side] = 1.0
+		else:
+			_weight[side] = move_toward(_weight[side], _want[side], delta * 5.0)
 	if _ik != null:
 		_ik.influence = maxf(_weight["R"], _weight["L"])
 	if _wrist != null:
 		for side in _end_bone:
 			_wrist.weights[_end_bone[side]] = _weight[side]
+	# Ordinary reaches ease the torso into position. With both rifle palms pinned,
+	# retain the torso frame captured at the cheek weld. Re-solving lean at full
+	# strength forms a feedback loop (new shoulder -> new lean -> new shoulder)
+	# and makes the wrists alternate around an otherwise fixed grip.
+	var rigid_two_hand_hold := bool(_grip_locked["R"]) and bool(_grip_locked["L"])
 	var k := 1.0 - exp(-delta / LEAN_TAU)
 	var lean_goal := _lean_want / float(_lean_samples) if _lean_samples > 0 \
 			else Vector3.ZERO
-	_lean = _lean.lerp(lean_goal.limit_length(_lean_limit_want), k)
+	if not rigid_two_hand_hold:
+		_lean = _lean.lerp(lean_goal.limit_length(_lean_limit_want), k)
 	_lean_want = Vector3.ZERO
 	_lean_samples = 0
 	_lean_limit_want = MAX_LEAN
 	_lag.position = _lean
 	var torso_goal := _torso_yaw_want / float(_torso_samples) \
 			if _torso_samples > 0 else 0.0
-	_torso_yaw = lerp_angle(_torso_yaw, clampf(torso_goal,
-			deg_to_rad(-28.0), deg_to_rad(28.0)), k)
+	if not rigid_two_hand_hold:
+		_torso_yaw = lerp_angle(_torso_yaw, clampf(torso_goal,
+				deg_to_rad(-28.0), deg_to_rad(28.0)), k)
 	_torso_yaw_want = 0.0
 	_torso_samples = 0
 	var fwd: Vector3 = -camera.global_basis.z
@@ -567,6 +717,10 @@ func update(delta: float) -> void:
 	for side: String in ["L", "R"]:
 		var device: Node3D = _contact_target.get(side) as Node3D
 		if device == null or not is_instance_valid(device) or _pose_amt[side] < 0.12:
+			continue
+		# Wrist IK still follows the weapon (and recoil); only the already-solved
+		# digit curl is frozen so both hands read as glued to the rifle.
+		if bool(_contact_frozen.get(side, false)):
 			continue
 		var wrist_bone: int = _end_bone[side]
 		if not _wrist.solved.has(wrist_bone):
@@ -684,7 +838,8 @@ func _reach(side: String, xf: Transform3D, weight: float, clamp_sphere := false)
 	var to_grip: Vector3 = xf.origin - sh_unleaned
 	var reach: float = float(_measured.get("reach_m", 0.6)) - 0.015
 	var lean_limit := _lean_limit_for(to_grip) + float(_reach_assist.get(side, 0.0))
-	var over: float = to_grip.length() - reach * COMFORT_REACH_RATIO
+	var over: float = to_grip.length() - reach * COMFORT_REACH_RATIO \
+			+ float(_reach_bias.get(side, 0.0))
 	if over > 0.0:
 		var want: Vector3 = _lag.global_transform.basis.inverse() \
 				* (to_grip.normalized() * minf(over, lean_limit))
@@ -723,8 +878,8 @@ func _reach(side: String, xf: Transform3D, weight: float, clamp_sphere := false)
 	# switchboard and the solver laid the whole forearm flat across it to get
 	# there. That is the arm lying over the panel like a plank.
 	var mid: Vector3 = (sh_now + xf.origin) * 0.5
-	pole.global_position = mid + Vector3.DOWN * 0.32 \
-			+ camera.global_basis.x * (out * 0.24)
+	pole.global_position = mid + Vector3.DOWN * float(_elbow_down[side]) \
+			+ camera.global_basis.x * (out * float(_elbow_out[side]))
 
 
 func _apply_fingers(side: String) -> void:
@@ -745,7 +900,12 @@ func _apply_fingers(side: String) -> void:
 					contact_scales.size() - 1)])
 			var ang: float = float(values[mini(i, values.size() - 1)]) \
 					* amt * contact_scale
-			skeleton.set_bone_pose_rotation(b, rest * Quaternion(axis, ang))
+			var posed := rest * Quaternion(axis, ang)
+			if f == THUMB and i == 0 and spec.has("thumb_splay"):
+				var splay_axis: Vector3 = _splay_axis.get(b, Vector3.UP)
+				posed = rest * Quaternion(splay_axis,
+						float(spec["thumb_splay"]) * amt) * Quaternion(axis, ang)
+			skeleton.set_bone_pose_rotation(b, posed)
 
 
 func _load_glb() -> Node3D:
@@ -1395,6 +1555,8 @@ func _measure_hand_frames() -> void:
 				var axis_w: Vector3 = d.cross(P_rig).normalized()
 				_curl_axis[b] = (skeleton.get_bone_global_rest(b).basis.inverse()
 						* axis_w).normalized()
+				_splay_axis[b] = (skeleton.get_bone_global_rest(b).basis.inverse()
+						* P_rig).normalized()
 
 
 func _build_ik() -> void:
