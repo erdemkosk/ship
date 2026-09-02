@@ -1870,6 +1870,19 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.2).timeout
 	print("[hand-editor] after undo moved %.4f m (want 0)" % before.distance_to(
 			(rifle.call("bolt_handle_node") as Node3D).position))
+	# Solver off must change the rendered curl: compare the index tip with the
+	# switch on and off while the hand grips the trigger.
+	var hrig_s: Node = (rig.get("_arms") as Node).get("rig")
+	var solver_chk: CheckButton = ed.get("_solver_chk")
+	await get_tree().create_timer(0.3).timeout
+	var tip_on: Vector3 = hrig_s.call("digit_tip_global", "R", "index")
+	solver_chk.button_pressed = false
+	await get_tree().create_timer(0.5).timeout
+	var tip_off: Vector3 = hrig_s.call("digit_tip_global", "R", "index")
+	print("[hand-editor] solver off: enabled=%s index tip moved %.4f m" % [
+			hrig_s.get("contact_solver_enabled"), tip_on.distance_to(tip_off)])
+	await _shot(dir, "editor2b_solver_off")
+	solver_chk.button_pressed = true
 	# Sights, held by the editor rather than by a finger on the button.
 	var state_opt: OptionButton = ed.get("_state_opt")
 	for i in state_opt.item_count:

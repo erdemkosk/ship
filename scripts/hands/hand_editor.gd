@@ -82,6 +82,7 @@ var _bounds_box: MeshInstance3D
 var _drag_axis := -1
 var _drag_rot := false
 var _drag_start := Vector2.ZERO
+var _press_in_panel := false
 
 var _undo: Array = []
 var _last_pose := ""
@@ -918,8 +919,13 @@ func _gizmo_input(event: InputEvent) -> void:
 		if mb.button_index != MOUSE_BUTTON_LEFT:
 			return
 		if mb.pressed:
+			# Over the panel the click belongs to the sliders — and so does
+			# its release, or a slider grabbed there never lets go of the
+			# mouse and keeps re-applying its value wherever the pointer goes.
 			if _panel.get_global_rect().has_point(mb.position):
+				_press_in_panel = true
 				return
+			_press_in_panel = false
 			get_viewport().set_input_as_handled()
 			var axis := _pick_axis(mb.position)
 			if axis >= 0:
@@ -927,9 +933,12 @@ func _gizmo_input(event: InputEvent) -> void:
 				_drag_rot = mb.shift_pressed
 				_drag_start = mb.position
 				_push_undo()
-		elif _drag_axis >= 0:
+		else:
+			if _press_in_panel:
+				_press_in_panel = false
+				return
 			_drag_axis = -1
-		get_viewport().set_input_as_handled()
+			get_viewport().set_input_as_handled()
 		return
 	if event is InputEventMouseMotion and _drag_axis >= 0:
 		var mm := event as InputEventMouseMotion

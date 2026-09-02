@@ -702,6 +702,8 @@ func seed_contact_closure(side: String, amount: float) -> void:
 	## before the fingertips arrive. Seed a real grasp once, then let the normal
 	## collision loop back individual joints off the metal. Never overwrite a
 	## closure that the solver has already started refining.
+	if not contact_solver_enabled:
+		return
 	if not _finger_scales.has(side) or not (_finger_scales[side] as Dictionary).is_empty():
 		return
 	var seeded := {}
@@ -979,7 +981,8 @@ func _apply_fingers(side: String) -> void:
 			var b: int = chain[i]
 			var axis: Vector3 = _curl_axis.get(b, Vector3.RIGHT)
 			var rest: Quaternion = skeleton.get_bone_rest(b).basis.get_rotation_quaternion()
-			var contact_scales: Array = _finger_scales[side].get(f, [1.0, 1.0, 1.0])
+			var contact_scales: Array = _finger_scales[side].get(f, [1.0, 1.0, 1.0]) \
+					if contact_solver_enabled else [1.0, 1.0, 1.0]
 			var contact_scale := float(contact_scales[mini(i,
 					contact_scales.size() - 1)])
 			var ang: float = float(values[mini(i, values.size() - 1)]) \
@@ -991,7 +994,7 @@ func _apply_fingers(side: String) -> void:
 						float(spec["thumb_splay"]) * amt)
 				posed *= Quaternion(axis, ang)
 			skeleton.set_bone_pose_rotation(b, posed)
-	if _pose[side] == "pinch" and not (
+	if _pose[side] == "pinch" and contact_solver_enabled and not (
 			_precision_pinch.get(side, {}) as Dictionary).is_empty():
 		_solve_precision_pinch(side)
 
