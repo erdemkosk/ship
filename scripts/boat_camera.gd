@@ -68,6 +68,7 @@ var _walker: RefCounted = (load("res://scripts/deck_walker.gd") as GDScript).new
 var _roll := 0.0
 var _ship_pitch := 0.0
 var _panel: Node = null
+var _hand_editor: Node
 var _last_aim := ""
 var _interaction_selector: CameraInteractionSelector = CameraInteractionSelectorScript.new()
 var _prompt_presenter: CameraPromptPresenter = CameraPromptPresenterScript.new()
@@ -285,6 +286,16 @@ func _panel_open() -> bool:
 	return _panel != null and _panel.has_method("is_open") and _panel.is_open()
 
 
+func _editor_open() -> bool:
+	## The hand editor (F10) takes the POINTER for its sliders and gizmo and
+	## nothing else: keys, aim and reload keep working so the grip being tuned
+	## can be put through its motions while the panel is up.
+	if _hand_editor == null or not is_instance_valid(_hand_editor):
+		_hand_editor = get_tree().get_first_node_in_group("hand_editor")
+	return _hand_editor != null and _hand_editor.has_method("wants_pointer") \
+			and _hand_editor.wants_pointer()
+
+
 func _view_pitch_guard_active() -> bool:
 	# Check control state directly as well as the hand rig so the limit is active
 	# on the exact frame E takes hold, before the per-hand claim has settled.
@@ -375,7 +386,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseMotion:
 		# Panel up: the pointer is for the sliders, not for looking around.
-		if _panel_open():
+		if _panel_open() or _editor_open():
 			return
 		if mode == Mode.FPS and _bag_focus > 0.03:
 			return # the neck and eyes are committed to the bag in the lap
@@ -667,7 +678,8 @@ func _process_fps(delta: float) -> void:
 
 	# Tab opens the weather panel; while it is up you get your cursor back so
 	# you can actually reach the sliders, and it is taken again on close.
-	var want := Input.MOUSE_MODE_VISIBLE if _panel_open() else Input.MOUSE_MODE_CAPTURED
+	var want := Input.MOUSE_MODE_VISIBLE if _panel_open() or _editor_open() \
+			else Input.MOUSE_MODE_CAPTURED
 	if Input.mouse_mode != want:
 		Input.mouse_mode = want
 

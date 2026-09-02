@@ -47,6 +47,10 @@ func _ready() -> void:
 			want_menu = false
 	if want_menu:
 		_open_menu()
+	# The in-game hand editor. Dormant until F10; costs nothing until then.
+	var hand_editor: CanvasLayer = (load("res://scripts/hands/hand_editor.gd") as GDScript).new()
+	hand_editor.call("setup", rig, boat)
+	add_child(hand_editor)
 	if not uargs.is_empty():
 		var harness: Node = (load("res://scripts/testing/verification_harness.gd") as GDScript).new()
 		harness.call("configure", rig, boat, ocean, weather)

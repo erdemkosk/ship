@@ -19,6 +19,7 @@ extends Node3D
 
 const ARM_PATH := "res://assets/wrad_arms/arms.glb"
 const FINGER_CONTACT_SOLVER := preload("res://scripts/hands/finger_contact_solver.gd")
+const HAND_TUNING := preload("res://scripts/hands/hand_tuning.gd")
 
 const CHAINS := {
 	"R": {"root": "bicep.r", "mid": "forearm.r", "end": "wrist.r"},
@@ -212,6 +213,7 @@ var _weight := {"R": 0.0, "L": 0.0}
 var _want := {"R": 0.0, "L": 0.0}
 var _pose := {"R": "open", "L": "open"}
 var _pose_amt := {"R": 0.0, "L": 0.0}
+var _poses := {}
 var _contact_target := {"R": null, "L": null}
 var _contact_bounds := {"R": AABB(), "L": AABB()}
 var _contact_pad := {"R": 0.018, "L": 0.018}
@@ -231,6 +233,8 @@ var _held_attachment_report := {"R": {}, "L": {}}
 var _precision_pinch := {"R": {}, "L": {}}
 var _held_bone_mount := {}
 var _finger_scales := {"R": {}, "L": {}}
+## Editor switch: false shows the authored curl alone, no collision closure.
+var contact_solver_enabled := true
 var _finger_report := {"R": {}, "L": {}}
 var _lean := Vector3.ZERO
 var _lean_want := Vector3.ZERO
@@ -277,6 +281,11 @@ const STRAP_RATIO := 1.18
 ## bulges when the pose bends it; the links either side of it have to clear the
 ## same bulge or they bury themselves in the skin beside the watch.
 var strap_tight := 0.66
+## How much wider the band is under the palm than the offset ellipse alone
+## would make it. Set by hand: the penetration pair cannot rank this one (the
+## swell changes the band enough that the hand's occlusion moves too). 1.20 is
+## a real increase over the value that cut through, short of reading as a hoop.
+var palm_swell := 1.20
 const STRAP_FRONT := 1.12
 @export var watch_axes_debug := false
 var _watch_n := Vector3.UP
@@ -339,7 +348,24 @@ func held_mount(side: String) -> Node3D:
 
 
 func has_pose(pose: String) -> bool:
-	return POSES.has(pose)
+	return poses().has(pose)
+
+
+## The live pose table: POSES with data/hand_tuning.json written over it.
+## Built once, rebuilt when the editor changes a pose (`refresh_poses`).
+func poses() -> Dictionary:
+	if _poses.is_empty():
+		_poses = HAND_TUNING.overlay_poses(POSES)
+	return _poses
+
+
+func refresh_poses() -> void:
+	_poses = {}
+
+
+## Editor hook: a pose that exists only for this session (unsaved edit).
+func set_pose_override(name: String, fields: Dictionary) -> void:
+	poses()[name] = fields.duplicate()
 
 
 func set_reach_assist(side: String, metres: float) -> void:
@@ -692,8 +718,24 @@ func approach_origin(side: String) -> Vector3:
 	return camera.global_transform * Vector3(out * 0.18, -0.30, -0.28)
 
 
+func pose_name(side: String) -> String:
+	return str(_pose.get(side, "open"))
+
+
+func pose_amount(side: String) -> float:
+	return float(_pose_amt.get(side, 0.0))
+
+
+func contact_bounds_of(side: String) -> Dictionary:
+	## Editor hook: the device and local-space box the finger solver closes on.
+	var device: Node3D = _contact_target.get(side) as Node3D
+	if device == null or not is_instance_valid(device):
+		return {}
+	return {"device": device, "bounds": _contact_bounds.get(side, AABB())}
+
+
 func set_pose(side: String, pose: String, amount := 1.0) -> void:
-	_pose[side] = pose if POSES.has(pose) else "open"
+	_pose[side] = pose if poses().has(pose) else "open"
 	_pose_amt[side] = clampf(amount, 0.0, 1.0)
 
 
@@ -760,6 +802,9 @@ func update(delta: float) -> void:
 		# Wrist IK still follows the weapon (and recoil); only the already-solved
 		# digit curl is frozen so both hands read as glued to the rifle.
 		if bool(_contact_frozen.get(side, false)):
+			continue
+		if not contact_solver_enabled:
+			_finger_scales[side] = {}
 			continue
 		var wrist_bone: int = _end_bone[side]
 		if not _wrist.solved.has(wrist_bone):
@@ -922,7 +967,7 @@ func _reach(side: String, xf: Transform3D, weight: float, clamp_sphere := false)
 
 
 func _apply_fingers(side: String) -> void:
-	var spec: Dictionary = POSES[_pose[side]]
+	var spec: Dictionary = poses()[_pose[side]]
 	var amt: float = _pose_amt[side]
 	for f: int in _fingers[side]:
 		var chain: PackedInt32Array = _fingers[side][f]
@@ -1018,6 +1063,18 @@ func _find_skeleton(n: Node) -> Skeleton3D:
 	return null
 
 
+func _palm_swell(a: float) -> float:
+	## Extra radius on the PALM side of the ring.
+	##
+	## Offsetting the ring toward the palm got most of the way, but a wrist is
+	## not an offset ellipse — it is closer to an egg, with the flesh piled on
+	## the palmar side and almost none over the bone at the back of the hand.
+	## The last place the band was still cutting through was directly under the
+	## palm, and only there.
+	var t: float = clampf((a - 1.4) / 1.75, 0.0, 1.0)
+	return lerpf(1.0, palm_swell, t * t * (3.0 - 2.0 * t))
+
+
 func _strap_close(a: float) -> float:
 	## How much the band has tightened by the time it has wrapped `a` radians
 	## from the case. 1.0 where it leaves the lugs, STRAP_TIGHT under the arm.
@@ -1067,6 +1124,7 @@ func set_strap_scale(k: float) -> void:
 	for e in _strap:
 		var a: float = e[1]
 		var r: float = rn * ra / sqrt(pow(ra * cos(a), 2.0) + pow(rn * sin(a), 2.0))
+		r *= _palm_swell(absf(a))
 		(e[0] as Node3D).position = Vector3(0.0, sin(a) * r, az + cos(a) * r)
 
 
@@ -1147,7 +1205,14 @@ func _build_watch() -> void:
 	# wrist bone, every grip that rolled the hand took the case with it.
 	# B still lifts the whole arm, so the face comes up the same way.
 	var ba := BoneAttachment3D.new()
-	var fore_name := str(CHAINS["L"]["mid"])
+	# The TWIST bone, not the forearm bone itself. wrist_align spreads the
+	# wrist's roll down forearm.Twist0/1 — that roll is pronation and
+	# supination, the one motion of the arm that really does carry a watch
+	# round with it. The forearm bone takes none of it (a watch parented
+	# there never turns); the wrist bone takes all of it plus every flexion
+	# and every grip (that was the sliding). Twist1 takes exactly the one.
+	var fore_name := "forearm.Twist1.l" if _bone("forearm.Twist1.l") >= 0 \
+			else str(CHAINS["L"]["mid"])
 	var wrist_name := str(CHAINS["L"]["end"])
 	_watch_fore_name = fore_name
 	_watch_wrist_name = wrist_name
@@ -1318,25 +1383,8 @@ func _build_watch() -> void:
 	bez.mesh = bm
 	bez.material_override = worn
 	head.add_child(bez)
-	# Lugs on the case itself, so the strap is born from the watch rather
-	# than appearing beside it. Side pair is where the hoop meets; the 12/6
-	# pair is the silhouette everybody reads as "this is a watch".
-	for sy: float in [-1.0, 1.0]:
-		var lug_s := MeshInstance3D.new()
-		var lsm := BoxMesh.new()
-		lsm.size = Vector3(0.0240, 0.0075, 0.0080)
-		lug_s.mesh = lsm
-		lug_s.material_override = worn
-		lug_s.position = Vector3(0.0, sy * 0.0178, -0.0008)
-		head.add_child(lug_s)
-	for sx: float in [-1.0, 1.0]:
-		var lug_e := MeshInstance3D.new()
-		var lem := BoxMesh.new()
-		lem.size = Vector3(0.0070, 0.0260, 0.0075)
-		lug_e.mesh = lem
-		lug_e.material_override = worn
-		lug_e.position = Vector3(sx * 0.0198, 0.0, -0.0006)
-		head.add_child(lug_e)
+	# No lugs. The band comes straight out of the case, the same on both
+	# sides — a moulded resin dive watch, not a dress watch with horns.
 	var screen := MeshInstance3D.new()
 	var qm := QuadMesh.new()
 	qm.size = Vector2(0.0248, 0.0155)
@@ -1412,6 +1460,7 @@ func _build_watch() -> void:
 			var a: float = deg_to_rad(a_deg) * sgn
 			var r: float = rad_n * rad_a / sqrt(
 					pow(rad_a * cos(a), 2.0) + pow(rad_n * sin(a), 2.0))
+			r *= _palm_swell(absf(a))
 
 			var sm2 := MeshInstance3D.new()
 			var sb := BoxMesh.new()
@@ -1436,7 +1485,7 @@ func _build_watch() -> void:
 	var ka := deg_to_rad(152.0)
 	var kr: float = rad_n * rad_a / sqrt(
 			pow(rad_a * cos(ka), 2.0) + pow(rad_n * sin(ka), 2.0))
-	kr += 0.0026
+	kr = kr * _palm_swell(ka) + 0.0026
 	keeper.position = Vector3(0.0, sin(ka) * kr, axis_z + cos(ka) * kr)
 	keeper.rotation.x = -ka
 	holder.add_child(keeper)

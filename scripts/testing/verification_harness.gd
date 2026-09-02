@@ -143,6 +143,12 @@ func run(args: PackedStringArray) -> void:
 			_rifle_test(rig, boat)
 		elif arg.begins_with("--rifle-shot="):
 			_rifle_shot(rig, boat, arg.get_slice("=", 1))
+		elif arg.begins_with("--hand-editor-shot="):
+			_hand_editor_shot(rig, boat, arg.get_slice("=", 1))
+		elif arg == "--hand-editor-test":
+			_hand_editor_test(rig, boat)
+		elif arg.begins_with("--hand-editor-grip-shot="):
+			_hand_editor_grip_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--probe-engine":
 			_probe_engine(boat)
 		elif arg == "--drift-test":
@@ -1787,6 +1793,234 @@ func _rifle_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	rig.call("set_bag_open", true)
 	await get_tree().create_timer(0.95).timeout
 	await _shot(dir, "rifle14_return")
+	_quit_cleanly()
+
+
+func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## The F10 editor over the rifle: panel, gizmo on the trigger grip, then the
+	## reload scrubbed to its bolt-open stop with the bolt marker selected.
+	# The editor saves on close; a probe must never write the project's file.
+	var tuning := load("res://scripts/hands/hand_tuning.gd")
+	tuning.path_override = "user://hand_tuning_probe.json"
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(tuning.path_override))
+	tuning.reload()
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("_bag_selected", 4)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	rig.call("_activate_bag_selection")
+	await get_tree().create_timer(1.05).timeout
+	var ed: Node = get_tree().get_first_node_in_group("hand_editor")
+	if ed == null:
+		print("no hand editor"); _quit_cleanly(); return
+	ed.call("set_open", true)
+	await get_tree().create_timer(0.5).timeout
+	var bag0: Node3D = boat.call("deck_bag_node") as Node3D
+	print("[hand-editor] primary marker at open: %s" % (
+			(bag0.get("_active_item") as Node).call("primary_grip_node") as Node3D).position)
+	await _shot(dir, "editor0_rifle_primary")
+	var opt: OptionButton = ed.get("_target_opt")
+	print("[hand-editor] targets: ", ed.get("_targets").map(func(t): return t["key"]))
+	# Bolt handle, reload scrubbed to the open stop.
+	for i in opt.item_count:
+		if opt.get_item_text(i).ends_with("BoltHandle"):
+			opt.select(i)
+			ed.call("_select_target", i)
+	await get_tree().create_timer(0.3).timeout
+	var stop_opt: OptionButton = ed.get("_stop_opt")
+	for i in stop_opt.item_count:
+		if stop_opt.get_item_text(i).begins_with("bolt_open_end"):
+			stop_opt.select(i)
+			ed.call("_seq_select_stop", i)
+	await get_tree().create_timer(0.8).timeout
+	await _shot(dir, "editor1_bolt_open_stop")
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var rifle: Node = bag.get("_active_item")
+	print("[hand-editor] reload_elapsed=%.2f paused=%s bolt_open=%.3f" % [
+			float(rifle.call("reload_elapsed")), rifle.call("reload_paused"),
+			float(rifle.call("bolt_open_amount"))])
+	# Nudge the bolt marker 15 mm along its X through the editor path and
+	# prove the live node moved with the slider.
+	var before: Vector3 = (rifle.call("bolt_handle_node") as Node3D).position
+	var pos_s: Array = ed.get("_pos_s")
+	var rot_s: Array = ed.get("_rot_s")
+	print("[hand-editor] marker %s | sliders pos %s rot %s | ranges %s" % [before,
+			[pos_s[0].value, pos_s[1].value, pos_s[2].value],
+			[rot_s[0].value, rot_s[1].value, rot_s[2].value],
+			[pos_s[0].min_value, pos_s[0].max_value]])
+	ed.call("_push_undo")
+	(pos_s[0] as HSlider).value += 0.015
+	await get_tree().create_timer(0.3).timeout
+	var after: Vector3 = (rifle.call("bolt_handle_node") as Node3D).position
+	print("[hand-editor] after nudge marker %s slider x %.4f" % [after, pos_s[0].value])
+	print("[hand-editor] bolt marker moved %.4f m (want 0.015)" % before.distance_to(after))
+	await _shot(dir, "editor2_bolt_nudged")
+	ed.call("_undo_last")
+	await get_tree().create_timer(0.2).timeout
+	print("[hand-editor] after undo moved %.4f m (want 0)" % before.distance_to(
+			(rifle.call("bolt_handle_node") as Node3D).position))
+	ed.call("_seq_stop_scrub")
+	ed.call("set_open", false)
+	await get_tree().create_timer(0.4).timeout
+	await _shot(dir, "editor3_closed")
+	_quit_cleanly()
+
+
+func _hand_editor_grip_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## The editor over a GripMap fitting (the handset): frame sliders move the
+	## stamped grip node, pose dropdown re-poses the hand, reset restores.
+	var tuning := load("res://scripts/hands/hand_tuning.gd")
+	tuning.path_override = "user://hand_tuning_probe.json"
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(tuning.path_override))
+	tuning.reload()
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	_use_later(boat, "telegraph")
+	await get_tree().create_timer(2.6).timeout
+	var ed: Node = get_tree().get_first_node_in_group("hand_editor")
+	ed.call("set_open", true)
+	await get_tree().create_timer(0.5).timeout
+	print("[hand-editor] targets: ", ed.get("_targets").map(func(t): return t["key"]))
+	await _shot(dir, "grip0_telegraph")
+	var arms: Node = rig.get("_arms")
+	var side: String = "L" if str((arms.get("_claim") as Dictionary).get("L", "")) == "telegraph" else "R"
+	var g: Node3D = arms.call("grip_node_of", "telegraph", side) as Node3D
+	if g == null:
+		print("[hand-editor] no grip node for telegraph"); _quit_cleanly(); return
+	var before: Vector3 = g.position
+	var pos_s: Array = ed.get("_pos_s")
+	ed.call("_push_undo")
+	(pos_s[1] as HSlider).value += 0.02
+	await get_tree().create_timer(0.4).timeout
+	g = arms.call("grip_node_of", "telegraph", side) as Node3D
+	print("[hand-editor] telegraph grip moved %.4f m (want 0.02); file grip=%s" % [
+			before.distance_to(g.position), tuning.grip("telegraph")])
+	await _shot(dir, "grip1_telegraph_nudged")
+	# Pose swap through the dropdown.
+	var pose_opt: OptionButton = ed.get("_pose_opt")
+	for i in pose_opt.item_count:
+		if pose_opt.get_item_text(i) == "fist":
+			pose_opt.select(i)
+			ed.call("_choose_pose", i)
+	await get_tree().create_timer(0.5).timeout
+	var hrig: Node = arms.get("rig")
+	print("[hand-editor] telegraph pose now %s (want fist)" % hrig.call("pose_name", side))
+	await _shot(dir, "grip2_telegraph_fist")
+	ed.call("_reset_frame")
+	await get_tree().create_timer(0.4).timeout
+	g = arms.call("grip_node_of", "telegraph", side) as Node3D
+	print("[hand-editor] after reset: moved %.4f m (want 0), pose %s (want fist), file grip=%s" % [
+			before.distance_to(g.position), hrig.call("pose_name", side),
+			tuning.grip("telegraph")])
+	for n in 3:
+		ed.call("_undo_last")
+	await get_tree().create_timer(0.4).timeout
+	g = arms.call("grip_node_of", "telegraph", side) as Node3D
+	print("[hand-editor] after 3 undos: moved %.4f m (want 0), pose %s (want power), file grip=%s (want empty)" % [
+			before.distance_to(g.position), hrig.call("pose_name", side),
+			tuning.grip("telegraph")])
+	ed.call("set_open", false)
+	await get_tree().create_timer(0.3).timeout
+	await _shot(dir, "grip3_closed")
+	_quit_cleanly()
+
+
+func _hand_editor_test(rig: Node3D, boat: RigidBody3D) -> void:
+	## Numeric: tuning written through the editor's data layer survives a
+	## save/reload and lands on the live objects. Uses a scratch file so the
+	## project's own data/hand_tuning.json is never touched by a test.
+	var tuning := load("res://scripts/hands/hand_tuning.gd")
+	tuning.path_override = "user://hand_tuning_test.json"
+	tuning.reload()
+	var ok := true
+	# 1. grip overlay reaches GripMap.spec_for.
+	var base: Dictionary = HandGripMap.spec_for("telegraph")
+	tuning.set_grip("telegraph", {"pos": [0.0, 0.40, 0.0], "pose": "hook"})
+	var over: Dictionary = HandGripMap.spec_for("telegraph")
+	var g_ok: bool = over["pos"] is Vector3 and (over["pos"] as Vector3).is_equal_approx(
+			Vector3(0.0, 0.40, 0.0)) and str(over["pose"]) == "hook" \
+			and (base["pos"] as Vector3).y < 0.39
+	print("[hand-editor-test] grip overlay: ", g_ok)
+	ok = ok and g_ok
+	# 2. pose overlay reaches the rig's live table.
+	var arms: Node = rig.get("_arms")
+	var hrig: Node = arms.get("rig")
+	tuning.set_pose("power", {"index": [0.1, 0.2, 0.3]})
+	hrig.call("refresh_poses")
+	var p: Dictionary = (hrig.call("poses") as Dictionary)["power"]
+	var p_ok: bool = (p["index"] as Array)[2] == 0.3 and p.has("thumb")
+	print("[hand-editor-test] pose overlay: ", p_ok)
+	ok = ok and p_ok
+	# 3. reload stops: moved, clamped monotonic, pose per stop.
+	var stops := load("res://scripts/hands/rifle_reload_stops.gd")
+	stops.set_time("bolt_open_end", 1.30)
+	stops.set_time("cartridge_show", 0.10)     # below its predecessor: clamped
+	stops.set_pose("bolt_open_end", "power")
+	var t: Dictionary = stops.times()
+	var s_ok: bool = absf(float(t["bolt_open_end"]) - 1.30) < 1e-4 \
+			and float(t["cartridge_show"]) >= float(t["bolt_open_end"]) + 0.019 \
+			and stops.pose_at(1.31) == "power" and stops.pose_at(0.5) == "bolt_grip"
+	print("[hand-editor-test] stops: ", s_ok, " ", t)
+	ok = ok and s_ok
+	# 4. round trip through the file.
+	var saved: bool = tuning.save()
+	tuning.reload()
+	var back: Dictionary = HandGripMap.spec_for("telegraph")
+	var t2: Dictionary = stops.times()
+	var r_ok: bool = saved and str(back.get("pose", "")) == "hook" \
+			and absf(float(t2["bolt_open_end"]) - 1.30) < 1e-4 \
+			and (tuning.pose("power")["index"] as Array)[2] == 0.3
+	print("[hand-editor-test] round trip: ", r_ok)
+	ok = ok and r_ok
+	# 5. rifle seek/pause contract on the real weapon. The bag does not open
+	# without a display (its focus animation never runs headless), so this part
+	# only counts when there is a window; --hand-editor-shot covers it there.
+	if DisplayServer.get_name() == "headless":
+		print("[hand-editor-test] seek: skipped (headless) complete=%s" % ok)
+		DirAccess.remove_absolute(ProjectSettings.globalize_path("user://hand_tuning_test.json"))
+		tuning.path_override = ""
+		tuning.reload()
+		_quit_cleanly()
+		return
+	rig.call("set_mode", 1)
+	rig.set("_bag_selected", 4)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.9).timeout
+	var activated: bool = bool(rig.call("_activate_bag_selection"))
+	await get_tree().create_timer(1.2).timeout
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var rifle: Node = bag.get("_active_item")
+	print("[hand-editor-test] bag activated=%s kind=%s" % [activated,
+			bag.call("active_item_kind")])
+	var k_ok := false
+	if rifle != null and rifle.has_method("seek_reload"):
+		rifle.call("seek_reload", 1.0, true)
+		var open_at_1: float = float(rifle.call("bolt_open_amount"))
+		await get_tree().create_timer(0.4).timeout
+		var still: bool = absf(float(rifle.call("reload_elapsed")) - 1.0) < 1e-3
+		rifle.call("seek_reload", 0.0, true)
+		var open_at_0: float = float(rifle.call("bolt_open_amount"))
+		k_ok = still and open_at_1 > 0.04 and open_at_0 < 0.005 \
+				and bool(rifle.call("is_reloading"))
+		print("[hand-editor-test] seek: held=%s open@1.0=%.3f open@0=%.3f" % [
+				still, open_at_1, open_at_0])
+		rifle.call("seek_reload", -1.0, false)
+	else:
+		print("[hand-editor-test] no rifle to seek")
+	ok = ok and k_ok
+	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://hand_tuning_test.json"))
+	tuning.path_override = ""
+	tuning.reload()
+	print("[hand-editor-test] complete=%s" % ok)
 	_quit_cleanly()
 
 

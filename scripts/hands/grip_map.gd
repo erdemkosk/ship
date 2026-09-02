@@ -4,6 +4,7 @@ class_name GripMap
 const INTERACTION_MOTION := preload("res://scripts/hands/interaction_motion.gd")
 const INTERACTION_BEHAVIOR := preload("res://scripts/hands/interaction_behavior.gd")
 const HELD_OBJECT_FRAMER := preload("res://scripts/hands/held_object_framer.gd")
+const HAND_TUNING := preload("res://scripts/hands/hand_tuning.gd")
 ## The object's side of a hold. Hands do not invent a grip — they read this.
 ##
 ## A grip is a frame in the DEVICE's local space:
@@ -362,6 +363,13 @@ const ENTRIES := {
 
 
 static func spec_for(id: String) -> Dictionary:
+	## The catalog entry, with whatever the in-game editor has saved for this
+	## id written over it (data/hand_tuning.json). Code is the default; the
+	## file is the tuning.
+	return HAND_TUNING.overlay_grip(id, _catalog_spec(id))
+
+
+static func _catalog_spec(id: String) -> Dictionary:
 	if ENTRIES.has(id):
 		return ENTRIES[id]
 	if id.begins_with("sw_"):

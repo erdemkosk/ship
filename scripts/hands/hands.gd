@@ -1469,6 +1469,26 @@ func _device_of(id: String) -> Node3D:
 	return GripMap.device_of(boat, id)
 
 
+func refresh_grip(id: String) -> void:
+	## Editor hook: the catalog/tuning entry for `id` changed. Drop its stamped
+	## grip nodes so the next drive re-reads the spec; nothing else is touched.
+	for side: String in ["L", "R"]:
+		var key := id + ":" + side
+		if _grips.has(key):
+			var g: Node3D = _grips[key]
+			_grips.erase(key)
+			if is_instance_valid(g):
+				g.queue_free()
+
+
+func grip_node_of(id: String, side: String) -> Node3D:
+	## Editor hook: the live grip node, or null when this hand has no claim.
+	var key := id + ":" + side
+	if _grips.has(key) and is_instance_valid(_grips[key]):
+		return _grips[key]
+	return null
+
+
 func _grip_node(id: String, side: String) -> Node3D:
 	var key := id + ":" + side
 	var spec: Dictionary = GripMap.spec_for(id)

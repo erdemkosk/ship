@@ -10,6 +10,7 @@ const MODEL_SCENE := preload("res://art/models/hunting_rifle_animation.glb")
 const SHOT_AUDIO_PATH := "res://assets/audio/kar98_shot.mp3"
 const RELOAD_AUDIO_PATH := "res://assets/audio/kar98_reload.mp3"
 const AudioMix := preload("res://scripts/audio_mix.gd")
+const HAND_TUNING := preload("res://scripts/hands/hand_tuning.gd")
 const SOURCE_SLOT_CENTER := Vector3(0.407, -0.005, 0.0)
 # Seat the trigger palm on the narrow stock wrist, behind and below the action.
 # The previous point was too high/forward: the palm technically touched wood,
@@ -32,13 +33,7 @@ const SOURCE_BOLT_HANDLE := Vector3(0.230, 0.016, 0.070)
 const SOURCE_MUZZLE := Vector3(0.905, 0.058, 0.0)
 const FIRE_DURATION := 1.25
 const FLASH_DURATION := 0.165
-const RELOAD_DURATION := 3.30
-const RELOAD_BOLT_OPEN_START := 0.25
-const RELOAD_BOLT_OPEN_END := 0.95
-const RELOAD_CARTRIDGE_SHOW := 1.15
-const RELOAD_INSERTED := 2.28
-const RELOAD_BOLT_CLOSE_START := 2.45
-const RELOAD_BOLT_CLOSE_END := 2.90
+const RELOAD_STOPS := preload("res://scripts/hands/rifle_reload_stops.gd")
 # Measured from Rifle_Shoot: Bolt_Bone reaches its furthest rear translation at
 # 0.8333 s. Hold both animation and sound there while the cartridge is inserted.
 const RELOAD_BOLT_HOLD_CLIP_TIME := 0.8333
@@ -101,6 +96,7 @@ var _flash_left := 0.0
 var _shot_serial := 0
 var _loaded := true
 var _reload_elapsed := -1.0
+var _reload_paused := false
 var _reload_bolt_started := false
 var _reload_bolt_held := false
 var _reload_bolt_closing := false
@@ -148,6 +144,11 @@ func _build_model() -> void:
 	_bolt_handle = _marker("BoltHandle", SOURCE_BOLT_HANDLE,
 			# Right palm faces the rifle, fingers fold down around the bolt knob.
 			Basis(Vector3.BACK, Vector3.LEFT, Vector3.DOWN))
+	# Whatever the in-game hand editor has saved for these frames wins over
+	# the authored constants above; the rest pose is read AFTER that.
+	for marker: Node3D in [_primary_grip, _support_grip, _bolt_handle, _chamber]:
+		marker.set_meta("authored_transform", marker.transform)
+		HAND_TUNING.apply_marker("rifle/" + marker.name, marker)
 	_bolt_handle_rest = _bolt_handle.transform
 	_find_animation_player(_model)
 	_build_fire_only_animation()
@@ -770,6 +771,13 @@ func bolt_handle_node() -> Node3D:
 	return _bolt_handle
 
 
+func refresh_marker_rest() -> void:
+	## Editor hook: a grip marker was moved live; the bolt's rest frame is a
+	## copy taken at build time and must follow.
+	if _bolt_handle != null:
+		_bolt_handle_rest = _bolt_handle.transform
+
+
 func bolt_grip_transform() -> Transform3D:
 	if _skeleton == null or _bolt_bone < 0:
 		return _bolt_handle_rest
@@ -935,13 +943,13 @@ func reload_elapsed() -> float:
 
 
 func reload_amount() -> float:
-	return clampf(_reload_elapsed / RELOAD_DURATION, 0.0, 1.0) \
+	return clampf(_reload_elapsed / _stop("duration"), 0.0, 1.0) \
 			if _reload_elapsed >= 0.0 else 0.0
 
 
 func reload_bolt_held_open() -> bool:
-	return _reload_elapsed >= RELOAD_BOLT_OPEN_END \
-			and _reload_elapsed < RELOAD_BOLT_CLOSE_START \
+	return _reload_elapsed >= _stop("bolt_open_end") \
+			and _reload_elapsed < _stop("bolt_close_start") \
 			and _reload_bolt_held
 
 
@@ -950,6 +958,116 @@ func bolt_open_amount() -> float:
 	# knob's position slightly, which is useful here because this reports the
 	# player's visible control rather than only one source-space coordinate.
 	return bolt_grip_transform().origin.distance_to(_bolt_handle_rest.origin)
+
+
+func _stop(name: String) -> float:
+	return RELOAD_STOPS.time_of(name)
+
+
+# --- reload stops: the editor's side of the reload ---------------------------
+
+func reload_stops() -> Dictionary:
+	return RELOAD_STOPS.times()
+
+
+func reload_stop_order() -> Array:
+	return RELOAD_STOPS.ORDER
+
+
+func reload_duration() -> float:
+	return _stop("duration")
+
+
+func reload_stop_pose(name: String) -> String:
+	return RELOAD_STOPS.pose_of(name)
+
+
+func set_reload_stop(name: String, t: float) -> void:
+	RELOAD_STOPS.set_time(name, t)
+
+
+func set_reload_stop_pose(name: String, pose: String) -> void:
+	RELOAD_STOPS.set_pose(name, pose)
+
+
+func reload_paused() -> bool:
+	return _reload_paused
+
+
+func _reload_clip_time(t: float) -> float:
+	## Where the bolt animation stands at reload time t: still until the hand
+	## arrives, opening to the measured full-rear key, held there while the
+	## round goes in, closing, then still again.
+	var a := _stop("bolt_open_start")
+	var b := _stop("bolt_open_end")
+	var c := _stop("bolt_close_start")
+	var d := _stop("bolt_close_end")
+	if t < a:
+		return 0.0
+	if t < b:
+		return RELOAD_BOLT_HOLD_CLIP_TIME * (t - a) / maxf(b - a, 0.001)
+	if t < c:
+		return RELOAD_BOLT_HOLD_CLIP_TIME
+	if t < d:
+		return RELOAD_BOLT_HOLD_CLIP_TIME + (RELOAD_BOLT_CLIP_END \
+				- RELOAD_BOLT_HOLD_CLIP_TIME) * (t - c) / maxf(d - c, 0.001)
+	return RELOAD_BOLT_CLIP_END
+
+
+func seek_reload(t: float, hold: bool) -> void:
+	## Editor scrub. t < 0 leaves the reload entirely (as cancel_reload);
+	## otherwise the reload is put at t — flags, bolt animation, cartridge —
+	## and, with `hold`, frozen there until set_reload_paused(false).
+	if t < 0.0:
+		cancel_reload()
+		_reload_paused = false
+		return
+	t = clampf(t, 0.0, _stop("duration") - 0.001)
+	if _reload_elapsed < 0.0:
+		_fire_elapsed = -1.0
+		_flash_left = 0.0
+		if _shot_audio != null:
+			_shot_audio.stop()
+	_reload_elapsed = t
+	_reload_paused = hold
+	_reload_bolt_started = t >= _stop("bolt_open_start")
+	_reload_bolt_held = t >= _stop("bolt_open_end")
+	_reload_bolt_closing = t >= _stop("bolt_close_start")
+	_reload_sound_started_at = -1.0
+	if _reload_audio != null:
+		_reload_audio.stop()
+		_reload_audio.stream_paused = false
+	if _animation != null and _reload_animation != StringName():
+		_animation.play(_reload_animation)
+		_animation.seek(_reload_clip_time(t), true)
+		_animation.pause()
+	if _cartridge != null:
+		_cartridge.visible = t >= _stop("cartridge_show") and t < _stop("inserted")
+	if not hold:
+		set_reload_paused(false)
+
+
+func set_reload_paused(on: bool) -> void:
+	_reload_paused = on
+	if on or _reload_elapsed < 0.0 or _animation == null \
+			or _reload_animation == StringName():
+		return
+	# Resume the bolt from wherever the scrub left it, at the phase's speed.
+	var t := _reload_elapsed
+	var clip := _reload_clip_time(t)
+	if t >= _stop("bolt_open_start") and t < _stop("bolt_open_end"):
+		_animation.play(_reload_animation, -1.0, RELOAD_BOLT_HOLD_CLIP_TIME \
+				/ maxf(_stop("bolt_open_end") - _stop("bolt_open_start"), 0.001))
+		_animation.seek(clip, true)
+	elif t >= _stop("bolt_close_start") and t < _stop("bolt_close_end"):
+		_animation.play(_reload_animation, -1.0, (RELOAD_BOLT_CLIP_END \
+				- RELOAD_BOLT_HOLD_CLIP_TIME) / maxf(_stop("bolt_close_end") \
+				- _stop("bolt_close_start"), 0.001))
+		_animation.seek(clip, true)
+	else:
+		_animation.play(_reload_animation)
+		_animation.seek(clip, true)
+		_animation.pause()
 
 
 func _shoot_animation_name() -> StringName:
@@ -970,13 +1088,13 @@ func tick(delta: float) -> void:
 	var flash := flash_energy()
 	if _flash_light != null:
 		_flash_light.light_energy = flash * flash * 12.0
-	if _reload_elapsed >= 0.0:
+	if _reload_elapsed >= 0.0 and not _reload_paused:
 		_reload_elapsed += delta
 		if _cartridge != null:
-			_cartridge.visible = _reload_elapsed >= RELOAD_CARTRIDGE_SHOW \
-					and _reload_elapsed < RELOAD_INSERTED
+			_cartridge.visible = _reload_elapsed >= _stop("cartridge_show") \
+					and _reload_elapsed < _stop("inserted")
 		if not _reload_bolt_started \
-				and _reload_elapsed >= RELOAD_BOLT_OPEN_START:
+				and _reload_elapsed >= _stop("bolt_open_start"):
 			_reload_bolt_started = true
 			_reload_sound_started_at = _reload_elapsed
 			if _reload_audio != null:
@@ -987,10 +1105,10 @@ func tick(delta: float) -> void:
 				if reload_clip != StringName():
 					_animation.stop()
 					var open_speed := RELOAD_BOLT_HOLD_CLIP_TIME \
-							/ (RELOAD_BOLT_OPEN_END - RELOAD_BOLT_OPEN_START)
+							/ (_stop("bolt_open_end") - _stop("bolt_open_start"))
 					_animation.play(reload_clip, -1.0, open_speed)
 		if _reload_bolt_started and not _reload_bolt_held \
-				and _reload_elapsed >= RELOAD_BOLT_OPEN_END:
+				and _reload_elapsed >= _stop("bolt_open_end"):
 			_reload_bolt_held = true
 			if _animation != null:
 				_animation.pause()
@@ -998,17 +1116,17 @@ func tick(delta: float) -> void:
 			if _reload_audio != null:
 				_reload_audio.stream_paused = true
 		if _reload_bolt_held and not _reload_bolt_closing \
-				and _reload_elapsed >= RELOAD_BOLT_CLOSE_START:
+				and _reload_elapsed >= _stop("bolt_close_start"):
 			_reload_bolt_closing = true
 			if _animation != null and _reload_animation != StringName():
 				var close_speed := (RELOAD_BOLT_CLIP_END \
 						- RELOAD_BOLT_HOLD_CLIP_TIME) \
-						/ (RELOAD_BOLT_CLOSE_END - RELOAD_BOLT_CLOSE_START)
+						/ (_stop("bolt_close_end") - _stop("bolt_close_start"))
 				_animation.play(_reload_animation, -1.0, close_speed)
 				_animation.seek(RELOAD_BOLT_HOLD_CLIP_TIME, true)
 			if _reload_audio != null:
 				_reload_audio.stream_paused = false
-		if _reload_elapsed >= RELOAD_DURATION:
+		if _reload_elapsed >= _stop("duration"):
 			_reload_elapsed = -1.0
 			_reload_bolt_started = false
 			_reload_bolt_held = false

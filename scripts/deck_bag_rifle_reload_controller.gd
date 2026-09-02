@@ -2,15 +2,7 @@ class_name DeckBagRifleReloadController
 extends RefCounted
 ## Reload hand choreography and its authored cartridge/bolt timing contract.
 
-const RELOAD_BOLT_OPEN_START := 0.25
-const RELOAD_BOLT_OPEN_END := 0.95
-const RELOAD_CARTRIDGE_SHOW := 1.15
-const RELOAD_CARTRIDGE_MOVE := 1.40
-const RELOAD_CARTRIDGE_INSERT := 2.00
-const RELOAD_INSERTED := 2.28
-const RELOAD_BOLT_CLOSE_START := 2.45
-const RELOAD_BOLT_CLOSE_END := 2.90
-const RELOAD_DURATION := 3.30
+const STOPS := preload("res://scripts/hands/rifle_reload_stops.gd")
 
 func _reload_segment(t: float, start: float, finish: float) -> float:
 	return smoothstep(0.0, 1.0, clampf((t - start) /
@@ -21,6 +13,18 @@ func update(rifle: Node3D, camera: Camera3D, weapon_frame: Transform3D,
 		primary_frame: Transform3D, primary_target: Node3D,
 		configure_normal_hand: Callable) -> void:
 	var t := float(rifle.call("reload_elapsed"))
+	# Every boundary below is a STOP in the shared table (rifle_reload_stops),
+	# the same numbers the rifle's animation runs on and the editor moves.
+	var S: Dictionary = STOPS.times()
+	var RELOAD_BOLT_OPEN_START: float = S["bolt_open_start"]
+	var RELOAD_BOLT_OPEN_END: float = S["bolt_open_end"]
+	var RELOAD_CARTRIDGE_SHOW: float = S["cartridge_show"]
+	var RELOAD_CARTRIDGE_MOVE: float = S["cartridge_move"]
+	var RELOAD_CARTRIDGE_INSERT: float = S["cartridge_insert"]
+	var RELOAD_INSERTED: float = S["inserted"]
+	var RELOAD_BOLT_CLOSE_START: float = S["bolt_close_start"]
+	var RELOAD_BOLT_CLOSE_END: float = S["bolt_close_end"]
+	var RELOAD_DURATION: float = S["duration"]
 	var chamber_node := rifle.call("chamber_node") as Node3D
 	var bolt_node := rifle.call("bolt_handle_node") as Node3D
 	var cartridge := rifle.call("cartridge_node") as Node3D
@@ -57,7 +61,7 @@ func update(rifle: Node3D, camera: Camera3D, weapon_frame: Transform3D,
 	var bolt_knuckles := bolt_palm.cross(bolt_fingers).normalized()
 	bolt.basis = Basis(bolt_knuckles, bolt_palm, bolt_fingers)
 	var hand_frame := primary_frame
-	var pose := "bolt_grip"
+	var pose := STOPS.pose_at(t)
 	var natural_grip_blend := _reload_segment(t, 0.0, 0.16)
 	var carrying_round := t >= RELOAD_CARTRIDGE_SHOW and t < RELOAD_INSERTED
 	var bolt_contact_active := false
@@ -74,18 +78,15 @@ func update(rifle: Node3D, camera: Camera3D, weapon_frame: Transform3D,
 	elif t < RELOAD_CARTRIDGE_SHOW:
 		# The animation is paused at its measured full-rear key. The hand may leave
 		# the knob, but the metal remains open while it travels to the cartridge.
-		pose = "pinch"
 		hand_frame = Transform3D(chamber.basis,
 				bolt.origin.lerp(pocket_palm_position,
 				_reload_segment(t, RELOAD_BOLT_OPEN_END,
 				RELOAD_CARTRIDGE_SHOW)))
 	elif t < RELOAD_CARTRIDGE_MOVE:
-		pose = "pinch"
 		desired_round = pocket_round
 		hand_frame = Transform3D(chamber.basis,
 				desired_round * round_palm_local)
 	elif t < RELOAD_CARTRIDGE_INSERT:
-		pose = "pinch"
 		desired_round = Transform3D(chamber.basis,
 				pocket_round.origin.lerp(chamber_entry.origin,
 				_reload_segment(t, RELOAD_CARTRIDGE_MOVE,
@@ -93,7 +94,6 @@ func update(rifle: Node3D, camera: Camera3D, weapon_frame: Transform3D,
 		hand_frame = Transform3D(chamber.basis,
 				desired_round * round_palm_local)
 	elif t < RELOAD_INSERTED:
-		pose = "pinch"
 		desired_round = Transform3D(chamber.basis,
 				chamber_entry.origin.lerp(chamber.origin,
 				_reload_segment(t, RELOAD_CARTRIDGE_INSERT,
@@ -109,13 +109,10 @@ func update(rifle: Node3D, camera: Camera3D, weapon_frame: Transform3D,
 		var inserted_palm := chamber * round_palm_local
 		hand_frame = Transform3D(chamber.basis,
 				inserted_palm.lerp(bolt.origin, approach_blend))
-		pose = "bolt_grip"
 	elif t < RELOAD_BOLT_CLOSE_END:
-		pose = "bolt_grip"
 		hand_frame = bolt
 		bolt_contact_active = true
 	else:
-		pose = "rifle_primary"
 		var return_blend := _reload_segment(t, RELOAD_BOLT_CLOSE_END,
 				RELOAD_DURATION)
 		# Preserve one stable trigger-grip endpoint while the palm comes home.

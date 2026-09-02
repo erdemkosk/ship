@@ -17,6 +17,7 @@ const HANDLE_KNUCKLE_OFFSET := 0.0
 # this far beyond the authored palm contact plane.
 const PALM_SKIN_CLEARANCE := 0.002
 const ATTACK_DURATION := 0.62
+const HAND_TUNING := preload("res://scripts/hands/hand_tuning.gd")
 const HIT_WINDOW_START := 0.28
 const HIT_WINDOW_END := 0.56
 const WINDUP_END := 0.27
@@ -83,6 +84,8 @@ func _build_model() -> void:
 	_grip = Node3D.new()
 	_grip.name = "Grip"
 	add_child(_grip)
+	_grip.set_meta("authored_transform", _grip.transform)
+	HAND_TUNING.apply_marker("knife/Grip", _grip)
 	_blade_base = Node3D.new()
 	_blade_base.name = "BladeBase"
 	_blade_base.position = _imported_point(blade_mesh, SOURCE_BLADE_BASE)
