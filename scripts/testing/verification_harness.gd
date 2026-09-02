@@ -1832,6 +1832,12 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 			opt.select(i)
 			ed.call("_select_target", i)
 	await get_tree().create_timer(0.3).timeout
+	var state_sel: OptionButton = ed.get("_state_opt")
+	for i in state_sel.item_count:
+		if state_sel.get_item_metadata(i) == "reload":
+			state_sel.select(i)
+			ed.call("_set_state", "reload")
+	await get_tree().create_timer(0.3).timeout
 	var stop_opt: OptionButton = ed.get("_stop_opt")
 	for i in stop_opt.item_count:
 		if stop_opt.get_item_text(i).begins_with("bolt_open_end"):
@@ -1864,10 +1870,20 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.2).timeout
 	print("[hand-editor] after undo moved %.4f m (want 0)" % before.distance_to(
 			(rifle.call("bolt_handle_node") as Node3D).position))
-	ed.call("_seq_stop_scrub")
+	# Sights, held by the editor rather than by a finger on the button.
+	var state_opt: OptionButton = ed.get("_state_opt")
+	for i in state_opt.item_count:
+		if state_opt.get_item_metadata(i) == "sights":
+			state_opt.select(i)
+			ed.call("_set_state", "sights")
+	await get_tree().create_timer(1.0).timeout
+	print("[hand-editor] sights state: aim=%.2f reloading=%s" % [
+			float(bag.call("rifle_aim_amount")), rifle.call("is_reloading")])
+	await _shot(dir, "editor3_sights_held")
 	ed.call("set_open", false)
-	await get_tree().create_timer(0.4).timeout
-	await _shot(dir, "editor3_closed")
+	await get_tree().create_timer(0.6).timeout
+	print("[hand-editor] after close: aim=%.2f" % float(bag.call("rifle_aim_amount")))
+	await _shot(dir, "editor4_closed")
 	_quit_cleanly()
 
 

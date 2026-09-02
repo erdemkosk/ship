@@ -69,6 +69,11 @@ var _stop_opt: OptionButton
 var _stop_t: HSlider
 var _stop_pose: OptionButton
 var _play_btn: Button
+var _state_box: VBoxContainer
+var _state_opt: OptionButton
+var _attack_t: HSlider
+var _state := ""            # "", "carry", "sights", "reload", "hold", "attack"
+var _aim_latched := false
 
 # --- gizmo -----------------------------------------------------------------
 var _gizmo: Node3D
@@ -175,7 +180,7 @@ func set_open(on: bool) -> void:
 		_panel.visible = false
 		_gizmo.visible = false
 		_set_bounds_visible(false)
-		_seq_stop_scrub()
+		_set_state("")
 		set_process(false)
 
 
@@ -242,6 +247,29 @@ func _build_panel() -> void:
 	_target_opt = OptionButton.new()
 	_target_opt.item_selected.connect(func(i: int) -> void: _select_target(i))
 	vbox.add_child(_target_opt)
+	# --- state ---------------------------------------------------------------
+	# Which moment of the tool's life the hand is shown in. Chosen here and
+	# HELD, so the sights or a mid-swing can be tuned without keeping a mouse
+	# button down with the same hand that works the sliders.
+	_section(vbox, "STATE")
+	_state_box = VBoxContainer.new()
+	vbox.add_child(_state_box)
+	var strow := HBoxContainer.new()
+	_state_box.add_child(strow)
+	var stl := Label.new()
+	stl.text = "show"
+	stl.add_theme_font_size_override("font_size", 13)
+	strow.add_child(stl)
+	_state_opt = OptionButton.new()
+	_state_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_state_opt.item_selected.connect(func(i: int) -> void: _set_state(_state_opt.get_item_metadata(i)))
+	strow.add_child(_state_opt)
+	_attack_t = _slider(_state_box, "swing time", "%.2f s", 0.0, 0.62, 0.01, 0.0, 1.0,
+			func(v: float) -> void: _seek_attack(v))
+	_attack_t.get_meta("label").visible = false
+	_attack_t.visible = false
+	_state_box.visible = false
+
 	# --- sequence ------------------------------------------------------------
 	_section(vbox, "SEQUENCE  (reload stops)")
 	_seq_box = VBoxContainer.new()
@@ -525,10 +553,7 @@ func _select_target(i: int) -> void:
 	_sync_from_target()
 	_sync_pose(t)
 	_gizmo.visible = _gizmo_chk.button_pressed
-	_seq_box.visible = t["kind"] == "marker" and t.get("item") != null \
-			and (t["item"] as Node).has_method("reload_elapsed")
-	if _seq_box.visible:
-		_seq_refresh()
+	_build_states(t)
 	_pose_opt.disabled = t["kind"] != "grip"
 
 
@@ -1006,6 +1031,82 @@ func _update_bounds() -> void:
 	_bounds_box.global_transform = device.global_transform \
 			* Transform3D(Basis.IDENTITY, box.get_center())
 	_bounds_box.visible = true
+
+
+# --- state ------------------------------------------------------------------
+
+func _item_of(t: Dictionary) -> Node:
+	return t.get("item") if t["kind"] == "marker" else null
+
+
+func _build_states(t: Dictionary) -> void:
+	var item := _item_of(t)
+	_state_opt.clear()
+	var states: Array = []
+	if item != null and item.has_method("reload_elapsed"):
+		states = [["Carry", "carry"], ["Sights (aim held)", "sights"],
+				["Reload — stops", "reload"]]
+	elif item != null and item.has_method("seek_attack"):
+		states = [["Hold", "hold"], ["Swing — scrub", "attack"]]
+	_state_box.visible = not states.is_empty()
+	if states.is_empty():
+		_set_state("")
+		_seq_box.visible = false
+		return
+	for st in states:
+		_state_opt.add_item(st[0])
+		_state_opt.set_item_metadata(_state_opt.item_count - 1, st[1])
+	# Keep the state across targets of the same tool; a rifle marker picked
+	# while the reload is scrubbed should not drop the reload.
+	var keep := _state
+	var idx := 0
+	for i in states.size():
+		if states[i][1] == keep:
+			idx = i
+	_state_opt.select(idx)
+	_set_state(states[idx][1])
+
+
+func _set_state(state: String) -> void:
+	var t := _target()
+	var item := _item_of(t) if not t.is_empty() else null
+	# Leave whatever the previous state was holding.
+	if _aim_latched and state != "sights":
+		Input.action_release("rifle_aim")
+		_aim_latched = false
+	if _state == "reload" and state != "reload":
+		_seq_stop_scrub()
+	if _state == "attack" and state != "attack" and item != null \
+			and item.has_method("seek_attack"):
+		item.call("seek_attack", -1.0, false)
+	_state = state
+	_seq_box.visible = state == "reload"
+	_attack_t.visible = state == "attack"
+	(_attack_t.get_meta("label") as Control).visible = state == "attack"
+	match state:
+		"sights":
+			if not _aim_latched:
+				Input.action_press("rifle_aim")
+				_aim_latched = true
+		"reload":
+			_seq_refresh()
+			if _seq_cur < 0 and not _seq_stops.is_empty():
+				_stop_opt.select(1)
+				_seq_select_stop(1)
+			elif _seq_cur >= 0:
+				_seq_select_stop(_seq_cur)
+		"attack":
+			if item != null:
+				_attack_t.max_value = float(item.call("attack_duration"))
+				_seek_attack(_attack_t.value)
+
+
+func _seek_attack(v: float) -> void:
+	var t := _target()
+	var item := _item_of(t) if not t.is_empty() else null
+	if item == null or not item.has_method("seek_attack"):
+		return
+	item.call("seek_attack", v, true)
 
 
 # --- sequence (reload stops) ------------------------------------------------

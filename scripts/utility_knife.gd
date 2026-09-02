@@ -30,6 +30,7 @@ var _blade_base: Node3D
 var _blade_tip: Node3D
 var _grip_bounds := AABB()
 var _attack_elapsed := -1.0
+var _attack_paused := false
 var _previous_tip := Vector3.ZERO
 var _previous_tip_valid := false
 var _hit_latched := false
@@ -157,9 +158,29 @@ func cancel_attack() -> void:
 	_hit_latched = false
 
 
+func seek_attack(t: float, hold: bool) -> void:
+	## Editor scrub: put the swing at t and, with `hold`, freeze it there.
+	## t < 0 leaves the attack.
+	if t < 0.0:
+		cancel_attack()
+		_attack_paused = false
+		return
+	if _attack_elapsed < 0.0:
+		_attack_variant = 0
+		_hit_latched = false
+		_hit_reaction = 0.0
+		_previous_tip_valid = false
+	_attack_elapsed = clampf(t, 0.0, ATTACK_DURATION - 0.001)
+	_attack_paused = hold
+
+
+func attack_duration() -> float:
+	return ATTACK_DURATION
+
+
 func tick_attack(delta: float) -> void:
 	_hit_reaction = move_toward(_hit_reaction, 0.0, delta / 0.10)
-	if _attack_elapsed < 0.0:
+	if _attack_elapsed < 0.0 or _attack_paused:
 		return
 	_attack_elapsed += delta
 	if _attack_elapsed >= ATTACK_DURATION:
