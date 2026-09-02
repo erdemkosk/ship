@@ -147,6 +147,8 @@ func run(args: PackedStringArray) -> void:
 			_hand_editor_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--hand-editor-test":
 			_hand_editor_test(rig, boat)
+		elif arg.begins_with("--hand-editor-arms="):
+			_hand_editor_arms(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--hand-editor-grip-shot="):
 			_hand_editor_grip_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--probe-engine":
@@ -1897,6 +1899,99 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.6).timeout
 	print("[hand-editor] after close: aim=%.2f" % float(bag.call("rifle_aim_amount")))
 	await _shot(dir, "editor4_closed")
+	_quit_cleanly()
+
+
+func _hand_editor_arms(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Edit the trigger hand, switch to the support hand and edit that: does
+	## anything about the FIRST edit change — its saved data, its marker, the
+	## pose it uses, or where the solved palm actually ends up?
+	var tuning := load("res://scripts/hands/hand_tuning.gd")
+	tuning.path_override = "user://hand_tuning_probe.json"
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(tuning.path_override))
+	tuning.reload()
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("_bag_selected", 4)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	rig.call("_activate_bag_selection")
+	await get_tree().create_timer(1.05).timeout
+	var ed: Node = get_tree().get_first_node_in_group("hand_editor")
+	ed.call("set_open", true)
+	await get_tree().create_timer(0.5).timeout
+	var opt: OptionButton = ed.get("_target_opt")
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var rifle: Node = bag.get("_active_item")
+	var hrig: Node = (rig.get("_arms") as Node).get("rig")
+	var pos_s: Array = ed.get("_pos_s")
+	var rot_s: Array = ed.get("_rot_s")
+	var fs: Dictionary = ed.get("_finger_s")
+	var pick := func(name: String) -> void:
+		for i in opt.item_count:
+			if opt.get_item_text(i).ends_with(name):
+				opt.select(i)
+				ed.call("_select_target", i)
+	# 1. Edit the trigger grip: 10 mm along Y, 6 degrees about Z, index curl.
+	pick.call("PrimaryGrip")
+	await get_tree().create_timer(0.3).timeout
+	ed.call("_push_undo")
+	var pg0: Node3D = rifle.call("primary_grip_node")
+	print("[arms] before: base=%s cur=%s authored=%s node=%s shown=%s" % [
+			(ed.get("_base_basis") as Basis).get_euler() * 180.0 / PI,
+			(ed.get("_cur_basis") as Basis).get_euler() * 180.0 / PI,
+			(pg0.get_meta("authored_transform") as Transform3D).basis.get_euler() * 180.0 / PI,
+			pg0.basis.get_euler() * 180.0 / PI, ed.get("_rot_shown")])
+	(pos_s[1] as HSlider).value += 0.010
+	print("[arms] after pos: cur=%s shown=%s" % [
+			(ed.get("_cur_basis") as Basis).get_euler() * 180.0 / PI, ed.get("_rot_shown")])
+	(rot_s[2] as HSlider).value += 6.0
+	print("[arms] after turn: cur=%s shown=%s slider=%s" % [
+			(ed.get("_cur_basis") as Basis).get_euler() * 180.0 / PI, ed.get("_rot_shown"),
+			[rot_s[0].value, rot_s[1].value, rot_s[2].value]])
+	((fs["index"] as Array)[1] as HSlider).value = 0.90
+	await get_tree().create_timer(0.8).timeout
+	var pg: Node3D = rifle.call("primary_grip_node")
+	var xf1: Transform3D = pg.transform
+	var pose1: Dictionary = (hrig.call("poses") as Dictionary)["rifle_primary"].duplicate(true)
+	var palm1: Transform3D = hrig.call("solved_palm_global", "R")
+	var rel1: Transform3D = rifle.global_transform.affine_inverse() * palm1
+	print("[arms] after R edit: marker=%s idx=%s palm(rifle-local)=%s" % [
+			xf1.origin, pose1["index"], rel1.origin])
+	await _shot(dir, "arms0_R_edited")
+	# 2. Switch to the support grip and edit that.
+	pick.call("SupportGrip")
+	await get_tree().create_timer(0.5).timeout
+	var xf_mid: Transform3D = pg.transform
+	print("[arms] right after switching: R marker moved %.4f, R idx=%s" % [
+			xf1.origin.distance_to(xf_mid.origin),
+			(hrig.call("poses") as Dictionary)["rifle_primary"]["index"]])
+	ed.call("_push_undo")
+	(pos_s[0] as HSlider).value += 0.015
+	(rot_s[1] as HSlider).value -= 5.0
+	((fs["middle"] as Array)[0] as HSlider).value = 0.50
+	await get_tree().create_timer(0.8).timeout
+	var xf2: Transform3D = pg.transform
+	var pose2: Dictionary = (hrig.call("poses") as Dictionary)["rifle_primary"]
+	var palm2: Transform3D = hrig.call("solved_palm_global", "R")
+	var rel2: Transform3D = rifle.global_transform.affine_inverse() * palm2
+	print("[arms] after L edit: R marker moved %.4f m, R basis diff %.2f deg, R idx %s->%s, R palm (rifle-local) moved %.4f m" % [
+			xf1.origin.distance_to(xf2.origin),
+			rad_to_deg((xf1.basis.inverse() * xf2.basis).get_rotation_quaternion().get_angle()),
+			pose1["index"], pose2["index"], rel1.origin.distance_to(rel2.origin)])
+	print("[arms] file: %s" % JSON.stringify(tuning.data()))
+	await _shot(dir, "arms1_L_edited")
+	pick.call("PrimaryGrip")
+	await get_tree().create_timer(0.5).timeout
+	print("[arms] back on R: sliders pos %s rot %s marker %s" % [
+			[pos_s[0].value, pos_s[1].value, pos_s[2].value],
+			[rot_s[0].value, rot_s[1].value, rot_s[2].value], pg.transform.origin])
+	await _shot(dir, "arms2_back_on_R")
+	ed.call("set_open", false)
 	_quit_cleanly()
 
 

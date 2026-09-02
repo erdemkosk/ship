@@ -83,10 +83,22 @@ var _drag_axis := -1
 var _drag_rot := false
 var _drag_start := Vector2.ZERO
 var _press_in_panel := false
+## The target's orientation, kept as a BASIS. The three rot sliders only show
+## an euler reading of it and apply their own deltas about the target's own
+## axes — because both rifle grips sit at an euler singularity (Y = ±90°),
+## where the three angles are not independent and rebuilding a basis from
+## edited euler numbers spun the grip by tens of degrees.
+var _cur_basis := Basis.IDENTITY
+var _rot_shown := Vector3.ZERO
+## The code's own orientation for the target. The rot sliders read as the
+## turn ADDED to it — three zeros mean "as authored", and small turns stay
+## small numbers instead of an euler reading that flips at a singularity.
+var _base_basis := Basis.IDENTITY
 
 var _undo: Array = []
 var _last_pose := ""
 var _look_hold := false
+var _finger_lock := false
 
 
 func setup(p_rig: Node3D, p_boat: Node3D) -> void:
@@ -311,9 +323,9 @@ func _build_panel() -> void:
 				-POS_SPAN, POS_SPAN, 0.0005, 0.0, 1000.0,
 				func(_v: float) -> void: _apply_frame()))
 	for i in 3:
-		_rot_s.append(_slider(vbox, "rot %s" % ["X", "Y", "Z"][i], "%+.1f°",
+		_rot_s.append(_slider(vbox, "turn %s (from default)" % ["X", "Y", "Z"][i], "%+.1f°",
 				-180.0, 180.0, 0.5, 0.0, 1.0,
-				func(_v: float) -> void: _apply_frame()))
+				func(v: float) -> void: _turn(i, v)))
 	var frow := HBoxContainer.new()
 	vbox.add_child(frow)
 	_button(frow, "Reset frame", func() -> void: _reset_frame())
@@ -469,9 +481,10 @@ func _process(delta: float) -> void:
 		var live := _live_pose_name(t)
 		if live != _last_pose:
 			_sync_pose(t)
-		_amt_lbl.text = "hand %s · pose amount %.2f · solver %s" % [t["side"],
-				_hrig.call("pose_amount", t["side"]),
-				"on" if bool(_hrig.get("contact_solver_enabled")) else "off"]
+		if not _finger_lock and _pose_users(_last_pose).size() <= 1:
+			_amt_lbl.text = "hand %s · pose amount %.2f · solver %s" % [t["side"],
+					_hrig.call("pose_amount", t["side"]),
+					"on" if bool(_hrig.get("contact_solver_enabled")) else "off"]
 	_timeline.queue_redraw()
 
 
@@ -579,7 +592,9 @@ func _sync_from_target() -> void:
 	if t.is_empty():
 		return
 	var xf := _frame_of(t)
-	var e := xf.basis.orthonormalized().get_euler()
+	_cur_basis = xf.basis.orthonormalized()
+	_base_basis = _authored_frame(t).basis.orthonormalized()
+	_rot_shown = _rot_deg()
 	# Re-ranging a slider can clamp its value and EMIT value_changed; nothing
 	# in here may be taken as an edit.
 	_syncing = true
@@ -590,18 +605,58 @@ func _sync_from_target() -> void:
 		s.set_value_no_signal(xf.origin[i])
 		s.min_value = xf.origin[i] - POS_SPAN
 		s.max_value = xf.origin[i] + POS_SPAN
-		_rot_s[i].set_value_no_signal(rad_to_deg(e[i]))
+		_rot_s[i].set_value_no_signal(_rot_shown[i])
 	_syncing = false
 	for i in 3:
 		_set_quiet(_pos_s[i], xf.origin[i])
-		_set_quiet(_rot_s[i], rad_to_deg(e[i]))
+		_set_quiet(_rot_s[i], _rot_shown[i])
 
 
 func _slider_frame() -> Transform3D:
 	var pos := Vector3(_pos_s[0].value, _pos_s[1].value, _pos_s[2].value)
-	var e := Vector3(deg_to_rad(_rot_s[0].value), deg_to_rad(_rot_s[1].value),
-			deg_to_rad(_rot_s[2].value))
-	return Transform3D(Basis.from_euler(e), pos)
+	return Transform3D(_cur_basis, pos)
+
+
+func _turn(axis: int, shown: float) -> void:
+	## A rot slider moved: turn the target about ITS OWN axis by the change,
+	## then show the fresh euler reading on all three sliders.
+	if _syncing:
+		return
+	var delta := shown - _rot_shown[axis]
+	if absf(delta) < 1e-4:
+		return
+	var local_axis := Vector3.ZERO
+	local_axis[axis] = 1.0
+	_cur_basis = (_cur_basis * Basis(local_axis, deg_to_rad(delta))).orthonormalized()
+	_show_rotation()
+	_apply_frame()
+
+
+func _show_rotation() -> void:
+	_rot_shown = _rot_deg()
+	for i in 3:
+		_set_quiet(_rot_s[i], _rot_shown[i])
+
+
+func _rot_deg() -> Vector3:
+	## The turn added to the authored orientation, as euler degrees.
+	var e := (_base_basis.inverse() * _cur_basis).orthonormalized().get_euler()
+	return Vector3(rad_to_deg(e.x), rad_to_deg(e.y), rad_to_deg(e.z))
+
+
+func _authored_frame(t: Dictionary) -> Transform3D:
+	if t["kind"] == "marker":
+		var n: Node3D = t["node"]
+		if n.has_meta("authored_transform"):
+			return n.get_meta("authored_transform")
+		return n.transform
+	var spec: Dictionary = GRIP_MAP._catalog_spec(t["id"])
+	var sided: Dictionary = GRIP_MAP.sided(spec, t["side"])
+	var f: Vector3 = (sided.get("fingers", Vector3.FORWARD) as Vector3).normalized()
+	var p: Vector3 = sided.get("palm", Vector3.UP) as Vector3
+	p = (p - p.project(f)).normalized()
+	return Transform3D(Basis(p.cross(f).normalized(), p, f),
+			sided.get("pos", Vector3.ZERO) as Vector3)
 
 
 func _apply_frame() -> void:
@@ -616,10 +671,12 @@ func _apply_frame() -> void:
 		var item: Node = t.get("item")
 		if item != null and item.has_method("refresh_marker_rest"):
 			item.call("refresh_marker_rest")
+		var q := _cur_basis.get_rotation_quaternion().normalized()
 		HAND_TUNING.set_marker(t["key"], {
 			"pos": HAND_TUNING.to_json(xf.origin),
-			"rot": HAND_TUNING.to_json(Vector3(_rot_s[0].value, _rot_s[1].value,
-					_rot_s[2].value)),
+			"quat": [snappedf(q.x, 0.00001), snappedf(q.y, 0.00001),
+					snappedf(q.z, 0.00001), snappedf(q.w, 0.00001)],
+			"turn_deg": HAND_TUNING.to_json(_rot_deg()),   # for the reader
 		})
 	else:
 		var fields: Dictionary = HAND_TUNING.grip(t["id"]).duplicate()
@@ -678,6 +735,20 @@ func _sync_pose(t: Dictionary) -> void:
 		if names[i] == name:
 			_pose_opt.select(i)
 	_pose_lbl.text = "pose" if t["kind"] == "grip" else "pose (chosen by code)"
+	# Which other grips would this edit reach? A pose is shared by name.
+	var users := _pose_users(name)
+	var idle: bool = t["kind"] == "marker" and (name == "open" or name == "flat")
+	_finger_lock = idle
+	for d: String in DIGITS:
+		for j in 3:
+			(_finger_s[d][j] as HSlider).editable = not idle
+	_splay_s.editable = not idle
+	if idle:
+		_amt_lbl.text = "%s hand is not on this grip right now (pose '%s'). " % [
+				t["side"], name] + "Pick the state that puts it there (e.g. Sights)."
+	elif users.size() > 1:
+		_amt_lbl.text = "pose '%s' is shared by: %s — edits reach all of them (Copy as… for a private one)" % [
+				name, ", ".join(users)]
 	var spec: Dictionary = (_hrig.call("poses") as Dictionary).get(name, {})
 	for d: String in DIGITS:
 		var values: Array = spec.get(d, spec.get("thumb", [0.0, 0.0, 0.0])
@@ -688,6 +759,25 @@ func _sync_pose(t: Dictionary) -> void:
 					float(values[mini(j, values.size() - 1)]))
 			_syncing = false
 	_set_quiet(_splay_s, float(spec.get("thumb_splay", 0.0)))
+
+
+func _pose_users(name: String) -> Array:
+	var out: Array = []
+	for id in GRIP_MAP.ENTRIES:
+		if str((GRIP_MAP.ENTRIES[id] as Dictionary).get("pose", "")) == name:
+			out.append(str(id))
+	if str(GRIP_MAP.SWITCH.get("pose", "")) == name:
+		out.append("switches")
+	match name:
+		"rifle_primary", "bolt_grip", "pinch":
+			out.append("rifle (R)")
+		"rifle_support":
+			out.append("rifle (L)")
+		"knife_grip":
+			out.append("knife")
+		"open":
+			out.append("every idle hand")
+	return out
 
 
 func _pose_fields() -> Dictionary:
@@ -703,7 +793,7 @@ func _pose_fields() -> Dictionary:
 
 
 func _apply_pose() -> void:
-	if _syncing:
+	if _syncing or _finger_lock:
 		return
 	var t := _target()
 	if t.is_empty() or _last_pose == "":
@@ -960,13 +1050,11 @@ func _gizmo_input(event: InputEvent) -> void:
 		if _drag_rot or mm.shift_pressed:
 			# Rotation about the target's own axis, in its own frame: compose
 			# the delta and read the euler back so the three sliders stay true.
-			var cur := _slider_frame()
 			var local_axis := Vector3.ZERO
 			local_axis[_drag_axis] = 1.0
-			var nb := cur.basis * Basis(local_axis, deg_to_rad(px * 0.4))
-			var e := nb.orthonormalized().get_euler()
-			for i in 3:
-				_set_quiet(_rot_s[i], rad_to_deg(e[i]))
+			_cur_basis = (_cur_basis * Basis(local_axis,
+					deg_to_rad(px * 0.4))).orthonormalized()
+			_show_rotation()
 		else:
 			# Metres per pixel at the target's depth.
 			var depth := maxf((_cam.global_transform.affine_inverse() * o).length(), 0.05)

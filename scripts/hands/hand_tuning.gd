@@ -7,12 +7,14 @@ class_name HandTuning
 ## reload controller). This file is the LAYER ON TOP of them — whatever the
 ## in-game editor (P) has been used to change. Empty file, nothing changes.
 ##
-## Two locations, one precedence:
-##   res://data/hand_tuning.json    the project's copy, committed with the art
-##   user://hand_tuning.json        a machine-local override (exported builds
-##                                  cannot write into res://)
-## A dev run saves to res:// so the result lands in git; an exported build
-## saves to user://. On load, user:// wins over res:// key by key.
+## Two locations:
+##   res://data/hand_tuning.json    the project's copy, committed with the art.
+##                                  Every run from a source checkout (editor
+##                                  or `godot --path .`) reads and writes THIS.
+##   user://hand_tuning.json        exported builds only: they cannot write
+##                                  into the pack, so their edits land here and
+##                                  overlay the shipped file key by key.
+## A probe passes --tuning-file=PATH so it never touches either.
 ##
 ## Shape:
 ## {
@@ -47,11 +49,16 @@ static func reload() -> void:
 	_data = {}
 	for s in SECTIONS:
 		_data[s] = {}
+	if path_override == "":
+		for a in OS.get_cmdline_user_args():
+			if a.begins_with("--tuning-file="):
+				path_override = a.get_slice("=", 1)
 	if path_override != "":
 		_merge_file(path_override)
 	else:
 		_merge_file(RES_PATH)
-		_merge_file(USER_PATH)
+		if _exported():
+			_merge_file(USER_PATH)
 	_loaded = true
 	_dirty = false
 	version += 1
@@ -79,12 +86,14 @@ static func _merge_file(path: String) -> void:
 static var path_override := ""
 
 
+static func _exported() -> bool:
+	return OS.has_feature("template")
+
+
 static func save_path() -> String:
 	if path_override != "":
 		return path_override
-	if OS.has_feature("editor"):
-		return RES_PATH
-	return USER_PATH
+	return USER_PATH if _exported() else RES_PATH
 
 
 static func save() -> bool:
@@ -220,7 +229,14 @@ static func apply_marker(key: String, node: Node3D) -> bool:
 	var xf := node.transform
 	if m.has("pos"):
 		xf.origin = from_json(m["pos"])
-	if m.has("rot"):
+	if m.has("quat"):
+		# The orientation itself. Euler numbers are ambiguous where the rifle
+		# grips sit (Y = ±90°); a quaternion is not.
+		var q: Array = m["quat"]
+		if q.size() == 4:
+			xf.basis = Basis(Quaternion(float(q[0]), float(q[1]), float(q[2]),
+					float(q[3])).normalized())
+	elif m.has("rot"):
 		var e: Vector3 = from_json(m["rot"])
 		xf.basis = Basis.from_euler(Vector3(deg_to_rad(e.x), deg_to_rad(e.y),
 				deg_to_rad(e.z)))
