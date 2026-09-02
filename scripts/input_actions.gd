@@ -13,7 +13,7 @@ const KEY_ACTIONS: Dictionary = {
 	"bag_up": [KEY_W, KEY_UP], "bag_down": [KEY_S, KEY_DOWN],
 	"rifle_reload": [KEY_R], "anchor": [KEY_G], "light_cabin": [KEY_1],
 	"light_helm": [KEY_2], "light_beacon": [KEY_3], "light_flood": [KEY_6],
-	"wiper": [KEY_5], "hand_editor": [KEY_F10],
+	"wiper": [KEY_5], "hand_editor": [KEY_P],
 }
 
 const MOUSE_ACTIONS: Dictionary = {

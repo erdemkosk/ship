@@ -287,7 +287,7 @@ func _panel_open() -> bool:
 
 
 func _editor_open() -> bool:
-	## The hand editor (F10) takes the POINTER for its sliders and gizmo and
+	## The hand editor (P) takes the POINTER for its sliders and gizmo and
 	## nothing else: keys, aim and reload keep working so the grip being tuned
 	## can be put through its motions while the panel is up.
 	if _hand_editor == null or not is_instance_valid(_hand_editor):

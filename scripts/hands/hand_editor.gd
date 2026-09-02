@@ -1,6 +1,6 @@
 extends CanvasLayer
 class_name HandEditor
-## The in-game hand editor. F10.
+## The in-game hand editor. P.
 ##
 ## Everything a hand does to a thing is a small set of numbers: where the palm
 ## sits on it, which way the fingers and the palm face, and how far each digit
@@ -18,7 +18,7 @@ class_name HandEditor
 ## A reload can be scrubbed stop by stop while its markers are tuned
 ## (see the timeline at the bottom of the panel).
 ##
-## Nothing here runs unless the panel is open. Closing it with unsaved changes
+## Nothing here runs unless the panel is open (P toggles it). Closing it with unsaved changes
 ## saves them: a tuning that has been looked at and accepted is not something
 ## to lose to a forgotten keystroke.
 
@@ -214,7 +214,7 @@ func _build_panel() -> void:
 	title.add_theme_color_override("font_color", Color(0.85, 0.88, 0.80))
 	vbox.add_child(title)
 	var hint := Label.new()
-	hint.text = "F10 close · ⌘S save · ⌘Z undo · drag gizmo (⇧ rotates) · hold MMB to look"
+	hint.text = "P close · ⌘S save · ⌘Z undo · drag gizmo (⇧ rotates) · hold MMB to look"
 	hint.add_theme_font_size_override("font_size", 11)
 	hint.add_theme_color_override("font_color", Color(0.55, 0.58, 0.55))
 	vbox.add_child(hint)

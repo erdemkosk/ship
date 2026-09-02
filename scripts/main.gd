@@ -47,7 +47,7 @@ func _ready() -> void:
 			want_menu = false
 	if want_menu:
 		_open_menu()
-	# The in-game hand editor. Dormant until F10; costs nothing until then.
+	# The in-game hand editor. Dormant until P; costs nothing until then.
 	var hand_editor: CanvasLayer = (load("res://scripts/hands/hand_editor.gd") as GDScript).new()
 	hand_editor.call("setup", rig, boat)
 	add_child(hand_editor)
