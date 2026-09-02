@@ -1797,7 +1797,7 @@ func _rifle_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 
 
 func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
-	## The F10 editor over the rifle: panel, gizmo on the trigger grip, then the
+	## The P-key editor over the rifle: panel, gizmo on the trigger grip, then the
 	## reload scrubbed to its bolt-open stop with the bolt marker selected.
 	# The editor saves on close; a probe must never write the project's file.
 	var tuning := load("res://scripts/hands/hand_tuning.gd")

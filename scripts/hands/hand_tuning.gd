@@ -5,7 +5,7 @@ class_name HandTuning
 ##
 ## Code still carries the defaults (GripMap.ENTRIES, HandRig.POSES, the
 ## reload controller). This file is the LAYER ON TOP of them — whatever the
-## in-game editor (F10) has been used to change. Empty file, nothing changes.
+## in-game editor (P) has been used to change. Empty file, nothing changes.
 ##
 ## Two locations, one precedence:
 ##   res://data/hand_tuning.json    the project's copy, committed with the art
