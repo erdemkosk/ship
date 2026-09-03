@@ -1981,6 +1981,25 @@ func _hand_editor_effect(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 			ed.get("_state"), float(bag.call("rifle_aim_amount")),
 			(ed.get("_targets")[ed.get("_cur")] as Dictionary)["key"]])
 	await _shot(dir, "effC_sights_kept")
+	# ...and it must survive switching targets and coming back, which is what
+	# the player does: choose Sights, go and tune the other hand, return.
+	pick.call("fore-end")
+	await get_tree().create_timer(1.2).timeout
+	print("[effect] sights + switched to fore-end: state '%s' aim %.2f" % [
+			ed.get("_state"), float(bag.call("rifle_aim_amount"))])
+	pick.call("trigger hand")
+	await get_tree().create_timer(1.2).timeout
+	print("[effect] sights + back on trigger hand: state '%s' aim %.2f" % [
+			ed.get("_state"), float(bag.call("rifle_aim_amount"))])
+	pick.call("free")
+	await get_tree().create_timer(1.2).timeout
+	print("[effect] after picking a free hand: state '%s' aim %.2f targets %s" % [
+			ed.get("_state"), float(bag.call("rifle_aim_amount")),
+			ed.get("_targets").map(func(t): return t["key"])])
+	pick.call("trigger hand")
+	await get_tree().create_timer(1.2).timeout
+	print("[effect] and back again: state '%s' aim %.2f" % [
+			ed.get("_state"), float(bag.call("rifle_aim_amount"))])
 	for i in st_opt.item_count:
 		if str(st_opt.get_item_metadata(i)) == "carry":
 			st_opt.select(i)

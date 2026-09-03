@@ -515,26 +515,34 @@ func _collect_targets() -> Array:
 			# `live` names the method that reports it, so the gizmo and the
 			# "is a hand on this?" reading follow the hand, while the edit
 			# still writes the marker the live frame is derived from.
+			# node, plain name, hand, the states in which that hand is really
+			# on it, the state to switch to when it is not, the reload stop
+			# to scrub to, and the method reporting its live (animated) frame.
 			for spec: Array in [
-					["PrimaryGrip", "trigger hand", "R", "carry", "", ""],
-					["SupportGrip", "fore-end hand", "L", "sights", "", ""],
-					["BoltHandle", "bolt knob", "R", "reload", "bolt_open_end",
+					["PrimaryGrip", "trigger hand", "R",
+							["carry", "sights"], "carry", "", ""],
+					["SupportGrip", "fore-end hand", "L",
+							["sights", "reload"], "sights", "", ""],
+					["BoltHandle", "bolt knob", "R",
+							["reload"], "reload", "bolt_open_end",
 							"bolt_grip_transform"],
-					["Chamber", "chamber / round", "R", "reload",
-							"cartridge_insert", ""]]:
+					["Chamber", "chamber / round", "R",
+							["reload"], "reload", "cartridge_insert", ""]]:
 				var n := item.get_node_or_null(str(spec[0])) as Node3D
 				if n != null:
 					out.append({"key": "rifle/" + str(spec[0]),
 							"label": "Rifle · %s (%s)" % [spec[1], spec[2]],
 							"kind": "marker", "node": n, "item": item,
-							"side": str(spec[2]), "needs": str(spec[3]),
-							"needs_stop": str(spec[4]), "live": str(spec[5])})
+							"side": str(spec[2]), "ok_states": spec[3],
+							"needs": str(spec[4]),
+							"needs_stop": str(spec[5]), "live": str(spec[6])})
 		elif item != null and kind == "utility_knife":
 			var n := item.get_node_or_null("Grip") as Node3D
 			if n != null:
 				out.append({"key": "knife/Grip", "label": "Knife · handle (R)",
 						"kind": "marker", "node": n, "item": item, "side": "R",
-						"needs": "hold", "needs_stop": ""})
+						"ok_states": ["hold", "attack"], "needs": "hold",
+						"needs_stop": "", "live": ""})
 	var claim: Dictionary = _arms.get("_claim")
 	for side: String in ["L", "R"]:
 		var id := str(claim.get(side, ""))
@@ -623,12 +631,14 @@ func _select_target(i: int, user := true) -> void:
 	# Put the hand ON the thing that was picked. Otherwise the fore-end and
 	# the bolt are edited with no hand near them, and every slider looks dead.
 	#
-	# Only on a real pick, and only when the hand is not already there: the
-	# trigger hand is on its grip in carry AND in the sights, so asking for
-	# 'carry' every time the list refreshed was dragging the player straight
-	# back out of a state they had just chosen.
+	# Only on a real pick, and only when the state up is not one that puts
+	# this hand on this thing. Distance is the wrong test — in the sights the
+	# trigger hand sits a few centimetres from the bolt knob, close enough to
+	# look satisfied while nothing is touching it — so each target names the
+	# states in which its hand is genuinely working it.
 	var needs := str(t.get("needs", ""))
-	if user and needs != "" and needs != _state and _hand_distance(t) > 0.075:
+	var ok_states: Array = t.get("ok_states", [])
+	if user and needs != "" and not ok_states.has(_state):
 		for si in _state_opt.item_count:
 			if str(_state_opt.get_item_metadata(si)) == needs:
 				_state_opt.select(si)
