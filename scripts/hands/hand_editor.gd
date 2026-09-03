@@ -99,6 +99,11 @@ var _undo: Array = []
 var _last_pose := ""
 var _look_hold := false
 var _finger_lock := false
+## Which screen edge the panel sits on. It follows the hand being edited to
+## the OPPOSITE edge (the idle left hand hangs exactly where a left-docked
+## panel would hide it) unless the user has flipped it by hand.
+var _dock := "left"
+var _dock_manual := false
 
 
 func setup(p_rig: Node3D, p_boat: Node3D) -> void:
@@ -244,6 +249,9 @@ func _build_panel() -> void:
 	_button(brow, "Reload file", func() -> void: _reload_file())
 	_button(brow, "Undo", func() -> void: _undo_last())
 	_button(brow, "Shot", func() -> void: _screenshot())
+	_button(brow, "⇄ side", func() -> void:
+		_dock_manual = true
+		_set_dock("right" if _dock == "left" else "left"))
 	_status = Label.new()
 	_status.add_theme_font_size_override("font_size", 11)
 	_status.add_theme_color_override("font_color", Color(0.62, 0.70, 0.62))
@@ -563,11 +571,27 @@ func _target() -> Dictionary:
 	return t
 
 
+func _set_dock(side: String) -> void:
+	_dock = side
+	if side == "right":
+		_panel.anchor_left = 1.0
+		_panel.anchor_right = 1.0
+		_panel.offset_left = -372.0
+		_panel.offset_right = -10.0
+	else:
+		_panel.anchor_left = 0.0
+		_panel.anchor_right = 0.0
+		_panel.offset_left = 10.0
+		_panel.offset_right = 372.0
+
+
 func _select_target(i: int) -> void:
 	_cur = i
 	var t := _target()
 	if t.is_empty():
 		return
+	if not _dock_manual:
+		_set_dock("right" if t["side"] == "L" else "left")
 	_subject.text = t["label"]
 	_sync_from_target()
 	_sync_pose(t)
