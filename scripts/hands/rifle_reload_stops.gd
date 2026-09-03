@@ -25,10 +25,13 @@ const DEFAULT_TIMES := {
 	"start": 0.0,
 	"bolt_open_start": 0.25,
 	"bolt_open_end": 0.95,
-	"cartridge_show": 1.15,
-	"cartridge_move": 1.40,
-	"cartridge_insert": 2.00,
-	"inserted": 2.28,
+	# 0.40 s to leave the shot and reach the pouch — the dip has to be a
+	# movement the eye can follow, not a flick.
+	"cartridge_show": 1.35,
+	# A moment down there with the round in the fingers before it comes up.
+	"cartridge_move": 1.55,
+	"cartridge_insert": 2.05,
+	"inserted": 2.30,
 	"bolt_close_start": 2.45,
 	"bolt_close_end": 2.90,
 	"duration": 3.30,
@@ -38,7 +41,9 @@ const DEFAULT_TIMES := {
 const DEFAULT_POSES := {
 	"start": "bolt_grip",
 	"bolt_open_start": "bolt_grip",
-	"bolt_open_end": "pinch",
+	# Empty hand on the way down: it opens as it leaves the knob and closes
+	# on the cartridge at the pouch.
+	"bolt_open_end": "open",
 	"cartridge_show": "pinch",
 	"cartridge_move": "pinch",
 	"cartridge_insert": "pinch",

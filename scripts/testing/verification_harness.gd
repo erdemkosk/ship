@@ -147,6 +147,8 @@ func run(args: PackedStringArray) -> void:
 			_hand_editor_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--hand-editor-test":
 			_hand_editor_test(rig, boat)
+		elif arg.begins_with("--reload-pocket="):
+			_reload_pocket(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--hand-editor-effect="):
 			_hand_editor_effect(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--hand-editor-free="):
@@ -1903,6 +1905,63 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.6).timeout
 	print("[hand-editor] after close: aim=%.2f" % float(bag.call("rifle_aim_amount")))
 	await _shot(dir, "editor4_closed")
+	_quit_cleanly()
+
+
+func _reload_pocket(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Where the round comes from. Walk the reload in small steps and report,
+	## for each, whether the cartridge is on screen at the moment it exists —
+	## a round that becomes visible inside the frame is a round out of nothing.
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var pv: CanvasItem = panel.get("_panel") as CanvasItem
+		if pv != null:
+			pv.visible = false
+	rig.set("_bag_selected", 4)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	rig.call("_activate_bag_selection")
+	await get_tree().create_timer(1.4).timeout
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var rifle: Node = bag.get("_active_item")
+	var hrig: Node = (rig.get("_arms") as Node).get("rig")
+	var cam: Camera3D = rig.get("_cam")
+	var vh: float = get_viewport().get_visible_rect().size.y
+	var vw: float = get_viewport().get_visible_rect().size.x
+	var round_node: Node3D = rifle.call("cartridge_node") as Node3D
+	# The rifle spawns loaded and refuses a reload; spend the round first.
+	bag.call("begin_active_rifle_fire")
+	await get_tree().create_timer(1.5).timeout
+	var started: bool = bool(bag.call("begin_active_rifle_reload"))
+	print("[pocket] reload started=%s loaded=%s" % [started, rifle.call("is_loaded")])
+	var shot_at := {0.90: "p0_bolt", 1.15: "p1_dipping", 1.37: "p2_spawn",
+			1.60: "p3_lifting", 1.80: "p4_carry", 2.10: "p5_insert"}
+	var last := 0.0
+	for t: float in [0.90, 1.10, 1.15, 1.25, 1.37, 1.45, 1.60, 1.80, 2.10, 2.35]:
+		await get_tree().create_timer(maxf(t - last, 0.02)).timeout
+		last = t
+		var now := float(rifle.call("reload_elapsed"))
+		var palm: Vector3 = hrig.call("palm_global", "R")
+		var ps := cam.unproject_position(palm) if not cam.is_position_behind(palm) \
+				else Vector2(-1, -1)
+		var vis: bool = round_node.visible
+		var rs := Vector2(-1, -1)
+		if vis and not cam.is_position_behind(round_node.global_position):
+			rs = cam.unproject_position(round_node.global_position)
+		var on_screen: bool = vis and rs.x >= 0.0 and rs.x <= vw \
+				and rs.y >= 0.0 and rs.y <= vh
+		var want := cam.global_transform * Vector3(0.165, -0.345, -0.300)
+		print("[pocket] t=%.2f palm screen y=%.0f/%.0f (%.3f m from the pouch)  round visible=%s screen=%s on-screen=%s" % [
+				now, ps.y, vh, palm.distance_to(want), vis, rs, on_screen])
+		if shot_at.has(t):
+			await _shot(dir, str(shot_at[t]))
+	# And it must still finish: bolt home, round gone, rifle loaded.
+	await get_tree().create_timer(1.3).timeout
+	print("[pocket] end: reloading=%s loaded=%s round visible=%s bolt open %.3f" % [
+			rifle.call("is_reloading"), rifle.call("is_loaded"),
+			round_node.visible, float(rifle.call("bolt_open_amount"))])
+	await _shot(dir, "p6_done")
 	_quit_cleanly()
 
 

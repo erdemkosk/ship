@@ -36,8 +36,14 @@ func update(rifle: Node3D, camera: Camera3D, weapon_frame: Transform3D,
 	var chamber_entry := chamber
 	chamber_entry.origin -= chamber.basis.z.normalized() * 0.105
 	chamber_entry.origin += chamber.basis.y.normalized() * 0.018
+	# The pouch on the belt, BELOW the frame. A round that becomes visible
+	# inside the picture is a round out of nothing, however good the hand
+	# looks; the hand has to leave the shot, close on the cartridge down
+	# there, and bring it up. At 70 degrees vertical-ish and 0.30 m out the
+	# bottom edge of the frame is about 0.21 m below the eye line, so this
+	# sits a further 13 cm under it — the whole hand goes out of sight.
 	var pocket_palm_position := camera.global_transform \
-			* Vector3(0.205, -0.165, -0.365)
+			* Vector3(0.165, -0.345, -0.300)
 	var pocket_round := Transform3D(chamber.basis,
 			pocket_palm_position - chamber.basis * round_palm_local)
 	var desired_round := pocket_round
