@@ -42,7 +42,7 @@ func _prompt_text(bag_focus: float, bag_selected: int, bag: Node,
 			return "Empty   ·   R — load & cycle bolt   ·   I — open bag"
 		return "RMB — sights   ·   LMB — fire   ·   R — reload   ·   I — open bag"
 	if _flag(walker, "on_sea_ladder"):
-		return "W/S — climb   ·   SPACE — let go"
+		return "W or SPACE — climb   ·   S — descend   ·   CTRL — let go"
 	if _flag(walker, "swimming"):
 		if _flag(walker, "can_board"):
 			return "SPACE — take the ladder"

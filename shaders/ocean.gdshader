@@ -71,6 +71,12 @@ uniform int camera_under = 0;
 uniform float absorb_k : hint_range(0.04, 1.2) = 0.75;
 uniform int far_clip = 0;
 uniform float near_radius = 380.0;
+// Centre shared by all clipmap holes. This follows the visual anchor (normally
+// the camera), which can be far away from the vessel while swimming.
+uniform vec2 clip_centre = vec2(0.0);
+// The 146 m horizon triangles cannot represent actual wave displacement.
+// Their fragment normals still carry distant surface lighting.
+uniform float geometry_wave_gain = 1.0;
 // 1/(2R) for Earth's radius. Drops the sea away below the true horizon, which
 // is only ~5 km out at eye height — the single strongest scale cue at sea.
 uniform float curvature_k = 0.0;
@@ -531,6 +537,14 @@ void vertex() {
 				* 0.12 * shore;
 	}
 
+	// From below, fading displacement by LOD material creates visible square
+	// borders. Fade every ring by the same radial world-space rule instead: the
+	// nearby ceiling moves, then becomes optically flat before any mesh handoff.
+	float underwater_geom = 1.0;
+	if (camera_under == 1) {
+		underwater_geom = 1.0 - smoothstep(12.0, 22.0, cam_dist);
+	}
+	disp *= geometry_wave_gain * underwater_geom;
 	VERTEX += disp;
 	// Earth curvature — drops the surface away with the square of the distance.
 	VERTEX.y -= cam_dist * cam_dist * curvature_k;
@@ -587,7 +601,7 @@ void fragment() {
 			discard;
 		}
 	}
-	if (far_clip == 1 && length(v_world_pos.xz - boat_pos) < near_radius) {
+	if (far_clip == 1 && length(v_world_pos.xz - clip_centre) < near_radius) {
 		discard;
 	}
 	// Don't draw water over dry island tops.
@@ -747,6 +761,12 @@ void fragment() {
 	// position, so its image comes out horizontally flipped relative to the
 	// main view — hence 1 - u, and the sideways wobble has to flip with it.
 	if (reflect_on == 1) {
+		// Solid-object reflections obey the same viewing-angle physics as the
+		// sky. Looking almost straight down through water should reveal the body
+		// below, not long black ghosts of bollards behind the camera. At grazing
+		// angles the mirror returns progressively, which is where piers, hulls and
+		// harbour lamps should make their long streaks.
+		float planar_view = smoothstep(0.08, 0.48, 1.0 - ndotv);
 		vec2 ruv = vec2(1.0 - SCREEN_UV.x, SCREEN_UV.y);
 		// Distort by slope RELATIVE to a flat water plane. Using the complete
 		// view-space normal added the camera's pitch as a permanent UV offset;
@@ -754,7 +774,7 @@ void fragment() {
 		vec3 flat_view_n = (VIEW_MATRIX * vec4(0.0, 1.0, 0.0, 0.0)).xyz;
 		vec2 refl_slope = view_n.xy - flat_view_n.xy;
 		ruv += vec2(-refl_slope.x, refl_slope.y) * 0.022
-				* clamp(1.0 - rough * 1.35, 0.0, 1.0);
+				* clamp(1.0 - rough * 1.35, 0.0, 1.0) * planar_view;
 		vec4 pr = texture(reflect_tex, clamp(ruv, vec2(0.002), vec2(0.998)));
 		// Alpha is the coverage mask for solid things, but anything drawn with
 		// additive blending — the lighthouse beams, the lantern glass — adds
@@ -773,7 +793,8 @@ void fragment() {
 		// swell passes under them.
 		float pw = 1.0 - smoothstep(2.5, 9.0, abs(v_world_pos.y - reflect_plane_y));
 		reflection = mix(reflection, pr.rgb,
-				cov * clamp(1.0 - rough * 1.1, 0.0, 1.0) * mix(0.6, 1.0, pw));
+				cov * planar_view * clamp(1.0 - rough * 1.1, 0.0, 1.0)
+				* mix(0.6, 1.0, pw));
 	}
 
 	// Schlick with water's real F0 (n = 1.333 -> 0.02).
@@ -887,8 +908,11 @@ void fragment() {
 		// Outside Snell's window the ceiling reflects the underwater world. Screen
 		// colour is the available scene term; a low, depth-coloured irradiance keeps
 		// empty open water from becoming a featureless black polygon.
-		vec3 dark = scatter_color * (0.42 + 0.34 * sun_energy)
-				+ vec3(0.004, 0.018, 0.021);
+		// Total internal reflection is darker than the Snell window, but it is
+		// still seen through illuminated water. A near-black fallback turns the
+		// whole grazing-angle ceiling into a solid black wall.
+		vec3 dark = scatter_color * (0.88 + 0.30 * sun_energy)
+				+ vec3(0.008, 0.030, 0.035);
 		// SCREEN_TEXTURE also contains the bright sky behind the transparent sea.
 		// That is not an underwater reflection: accepting it painted the sky's
 		// horizon as a ruler-straight white line through the basin. Depth admits
@@ -907,8 +931,17 @@ void fragment() {
 		vec3 beer_u = exp(-extinction * max(water_z, 0.0) * 0.075);
 		col *= mix(beer_u, vec3(1.0), 0.12);
 		col = mix(dark, col, clamp(beer_u.g * 1.55, 0.0, 1.0));
-		float volume_handoff = smoothstep(55.0, 145.0, dist);
-		col = mix(col, dark * (0.75 + 0.25 * sun_energy), volume_handoff);
+		float volume_handoff = smoothstep(28.0, 72.0, dist);
+		// At this range the eye no longer resolves the underside of individual
+		// waves. It merges into the same blue-green participating medium as the
+		// rest of the water, never a black horizontal slab at the LOD boundary.
+		vec3 volume_col = scatter_color * (1.02 + 0.24 * sun_energy)
+				+ vec3(0.004, 0.016, 0.019);
+		col = mix(col, volume_col, volume_handoff);
+		// Screen/depth rejection can leave no reflected scene at grazing angles.
+		// Extinction removes contrast, not all photons: retain a water-coloured
+		// radiance floor so neither TIR nor an LOD overlap can ever become black.
+		col = max(col, volume_col * 0.82);
 		diffuse_albedo = vec3(0.0);
 		rough = 1.0;
 	}

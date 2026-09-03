@@ -7,6 +7,7 @@ const KEY_ACTIONS: Dictionary = {
 	"boat_left": [KEY_A, KEY_LEFT], "boat_right": [KEY_D, KEY_RIGHT],
 	"toggle_panel": [KEY_TAB], "toggle_camera": [KEY_F], "use": [KEY_E],
 	"jump": [KEY_SPACE], "toggle_fps": [KEY_QUOTEDBL, KEY_APOSTROPHE],
+	"sprint": [KEY_SHIFT],
 	"dive": [KEY_CTRL, KEY_C], "watch": [KEY_B], "backpack": [KEY_I],
 	"bag_previous": [KEY_LEFT, KEY_UP], "bag_next": [KEY_RIGHT, KEY_DOWN],
 	"bag_left": [KEY_A, KEY_LEFT], "bag_right": [KEY_D, KEY_RIGHT],

@@ -292,6 +292,11 @@ func _set_water(pname: String, value: Variant) -> void:
 func _apply_atmosphere() -> void:
 	if _env == null:
 		return
+	# Below the surface there is no visible sky lower hemisphere. Any pixel not
+	# covered by surface/seabed geometry must resolve to water volume, otherwise
+	# the sky shader's near-black ground colour appears as a horizontal void.
+	_env.background_mode = Environment.BG_COLOR if _underwater else Environment.BG_SKY
+	_env.background_color = Color(0.024, 0.100, 0.115)
 
 	# Sun elevation: 6h = sunrise, 18h = sunset.
 	var ang := (time_of_day - 6.0) / 12.0 * PI
@@ -539,7 +544,11 @@ func _process(delta: float) -> void:
 	_set_sky("flash_energy", _flash.light_energy)
 	if _env != null:
 		var fe := clampf(_flash.light_energy / 10.0, 0.0, 1.6)
-		_env.volumetric_fog_emission = Color(0.42, 0.50, 0.72) * fe
+		var flash_emission := Color(0.42, 0.50, 0.72) * fe
+		# Preserve the water's baseline scattered light between lightning flashes.
+		# Assigning only the flash term made it exactly black on every calm frame.
+		_env.volumetric_fog_emission = Color(0.04, 0.11, 0.12) \
+				+ flash_emission if _underwater else flash_emission
 	_update_strike(delta)
 	_update_weather_audio(delta)
 
@@ -799,7 +808,8 @@ func _end_strike() -> void:
 	_set_sky("flash_energy", 0.0)
 	_set_sky("flash_lobe", 0.0)
 	if _env != null:
-		_env.volumetric_fog_emission = Color(0.0, 0.0, 0.0)
+		_env.volumetric_fog_emission = Color(0.04, 0.11, 0.12) \
+				if _underwater else Color(0.0, 0.0, 0.0)
 
 
 func _rebuild_bolt_mesh() -> void:

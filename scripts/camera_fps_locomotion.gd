@@ -43,5 +43,7 @@ func update(delta: float, target, walker, engaged: String,
 			look_forward, axes,
 			Input.is_action_pressed("jump") and not panel_open \
 					and bag_focus < 0.08,
-			Input.is_action_pressed("dive") and not panel_open)
+			Input.is_action_pressed("dive") and not panel_open,
+			Input.is_action_pressed("sprint") and not panel_open \
+					and bag_focus < 0.08)
 	stair_step_callback.call()

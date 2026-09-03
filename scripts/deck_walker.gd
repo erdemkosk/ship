@@ -20,12 +20,15 @@ extends RefCounted
 const RADIUS := 0.30
 const HEIGHT := 1.74
 const EYE := 1.60
+const CROUCH_EYE := 1.02
 const STEP_UP := 0.42          # ledge you can walk over without jumping
 const WALK_SPEED := 3.0
+const RUN_SPEED := 5.4
+const CROUCH_SPEED := 1.65
 const ACCEL := 13.0
 const GROUND_DRAG := 9.0
 const AIR_DRAG := 0.4
-const JUMP_SPEED := 3.5
+const JUMP_SPEED := 4.25
 const CLIMB_SPEED := 2.1
 const SNAP_DOWN := 0.55        # how far below the feet a floor still catches you
 
@@ -33,7 +36,7 @@ const SNAP_DOWN := 0.55        # how far below the feet a floor still catches yo
 ## Slower than the companionway inside, deliberately. You are hauling a soaked
 ## body up wet iron with the stern coming at you; the whole point of the thing
 ## is that it is work, and that you can feel each rung.
-const SEA_CLIMB := 0.62
+const SEA_CLIMB := 1.15
 const SEA_STEP_OFF := 5.22     # where you end up standing once you are over
 const SEA_LEAN := 0.1045       # tan(6 deg): the stiles are raked, so is the climb
 const SEA_STANDOFF := 0.36     # chest to rung — how far your body hangs off it
@@ -56,6 +59,8 @@ var on_ladder := false
 var on_sea_ladder := false
 var sea_ladder_mantle := 0.0
 var swimming := false
+var ashore := false
+var crouching := false
 ## The eye is under the surface, and how deep. Read by the camera (it stops
 ## clamping the view above the waves) and by the hands.
 var submerged := false
@@ -63,6 +68,8 @@ var swim_depth := 0.0
 var _grab := false   # Space-held grip on the rungs
 var _swim_pos := Vector3.ZERO   # WORLD position while overboard
 var _swim_vel := Vector3.ZERO   # WORLD velocity while overboard
+var _shore_pos := Vector3.ZERO  # WORLD feet position while walking on land
+var _shore_vel := Vector3.ZERO
 var can_board := false
 
 
@@ -71,6 +78,8 @@ func spawn_at(p: Vector3) -> void:
 	vel = Vector3.ZERO
 	on_floor = true
 	swimming = false
+	ashore = false
+	crouching = false
 	on_sea_ladder = false
 	sea_ladder_mantle = 0.0
 	submerged = false
@@ -79,15 +88,50 @@ func spawn_at(p: Vector3) -> void:
 	_grab = false
 	_swim_pos = Vector3.ZERO
 	_swim_vel = Vector3.ZERO
+	_shore_pos = Vector3.ZERO
+	_shore_vel = Vector3.ZERO
+
+
+func spawn_ashore(world_pos: Vector3, boat: Node3D) -> void:
+	## Land is stationary in world space, just as swimming is. `pos` remains a
+	## boat-local mirror solely so the existing camera and interaction code can
+	## keep using one coordinate path while the boat moves independently.
+	if boat == null:
+		return
+	_shore_pos = world_pos
+	_shore_vel = Vector3.ZERO
+	pos = boat.global_transform.affine_inverse() * world_pos
+	vel = Vector3.ZERO
+	ashore = true
+	crouching = false
+	swimming = false
+	on_floor = true
+	on_ladder = false
+	on_sea_ladder = false
+	submerged = false
+	swim_depth = 0.0
+	can_board = false
 
 
 func eye_local() -> Vector3:
-	return pos + Vector3(0.0, EYE, 0.0)
+	return pos + Vector3(0.0, CROUCH_EYE if crouching else EYE, 0.0)
+
+
+func shore_eye_world() -> Vector3:
+	return _shore_pos + Vector3(0.0, CROUCH_EYE if crouching else EYE, 0.0)
+
+
+func swim_eye_world() -> Vector3:
+	## Swimming is authored entirely in world space. Exposing the eye directly
+	## prevents a distant boat's heave/rotation from leaking back through the
+	## boat-local compatibility mirror stored in `pos`.
+	return _swim_pos + Vector3.UP * EYE
 
 
 func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 		look_w: Vector3 = Vector3.ZERO, axes: Vector2 = Vector2.ZERO,
-		want_up: bool = false, want_down: bool = false) -> void:
+		want_up: bool = false, want_down: bool = false,
+		want_sprint: bool = false) -> void:
 	## `wish` is the desired heading in the boat's local xz, already rotated by
 	## where the player is looking. Length <= 1.
 	##
@@ -104,15 +148,22 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 	var blockers: Array = boat.BLOCKERS + boat.door_blockers
 	var ladder: AABB = boat.LADDER
 
-	# World-down, expressed in the boat's frame. Everything else follows.
-	var g: Vector3 = boat.global_basis.inverse() * (Vector3.DOWN * 9.81)
-
 	# --- overboard -----------------------------------------------------------
 	# Off the deck and down to the water there is no floor, and without this
 	# the walker just kept falling in the boat's frame while the roll flipped
 	# the slope-pull back and forth under it — the jittering the sea showed.
 	# In the water you SWIM: held at the surface, carried by the current.
-	var xf: Transform3D = boat.global_transform
+	# Use the same interpolated transform as the camera. On land, converting a
+	# world position with the physics pose and drawing it with the interpolated
+	# pose leaked the boat's frame-to-frame shake into an otherwise fixed body.
+	var xf: Transform3D = boat.get_global_transform_interpolated()
+	# World-down, expressed in the boat's frame. Everything else follows.
+	var g: Vector3 = xf.basis.inverse() * (Vector3.DOWN * 9.81)
+	var ocean: Node = boat.get("ocean")
+	if ashore:
+		_walk_ashore(delta, boat, xf, ocean, axes, look_w, want_jump,
+				want_sprint, want_down)
+		return
 	# Overboard means OVER THE SIDE — outside her rails, not merely lower than
 	# you were. The old test also fired on `pos.y < 0.15`, so a stumble that
 	# dropped you a metre inside the hull put you in the water with the deck
@@ -123,12 +174,11 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 	# over the side the first time a wave came aboard: the aft deck runs to
 	# 5.52 and the side decks to 1.62, and you are allowed to stand on both.
 	var outside := absf(pos.x) > 1.75 or pos.z < -4.15 or pos.z > 5.62
-	var ocean: Node = boat.get("ocean")
 	if on_sea_ladder:
 		# Hanging off the transom you are outside every rail there is, so this
 		# has to come before the overboard test or the ladder drops you in the
 		# water on the frame you take hold of it.
-		_climb_sea_ladder(delta, boat, xf, ocean, axes, want_jump)
+		_climb_sea_ladder(delta, boat, xf, ocean, axes, want_up, want_down)
 		return
 	# And ON NOTHING. Being pooped by a wave is not going overboard; you are
 	# standing on her deck with the sea round your knees, which is a thing that
@@ -151,8 +201,10 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 				var entry_strength := clampf(absf(_swim_vel.y) * 0.24 + 0.45, 0.45, 2.2)
 				ocean.splash(wp, entry_strength)
 	if swimming:
+		crouching = false
 		_swim(delta, boat, xf, ocean, axes, look_w, want_jump, want_up, want_down)
 		return
+	crouching = want_down and on_floor
 	can_board = false
 	submerged = false
 	swim_depth = 0.0
@@ -190,7 +242,9 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 		vel += g * delta
 		var hv := Vector3(vel.x, 0.0, vel.z)
 		if on_floor:
-			var target := Vector3(wish.x, 0.0, wish.y) * WALK_SPEED
+			var move_speed := CROUCH_SPEED if crouching else (RUN_SPEED \
+					if want_sprint and wish.length_squared() > 0.01 else WALK_SPEED)
+			var target := Vector3(wish.x, 0.0, wish.y) * move_speed
 			hv = hv.lerp(target, 1.0 - exp(-ACCEL * delta))
 			# Static friction first, downhill slide second. A dry cabin sole holds
 			# ordinary heel; the exposed wet deck lets go earlier. The transition
@@ -201,6 +255,11 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 			if want_jump:
 				vel.y = JUMP_SPEED
 				on_floor = false
+				# A deliberate jump toward an outer rail carries the body clear of
+				# the cap instead of catching the collision box and dropping back.
+				var outward := _rail_jump_direction(pos, wish)
+				if outward.length_squared() > 0.0:
+					hv += outward * 2.15
 		else:
 			hv += Vector3(wish.x, 0.0, wish.y) * ACCEL * 0.22 * delta
 			hv *= exp(-AIR_DRAG * delta)
@@ -213,6 +272,101 @@ func update(delta: float, boat: Node3D, wish: Vector2, want_jump: bool,
 	_resolve_walls(blockers)
 	_resolve_ceilings(ceils)
 	_resolve_floor(floors)
+
+
+func _rail_jump_direction(at: Vector3, wish: Vector2) -> Vector3:
+	var out := Vector3.ZERO
+	if absf(at.x) > 1.34 and signf(wish.x) == signf(at.x):
+		out.x = signf(at.x)
+	if at.z > 5.05 and wish.y > 0.12:
+		out.z = 1.0
+	elif at.z < -3.72 and wish.y < -0.12:
+		out.z = -1.0
+	return out.normalized() if out.length_squared() > 0.0 else out
+
+
+func _walk_ashore(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
+		axes: Vector2, look_w: Vector3, want_jump: bool,
+		want_sprint: bool, want_crouch: bool) -> void:
+	crouching = want_crouch and on_floor
+	var fwd := Vector3(look_w.x, 0.0, look_w.z)
+	if fwd.length_squared() < 1.0e-5:
+		fwd = Vector3.FORWARD
+	else:
+		fwd = fwd.normalized()
+	var right := fwd.cross(Vector3.UP).normalized()
+	var drive := fwd * axes.y + right * axes.x
+	if drive.length() > 1.0:
+		drive = drive.normalized()
+	var move_speed := CROUCH_SPEED if crouching else (RUN_SPEED \
+			if want_sprint and drive.length_squared() > 0.01 else WALK_SPEED)
+	var target_h := drive * move_speed
+	var horizontal := Vector3(_shore_vel.x, 0.0, _shore_vel.z)
+	horizontal = horizontal.lerp(target_h, 1.0 - exp(-ACCEL * delta))
+	horizontal *= exp(-GROUND_DRAG * delta * (0.12 if drive.length_squared() > 0.01 else 1.0))
+	_shore_vel.x = horizontal.x
+	_shore_vel.z = horizontal.z
+	var grounded_before := on_floor
+	if grounded_before:
+		if want_jump:
+			_shore_vel.y = JUMP_SPEED
+			on_floor = false
+	else:
+		_shore_vel.y -= 9.81 * delta
+
+	var next := _shore_pos + _shore_vel * delta
+	var bed := _ground_height(ocean, next)
+	var current_bed := _ground_height(ocean, _shore_pos)
+	# A cylinder tier or building foundation is a wall, not a magic stair. The
+	# old unconditional snap lifted the body several metres in one frame, which
+	# looked like repeated jumping and could put the eye inside the island mesh.
+	if grounded_before and not want_jump and bed > current_bed + STEP_UP:
+		# Try each axis separately so a circular rock face makes you slide along
+		# it instead of glueing both feet to the spot.
+		var along_x := Vector3(next.x, next.y, _shore_pos.z)
+		var along_z := Vector3(_shore_pos.x, next.y, next.z)
+		var bed_x := _ground_height(ocean, along_x)
+		var bed_z := _ground_height(ocean, along_z)
+		var x_clear := bed_x <= current_bed + STEP_UP
+		var z_clear := bed_z <= current_bed + STEP_UP
+		next.x = along_x.x if x_clear else _shore_pos.x
+		next.z = along_z.z if z_clear else _shore_pos.z
+		_shore_vel.x = _shore_vel.x if x_clear else 0.0
+		_shore_vel.z = _shore_vel.z if z_clear else 0.0
+		bed = _ground_height(ocean, next)
+	on_floor = false
+	if next.y <= bed + SNAP_DOWN and _shore_vel.y <= 0.0:
+		next.y = bed + 0.05
+		_shore_vel.y = 0.0
+		on_floor = true
+	var water := float(ocean.call("get_height", next)) if ocean != null else -INF
+	# Once the shore falls beneath the body, hand the same world-space motion
+	# to swimming. This is also what makes walking off a beach feel continuous.
+	if not on_floor and next.y < water + 0.12 and bed < water - 1.15:
+		ashore = false
+		swimming = true
+		_swim_pos = next
+		_swim_vel = _shore_vel
+		if ocean.has_method("splash"):
+			ocean.call("splash", next, clampf(absf(_shore_vel.y) * 0.2 + 0.35, 0.35, 1.8))
+		_swim(delta, boat, xf, ocean, axes, look_w, want_jump, false, false)
+		return
+	_shore_pos = next
+	pos = xf.affine_inverse() * next
+	vel = xf.basis.inverse() * _shore_vel
+	swimming = false
+	submerged = false
+	swim_depth = 0.0
+	can_board = false
+
+
+func _ground_height(ocean: Node, world_pos: Vector3) -> float:
+	if ocean == null:
+		return world_pos.y - 100.0
+	if ocean.has_method("get_walkable_ground_height"):
+		return float(ocean.call("get_walkable_ground_height", world_pos))
+	return float(ocean.call("get_seafloor_height", world_pos)) \
+			if ocean.has_method("get_seafloor_height") else world_pos.y - 100.0
 
 
 func _slope_drift_scale(boat: Node3D, xf: Transform3D, local_gravity: Vector3) -> float:
@@ -377,7 +531,25 @@ func _swim(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
 			ocean.inject_local_water(wpos + fwd * 0.28, 0.30,
 					kick_phase * drive.length() * minf(delta, 1.0 / 30.0) * 0.32)
 		if ocean.has_method("get_seafloor_height"):
-			wpos.y = maxf(wpos.y, float(ocean.get_seafloor_height(wpos)) + 0.05)
+			# Swimming uses the actual seabed, not walkable structures above it;
+			# otherwise passing beneath the pier would teleport feet onto its deck.
+			var bed := float(ocean.get_seafloor_height(wpos))
+			wpos.y = maxf(wpos.y, bed + 0.05)
+			var shore_water := float(ocean.get_height(wpos))
+			# Feet finding bottom in ankle-deep water is a landing, not eternal
+			# swimming. The small dry margin prevents waves toggling the state.
+			if bed >= shore_water - 1.15 and wpos.y <= bed + 0.10:
+				ashore = true
+				swimming = false
+				_shore_pos = Vector3(wpos.x, bed + 0.05, wpos.z)
+				_shore_vel = Vector3(_swim_vel.x, 0.0, _swim_vel.z) * 0.45
+				pos = xf.affine_inverse() * _shore_pos
+				vel = xf.basis.inverse() * _shore_vel
+				on_floor = true
+				submerged = false
+				swim_depth = 0.0
+				can_board = false
+				return
 
 	wpos = _keep_out_of_hull(xf, wpos)
 	_swim_pos = wpos
@@ -395,7 +567,7 @@ func _swim(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
 	# Feet remain well below the hand that reaches the new lowest rung.
 	can_board = Vector2(pos.x - lad.x, pos.z - lad.z).length() < 1.5 \
 			and pos.y > float(boat.SEA_LADDER_BOT) - 1.25
-	if can_board and want_jump:
+	if can_board and (want_jump or want_up):
 		grab_sea_ladder(boat)
 
 
@@ -520,23 +692,26 @@ func _sea_stand(boat: Node3D, y: float) -> Vector3:
 
 
 func _climb_sea_ladder(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
-		axes: Vector2, want_jump: bool) -> void:
+		axes: Vector2, want_up: bool, want_down: bool) -> void:
 	var top: float = float(boat.SEA_LADDER_TOP)
 	var bot: float = float(boat.SEA_LADDER_BOT)
 	if sea_ladder_mantle > 0.0:
 		_advance_sea_ladder_mantle(delta, boat, top)
 		return
-	var y: float = pos.y + axes.y * SEA_CLIMB * delta
+	# Space is continuous upward effort in water and on the ladder. Previously
+	# it grabbed the first rung and immediately meant "let go", so the most
+	# natural attempt to climb could never reach the deck.
+	var climb_input := maxf(axes.y, 1.0 if want_up else -1.0)
+	var y: float = pos.y + climb_input * SEA_CLIMB * delta
 	if y > top:
 		# Do not teleport across the transom. Plant the hands, lift the body over
 		# the cap, then set the feet down on deck over a short authored arc.
 		sea_ladder_mantle = 0.001
 		_advance_sea_ladder_mantle(delta, boat, top)
 		return
-	if want_jump:
-		# Let go deliberately. Reaching the short ladder's bottom is not itself a
-		# release: a held down key used to cross the boundary by one frame and turn
-		# a planted grip into an unexplained fall whenever the boat was moving.
+	if want_down:
+		# Ctrl is the deliberate release/dive control; Space remains unambiguously
+		# upward from the sea all the way onto the deck.
 		on_sea_ladder = false
 		swimming = true
 		_swim_pos = xf * pos
@@ -545,7 +720,7 @@ func _climb_sea_ladder(delta: float, boat: Node3D, xf: Transform3D, ocean: Node,
 	if y < bot:
 		y = bot
 	pos = _sea_stand(boat, y)
-	vel = Vector3(0.0, axes.y * SEA_CLIMB if y > bot + 0.001 else 0.0, 0.0)
+	vel = Vector3(0.0, climb_input * SEA_CLIMB if y > bot + 0.001 else 0.0, 0.0)
 	on_floor = false
 	on_ladder = false
 	# The bottom rungs are under water and she is moving under you, so the eye

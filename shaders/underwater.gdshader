@@ -98,5 +98,14 @@ void fragment() {
 	float vig = smoothstep(0.55, 1.18, distance(uv, vec2(0.5)));
 	col *= 1.0 - vig * (0.10 + 0.18 * murk) * amount * (1.0 - from_above);
 	col *= 1.0 - look_down * mix(0.18, 0.78, murk) * amount * (1.0 - from_above);
+	// Water contains scattered light even where the 3D colour buffer contains a
+	// discarded surface, an empty LOD pixel or a completely dark reflection.
+	// Lift only those near-black pixels into the surrounding water colour. This
+	// is the final safety net that prevents a black horizontal void underwater.
+	float final_lum = dot(col, vec3(0.299, 0.587, 0.114));
+	float void_mask = (1.0 - smoothstep(0.012, 0.075, final_lum)) * amount;
+	vec3 water_floor = max(tint.rgb * vec3(1.20, 1.15, 1.10)
+			+ vec3(0.004, 0.010, 0.012), vec3(0.012, 0.045, 0.055));
+	col = mix(col, max(col, water_floor), void_mask * 0.96);
 	COLOR = vec4(col, clamp(amount, 0.0, 1.0));
 }

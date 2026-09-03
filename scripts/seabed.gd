@@ -58,6 +58,23 @@ func get_height(world_pos: Vector3) -> float:
 	return _sample_img(world_pos.x, world_pos.z)
 
 
+func get_walk_height(world_pos: Vector3) -> float:
+	## The lighthouse's authored rock is built above the heightmap in three
+	## visible tiers. Feet must follow those visible tops, not the terrain hidden
+	## inside them, or the camera walks through the rock's hollow back faces.
+	var terrain := get_height(world_pos)
+	var d := Vector2(world_pos.x - LIGHTHOUSE_X,
+			world_pos.z - LIGHTHOUSE_Z).length()
+	var root_y := get_height(Vector3(LIGHTHOUSE_X, 0.0, LIGHTHOUSE_Z)) - 0.4
+	if d <= 26.2:
+		return maxf(terrain, root_y + 5.8)
+	if d <= 28.7:
+		return maxf(terrain, root_y + 4.9)
+	if d <= 33.7:
+		return maxf(terrain, root_y + 2.2)
+	return terrain
+
+
 func _wrap_uv(t: float) -> float:
 	return fposmod(t, 1.0)
 
@@ -196,7 +213,10 @@ func _stamp_island(isl: Vector4) -> void:
 	var shelf := lerpf(-11.0, -5.0, clampf(peak, 0.0, 1.6) / 1.6)
 	if radius >= 14.0:
 		shelf = -3.5
-	var reach := radius * (2.15 if radius >= 14.0 else 3.6)
+	var lighthouse_land := absf(isl.x - LIGHTHOUSE_X) < 0.1 \
+			and absf(isl.y - LIGHTHOUSE_Z) < 0.1
+	var reach := radius * (4.6 if lighthouse_land \
+			else (2.15 if radius >= 14.0 else 3.6))
 	var r_px := int(ceil(reach / TERRAIN_SIZE * float(TEX_RES))) + 1
 	var cx := int(floor((isl.x / TERRAIN_SIZE + 0.5) * float(TEX_RES)))
 	var cy := int(floor((isl.y / TERRAIN_SIZE + 0.5) * float(TEX_RES)))
@@ -237,7 +257,16 @@ func _stamp_island(isl: Vector4) -> void:
 				var wob := 1.0 + 0.23 * sin(ang * 3.0 + isl.x * 0.05) \
 						+ 0.13 * sin(ang * 5.0 - isl.y * 0.04)
 				var plateau: float = radius * 0.69 * wob
-				var outer: float = radius * 1.64 * wob
+				var outer: float = radius * (2.05 if lighthouse_land else 1.64) * wob
+				# The harbour island has a real sandy apron rather than a cliff from
+				# the beach straight into the deep basin. Follow the irregular coast
+				# and ease continuously back to the original seabed at the outer edge:
+				# ankle water, then a swimmable shelf, then genuinely deep water.
+				if lighthouse_land and d >= outer:
+					var shelf_t: float = clampf((d - outer) \
+							/ maxf(reach - outer, 0.01), 0.0, 1.0)
+					shelf_t = shelf_t * shelf_t * (3.0 - 2.0 * shelf_t)
+					lifted = maxf(lifted, lerpf(-0.55, h, shelf_t))
 				if d <= plateau:
 					lifted = maxf(lifted, peak)
 				elif d < outer:
@@ -456,5 +485,11 @@ func set_underwater(on: bool, wave_time: float, wind_dir: Vector2) -> void:
 func _process(_delta: float) -> void:
 	if follow_target == null or _near == null:
 		return
-	var p := follow_target.global_position
+	var p: Vector3 = follow_target.global_position
+	var camera: Camera3D = get_viewport().get_camera_3d()
+	if camera != null and camera.global_position.distance_squared_to(p) > 3600.0:
+		# The heightmap is global, but its dense render mesh must surround whoever
+		# is looking at it. At the island the moored vessel is now far enough away
+		# that following it clipped away the beach and the back half of the shelf.
+		p = camera.global_position
 	_near.global_position = Vector3(snappedf(p.x, NEAR_QUAD), 0.0, snappedf(p.z, NEAR_QUAD))

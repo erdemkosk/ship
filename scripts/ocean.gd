@@ -97,6 +97,7 @@ var steepness := 0.9
 
 var follow_target: Node3D
 var seabed: Node3D
+var harbor: Node3D
 var wave_time := 0.0
 var max_amplitude := 0.5
 var sig_height := 1.0  ## significant wave height (Hs), metres
@@ -163,6 +164,7 @@ var _breaker_next := 0
 var _breaker_cd := 0.0
 var _scan_rng := RandomNumberGenerator.new()
 var _refl_vp: SubViewport
+var _reflection_classify_left := 0.0
 var _refl_cam: Camera3D
 var _refl_env: Environment
 var _refl_plane_y := 0.0
@@ -445,6 +447,10 @@ func _push_uniforms() -> void:
 			maxf(_clip_radius(WIDE_SIZE) - FAR_QUAD * 0.52, WIDE_SIZE * 0.32))
 	# The horizon plate has no geometry left to carry chop, so all of its slope
 	# variance has to arrive as roughness.
+	ShaderSet.param(_mat_close, &"geometry_wave_gain", 1.0)
+	ShaderSet.param(_mat_mid, &"geometry_wave_gain", 1.0)
+	ShaderSet.param(_mat_wide, &"geometry_wave_gain", 1.0)
+	ShaderSet.param(_mat_far, &"geometry_wave_gain", 0.0)
 	ShaderSet.param(_mat_far, &"normal_strength", 0.0)
 	if seabed != null and seabed.has_method("set_caustics"):
 		# A short, steep sea makes a fine, fast caustic net; a long swell makes a
@@ -521,16 +527,38 @@ func _process(delta: float) -> void:
 	_update_impacts(mats)
 
 	if follow_target != null:
-		var p := follow_target.global_position
-		# Snap each ring to its own quad so vertices don't swim as the boat moves.
-		_snap_ring(_close, p, CLOSE_QUAD, 0.0)
-		_snap_ring(_mid, p, MID_QUAD, 0.0)
-		_snap_ring(_wide, p, WIDE_QUAD, 0.0)
+		var p: Vector3 = follow_target.global_position
+		# The simulation's wake belongs to the vessel, but the rendered clipmap
+		# belongs to the viewer. A swimmer can now be hundreds of metres away from
+		# the moored boat; centring these rings on the hull left the camera in the
+		# coarse far mesh and made the underwater ceiling visibly tremble.
+		var visual_anchor: Vector3 = p
+		var view_camera: Camera3D = get_viewport().get_camera_3d()
+		if view_camera != null and (camera_under \
+				or view_camera.global_position.distance_squared_to(p) > 3600.0):
+			visual_anchor = view_camera.global_position
+		ShaderSet.many(mats, &"clip_centre",
+				Vector2(visual_anchor.x, visual_anchor.z))
+		# All rings use the shader's same radial underwater displacement fade. Do
+		# not vary this by LOD: a per-material value exposes each square boundary.
+		ShaderSet.param(_mat_close, &"geometry_wave_gain", 1.0)
+		ShaderSet.param(_mat_mid, &"geometry_wave_gain", 1.0)
+		ShaderSet.param(_mat_wide, &"geometry_wave_gain", 1.0)
+		ShaderSet.param(_mat_far, &"geometry_wave_gain", 0.0)
+		# Snap each ring to its own quad so vertices don't swim as the viewer moves.
+		_snap_ring(_close, visual_anchor, CLOSE_QUAD, 0.0)
+		_snap_ring(_mid, visual_anchor, MID_QUAD, 0.0)
+		_snap_ring(_wide, visual_anchor, WIDE_QUAD, 0.0)
 		# The lowered far plate is safe from troughs above water, but from below it
 		# opened a perfectly straight crack in the ceiling.  At mean level the
 		# underside is continuous; the underwater distance term hides the coarse
 		# hand-off long before the 9 m -> 146 m topology change is visible.
-		_snap_ring(_far, p, FAR_QUAD, 0.0 if camera_under else _far_y)
+		_snap_ring(_far, visual_anchor, FAR_QUAD, 0.0 if camera_under else _far_y)
+		# Keep the complete ceiling present. Its geometry is flat beyond 22 m and
+		# its colour is fully volume-fogged by 72 m, so the viewer can never reach
+		# or see a finite square edge.
+		_wide.visible = true
+		_far.visible = true
 
 		# wake track + hull water mask follow the boat every frame
 		var vel := Vector3.ZERO
@@ -686,6 +714,7 @@ func _update_reflection(delta: float) -> void:
 		_refl_plane_y = h
 	_refl_plane_y = lerpf(_refl_plane_y, h, 1.0 - exp(-22.0 * delta))
 	ShaderSet.many(_mats(), &"reflect_plane_y", _refl_plane_y)
+	_classify_submerged_reflectors(delta, _refl_plane_y)
 
 	# Same position and orientation reflected in that plane. This is an ordinary
 	# camera looking at the real world from under the surface — no world
@@ -702,6 +731,35 @@ func _update_reflection(delta: float) -> void:
 	_refl_cam.look_at_from_position(pm, pm + fm, um)
 	_refl_cam.fov = cam.fov
 	_refl_cam.keep_aspect = cam.keep_aspect
+
+
+func _classify_submerged_reflectors(delta: float, water_y: float) -> void:
+	## The reflection viewport shares the main world, so without an explicit
+	## rule it also photographs geometry below its mirror plane. Fully submerged
+	## meshes belong on layer 8: the gameplay camera still draws that layer, but
+	## the reflection camera deliberately excludes it. Re-evaluate slowly so a
+	## floating object that emerges can return to the mirror without a per-frame
+	## scene-tree walk.
+	_reflection_classify_left -= delta
+	if _reflection_classify_left > 0.0 or get_tree().current_scene == null:
+		return
+	_reflection_classify_left = 0.30
+	var nodes := get_tree().current_scene.find_children("*", "MeshInstance3D", true, false)
+	for child in nodes:
+		var mesh_instance := child as MeshInstance3D
+		if mesh_instance == null or mesh_instance.mesh == null:
+			continue
+		var tracked := mesh_instance.has_meta("reflection_base_layers")
+		if not tracked and mesh_instance.layers != 1:
+			continue
+		if not tracked:
+			mesh_instance.set_meta("reflection_base_layers", mesh_instance.layers)
+		var base_layers := int(mesh_instance.get_meta("reflection_base_layers", 1))
+		var world_box: AABB = mesh_instance.global_transform * mesh_instance.get_aabb()
+		var top_y := world_box.position.y + world_box.size.y
+		var fully_submerged := top_y < water_y - 0.18
+		mesh_instance.layers = ((base_layers & ~1) | TACKLE_LAYER) \
+				if fully_submerged else base_layers
 
 
 func register_floater(node: Node3D, radius: float, draft: float) -> void:
@@ -987,6 +1045,17 @@ func get_seafloor_height(world_pos: Vector3) -> float:
 	if seabed != null:
 		return float(seabed.get_height(world_pos))
 	return -28.0
+
+
+func get_walkable_ground_height(world_pos: Vector3) -> float:
+	var ground := -INF
+	if seabed != null and seabed.has_method("get_walk_height"):
+		ground = float(seabed.call("get_walk_height", world_pos))
+	else:
+		ground = get_seafloor_height(world_pos)
+	if harbor != null and harbor.has_method("walk_height"):
+		ground = maxf(ground, float(harbor.call("walk_height", world_pos)))
+	return ground
 
 
 func _mats() -> Array[ShaderMaterial]:

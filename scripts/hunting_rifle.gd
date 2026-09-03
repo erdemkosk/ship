@@ -1181,7 +1181,12 @@ func flash_energy() -> float:
 	if _flash_left <= 0.0:
 		return 0.0
 	var age := FLASH_DURATION - _flash_left
-	return clampf(exp(-age * 34.0), 0.0, 1.0)
+	# Preserve the white-hot ignition, but leave enough warm light for the eye to
+	# register the deck/hands changing. The previous exp(-age * 34) was already
+	# almost gone at 100 ms and usually collapsed into a single rendered frame.
+	var ignition := exp(-age * 42.0)
+	var incandescent_tail := exp(-age * 13.0) * smoothstep(0.0, 0.018, age)
+	return clampf(maxf(ignition, incandescent_tail * 0.58), 0.0, 1.0)
 
 
 func pressure_amount() -> float:
@@ -1239,29 +1244,29 @@ func recoil_camera() -> Vector3:
 	if _fire_elapsed < 0.0:
 		return Vector3.ZERO
 	var t := _fire_elapsed
-	if t < 0.075:
-		var snap := 1.0 - pow(1.0 - t / 0.075, 3.0)
-		return Vector3(deg_to_rad(7.1), deg_to_rad(-0.70), deg_to_rad(2.35)) * snap
-	var settle := smoothstep(0.075, 0.58, t)
-	return Vector3(deg_to_rad(7.1), deg_to_rad(-0.70), deg_to_rad(2.35)) \
-			.lerp(Vector3.ZERO, settle)
+	var impulse := Vector3(deg_to_rad(6.2), deg_to_rad(-0.62), deg_to_rad(1.65))
+	# A rifle report is an impulse, not a camera animation winding up. It is at
+	# full acceleration on the first sampled frame, gives a tiny shoulder bounce,
+	# then returns with a slower critically-damped-looking tail.
+	var amount := exp(-t * 5.7)
+	amount += sin(t * 25.0) * exp(-t * 10.5) * 0.10
+	return impulse * maxf(amount, 0.0)
 
 
 func recoil_local_transform() -> Transform3D:
 	if _fire_elapsed < 0.0:
 		return Transform3D.IDENTITY
 	var t := _fire_elapsed
-	var amount := 0.0
-	if t < 0.070:
-		amount = 1.0 - pow(1.0 - t / 0.070, 3.0)
-	else:
-		amount = 1.0 - smoothstep(0.070, 0.48, t)
+	# The stock moves with the same first-frame impulse as the view, but its mass
+	# returns sooner and with less overshoot than the player's head.
+	var amount := maxf(exp(-t * 8.0) \
+			+ sin(t * 29.0) * exp(-t * 13.0) * 0.08, 0.0)
 	# Keep the actual stock seated at the shoulder. Most of the perceived force
 	# belongs to camera kick; a large local translation makes the butt clip
 	# through the eye and hides the whole gun.
-	var basis := Basis(Vector3.RIGHT, deg_to_rad(1.4) * amount) \
-			* Basis(Vector3.BACK, deg_to_rad(-0.45) * amount)
-	return Transform3D(basis, Vector3(0.0, 0.005, 0.012) * amount)
+	var basis := Basis(Vector3.RIGHT, deg_to_rad(2.0) * amount) \
+			* Basis(Vector3.BACK, deg_to_rad(-0.60) * amount)
+	return Transform3D(basis, Vector3(0.0, 0.007, 0.026) * amount)
 
 
 func animation_names() -> PackedStringArray:

@@ -57,7 +57,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _ready() -> void:
 	add_to_group("main_menu")
-	_cam = rig.get("_cam")
+	_resolve_camera()
 	# The menu owns the camera. boat_camera's own process would put it right
 	# back on the boat, so it sleeps until SET SAIL.
 	rig.set_process(false)
@@ -200,6 +200,10 @@ func _choose(id: String) -> void:
 func _process(delta: float) -> void:
 	if _done:
 		return
+	if not is_instance_valid(_cam):
+		_resolve_camera()
+		if not is_instance_valid(_cam):
+			return
 	_t += delta
 	_place_camera(delta)
 	_run_fades(delta)
@@ -208,6 +212,8 @@ func _process(delta: float) -> void:
 func _place_camera(delta: float) -> void:
 	## A slow half-orbit off her weather quarter, held low over the water the
 	## way a swimmer would see her, with a handheld drift that never repeats.
+	if not is_instance_valid(_cam) or not is_instance_valid(boat):
+		return
 	_orbit += delta * 0.030
 	var bp: Vector3 = boat.get_global_transform_interpolated().origin
 	var a := _orbit + 2.4
@@ -225,6 +231,14 @@ func _place_camera(delta: float) -> void:
 	var pitch := asin(clampf(d.y, -1.0, 1.0)) + sin(_t * 0.17 + 1.0) * 0.009
 	_cam.global_basis = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) \
 			* Basis(Vector3.BACK, sin(_t * 0.13) * 0.008)
+
+
+func _resolve_camera() -> void:
+	## The rig normally creates its Camera3D before this menu enters `_ready`, but
+	## scene reloads and editor/harness startup can defer that initialization by a
+	## frame. Never cache or dereference a null camera during that hand-off.
+	if is_instance_valid(rig):
+		_cam = rig.get("_cam") as Camera3D
 
 
 func _run_fades(delta: float) -> void:

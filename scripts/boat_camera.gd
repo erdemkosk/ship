@@ -65,6 +65,9 @@ var _underwater_effect: CameraUnderwaterEffect = CameraUnderwaterEffectScript.ne
 var _warmth_effect: CameraWarmthEffect = CameraWarmthEffectScript.new()
 var _prompt: Label
 var _walker: RefCounted = (load("res://scripts/deck_walker.gd") as GDScript).new()
+var _initial_shore_spawn := Vector3.INF
+var _initial_shore_look := Vector3.ZERO
+var _has_initial_shore_spawn := false
 var _roll := 0.0
 var _ship_pitch := 0.0
 var _panel: Node = null
@@ -251,9 +254,17 @@ func set_mode(m: int) -> void:
 			# start looking where the boat points, standing at the wheel
 			if target != null:
 				var fwd := -target.global_basis.z
+				if _has_initial_shore_spawn:
+					_walker.spawn_ashore(_initial_shore_spawn, target)
+					if _initial_shore_look.is_finite() \
+							and _initial_shore_look.length_squared() > 0.01:
+						fwd = (_initial_shore_look - _initial_shore_spawn).normalized()
+					_has_initial_shore_spawn = false
+					target.set("helm_engaged", false)
+				else:
+					_walker.spawn_at(target.CREW_START)
+					target.set("helm_engaged", true)
 				yaw = atan2(-fwd.x, -fwd.z)
-				_walker.spawn_at(target.CREW_START)
-				target.set("helm_engaged", true)
 				target.set("telegraph_engaged", false)
 			pitch = 0.0
 			_look_yaw = yaw
@@ -283,6 +294,12 @@ func set_mode(m: int) -> void:
 				_prompt.visible = false
 			_stop_blink()
 			pitch = clampf(pitch, -1.15, 0.45)
+
+
+func set_initial_shore_spawn(world_pos: Vector3, look_at: Vector3) -> void:
+	_initial_shore_spawn = world_pos
+	_initial_shore_look = look_at
+	_has_initial_shore_spawn = true
 
 
 func _panel_open() -> bool:
@@ -315,9 +332,15 @@ func _view_pitch_guard_active() -> bool:
 
 func _look_down_limit() -> float:
 	## A helmsman must be able to inspect and work the key below the wheel.
-	## Other planted poses retain the tighter seam-safe authored limit.
+	## Carried tools move with the body/camera and must not lock the player's
+	## neck: a knife is especially needed at feet, ropes and low objects. Fixed
+	## controls and the ladder retain their authored shoulder-safe limits.
 	if target != null and _flag(target, "helm_engaged"):
 		return HELM_LOOK_DOWN_LIMIT
+	var carried_bag := _deck_bag()
+	if carried_bag != null and carried_bag.has_method("active_item_kind") \
+			and str(carried_bag.call("active_item_kind")) != "":
+		return FREE_LOOK_DOWN_LIMIT
 	return HELD_LOOK_DOWN_LIMIT if _view_pitch_guard_active() \
 			else FREE_LOOK_DOWN_LIMIT
 
@@ -352,6 +375,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		var fire_bag := _deck_bag()
 		if fire_bag != null and str(fire_bag.call("active_item_kind")) \
 				== "hunting_rifle" and bool(fire_bag.call("begin_active_rifle_fire")):
+			_trigger_rifle_blink(fire_bag)
 			_resolve_active_rifle_shot(fire_bag)
 			get_viewport().set_input_as_handled()
 			return
@@ -874,6 +898,11 @@ func _process_fps(delta: float) -> void:
 			roll_limit * 0.68, roll_limit) + bag_roll
 	var pitch_goal := _soft_limit_angle(vessel_pitch * pitch_follow,
 			pitch_limit * 0.68, pitch_limit)
+	# Both land and open water are world-space player states. The vessel may be
+	# hundreds of metres away, so none of its heel or pitch belongs in the view.
+	if _flag(_walker, "ashore") or _flag(_walker, "swimming"):
+		roll_goal = bag_roll
+		pitch_goal = 0.0
 	_roll = lerpf(_roll, roll_goal, 1.0 - exp(-6.0 * delta))
 	_ship_pitch = lerpf(_ship_pitch, pitch_goal, 1.0 - exp(-7.0 * delta))
 	var knife_kick := Vector3.ZERO
@@ -891,7 +920,7 @@ func _process_fps(delta: float) -> void:
 	# The shock front briefly opens peripheral vision, then the sight picture
 	# settles back. This is optical concussion, not a zoom animation.
 	_cam.fov = lerpf(70.0, 52.0, smoothstep(0.0, 1.0, rifle_aim)) \
-			+ rifle_pressure * 4.2
+			+ rifle_pressure * 1.35
 	if target.has_method("update_deck_bag_pose"):
 		target.update_deck_bag_pose(delta, _cam, _bag_focus)
 	_refresh_bag_hand()
@@ -1153,6 +1182,19 @@ func _update_blink(delta: float) -> void:
 	_blink_effect.update(delta, mode == Mode.FPS)
 
 
+func _trigger_rifle_blink(bag: Node3D) -> void:
+	var space := &"deck"
+	var openness := 1.0
+	if target != null and _cam != null:
+		if target.has_method("acoustic_space"):
+			space = target.call("acoustic_space", _cam.global_position) as StringName
+		if target.has_method("weather_openness"):
+			openness = float(target.call("weather_openness", _cam.global_position))
+	var aim := float(bag.call("rifle_aim_amount")) \
+			if bag.has_method("rifle_aim_amount") else 0.0
+	_blink_effect.trigger_shot(space, openness, aim)
+
+
 func _stop_blink() -> void:
 	_blink_effect.stop()
 
@@ -1186,7 +1228,7 @@ func _update_underwater() -> void:
 	var under := _underwater_effect.tick(_cam, ocean, weather)
 	if under:
 		_warmth_effect.hide()
-	_mask_effect.tick(get_process_delta_time(), under, target, ocean, weather,
+		_mask_effect.tick(get_process_delta_time(), under, target, ocean, weather,
 			_cam, _walker, mode == Mode.FPS)
 
 

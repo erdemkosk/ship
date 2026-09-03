@@ -13,6 +13,8 @@ var _heave_accel := 0.0
 var _knee_offset := 0.0
 var _knee_velocity := 0.0
 var _station_eye_drop := 0.0
+var _shore_eye_y := 0.0
+var _shore_eye_ready := false
 
 
 func reset() -> void:
@@ -25,11 +27,63 @@ func reset() -> void:
 	_knee_offset = 0.0
 	_knee_velocity = 0.0
 	_station_eye_drop = 0.0
+	_shore_eye_ready = false
 
 
 func update(delta: float, target: Node3D, walker, engaged: String,
 		boat_transform: Transform3D, camera_basis: Basis, arms,
 		bag_focus: float, ocean) -> Dictionary:
+	var ashore := bool(walker.get("ashore"))
+	var swimming := bool(walker.get("swimming"))
+	if swimming and walker.has_method("swim_eye_world"):
+		# The swimmer and the water live in world space. Going through smoothed
+		# boat-local Y here made the eye inherit the distant hull's rope-induced
+		# heave even though the swimmer position itself was already independent.
+		var camera_position: Vector3 = walker.call("swim_eye_world") as Vector3
+		var bag_load_arc := sin(bag_focus * PI)
+		camera_position.y -= bag_focus * 0.012 + bag_load_arc * 0.010
+		_reach_body_lean = Vector3.ZERO
+		_knee_offset = 0.0
+		_knee_velocity = 0.0
+		_boat_vy_ready = false
+		_eye_ready = false
+		_shore_eye_ready = false
+		return {
+			"position": camera_position,
+			"walking": 0.0,
+			"bag_load_arc": bag_load_arc,
+		}
+	if ashore and walker.has_method("shore_eye_world"):
+		# Do not smooth a stationary world-space eye through boat-local Y. That
+		# delayed inverse transform is exactly how wave heave leaked onto land.
+		var horizontal_speed := Vector2(walker.vel.x, walker.vel.z).length()
+		var walking := clampf(horizontal_speed / 3.0, 0.0, 1.0) \
+				* (1.0 if walker.on_floor else 0.0)
+		_bob = fmod(_bob + delta * horizontal_speed * 2.3, TAU)
+		var amplitude := walking * 0.022
+		var camera_position: Vector3 = walker.call("shore_eye_world") as Vector3
+		if not _shore_eye_ready:
+			_shore_eye_y = camera_position.y
+			_shore_eye_ready = true
+		else:
+			_shore_eye_y = lerpf(_shore_eye_y, camera_position.y,
+					1.0 - exp(-10.0 * delta))
+		camera_position.y = _shore_eye_y
+		camera_position.y += sin(_bob * 2.0) * amplitude
+		camera_position += camera_basis.x * (sin(_bob) * amplitude * 0.9)
+		var bag_load_arc := sin(bag_focus * PI)
+		camera_position.y -= bag_focus * 0.012 + bag_load_arc * 0.010
+		_reach_body_lean = Vector3.ZERO
+		_knee_offset = 0.0
+		_knee_velocity = 0.0
+		_boat_vy_ready = false
+		_eye_ready = false
+		return {
+			"position": camera_position,
+			"walking": walking,
+			"bag_load_arc": bag_load_arc,
+		}
+	_shore_eye_ready = false
 	var eye_local: Vector3 = walker.call("eye_local")
 	if engaged == "chart":
 		chart_t = minf(chart_t + delta / 0.45, 1.0)
@@ -69,13 +123,12 @@ func update(delta: float, target: Node3D, walker, engaged: String,
 			else 0.24
 	_reach_body_lean = _reach_body_lean.lerp(body_goal,
 			1.0 - exp(-delta / body_tau))
-	var swimming := bool(walker.get("swimming"))
 	var on_ladder := bool(walker.get("on_sea_ladder"))
 	if engaged == "chart" or swimming or on_ladder:
 		_reach_body_lean = _reach_body_lean.lerp(Vector3.ZERO,
 				1.0 - exp(-delta / 0.08))
 	eye_local += _reach_body_lean
-	_update_knee_suspension(delta, target, walker, swimming, on_ladder)
+	_update_knee_suspension(delta, target, walker, swimming, on_ladder, ashore)
 	eye_local += boat_transform.basis.inverse() * (Vector3.UP * _knee_offset)
 
 	var camera_position: Vector3 = boat_transform * eye_local
@@ -90,8 +143,9 @@ func update(delta: float, target: Node3D, walker, engaged: String,
 
 
 func _update_knee_suspension(delta: float, boat: Node3D, walker,
-		swimming: bool, on_ladder: bool) -> void:
-	var active := bool(walker.get("on_floor")) and not swimming and not on_ladder
+		swimming: bool, on_ladder: bool, ashore: bool) -> void:
+	var active := bool(walker.get("on_floor")) and not swimming \
+			and not on_ladder and not ashore
 	var current_vy := 0.0
 	if boat is RigidBody3D:
 		current_vy = (boat as RigidBody3D).linear_velocity.y
