@@ -266,7 +266,7 @@ func _build_panel() -> void:
 	vbox.add_child(_subject)
 
 	_target_opt = OptionButton.new()
-	_target_opt.item_selected.connect(func(i: int) -> void: _select_target(i))
+	_target_opt.item_selected.connect(func(i: int) -> void: _select_target(i, true))
 	vbox.add_child(_target_opt)
 	# --- state ---------------------------------------------------------------
 	# Which moment of the tool's life the hand is shown in. Chosen here and
@@ -580,7 +580,9 @@ func _refresh_targets(force: bool) -> void:
 		if _targets[i]["key"] == keep:
 			idx = i
 	_target_opt.select(idx)
-	_select_target(idx)
+	# Not a user pick: the list only changed under us (a hand joined the
+	# rifle, a tool was put away). Whatever state is up must survive it.
+	_select_target(idx, false)
 
 
 func _target() -> Dictionary:
@@ -606,7 +608,7 @@ func _set_dock(side: String) -> void:
 		_panel.offset_right = 372.0
 
 
-func _select_target(i: int) -> void:
+func _select_target(i: int, user := true) -> void:
 	_cur = i
 	var t := _target()
 	if t.is_empty():
@@ -620,8 +622,13 @@ func _select_target(i: int) -> void:
 	_build_states(t)
 	# Put the hand ON the thing that was picked. Otherwise the fore-end and
 	# the bolt are edited with no hand near them, and every slider looks dead.
+	#
+	# Only on a real pick, and only when the hand is not already there: the
+	# trigger hand is on its grip in carry AND in the sights, so asking for
+	# 'carry' every time the list refreshed was dragging the player straight
+	# back out of a state they had just chosen.
 	var needs := str(t.get("needs", ""))
-	if needs != "" and needs != _state:
+	if user and needs != "" and needs != _state and _hand_distance(t) > 0.075:
 		for si in _state_opt.item_count:
 			if str(_state_opt.get_item_metadata(si)) == needs:
 				_state_opt.select(si)

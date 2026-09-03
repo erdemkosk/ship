@@ -1969,6 +1969,25 @@ func _hand_editor_effect(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await _shot(dir, "effB_bolt")
 	pick.call("trigger hand")
 	await get_tree().create_timer(1.4).timeout
+	# The state the player chose must survive: pick Sights while the trigger
+	# hand is selected, and it must still be Sights seconds later.
+	var st_opt: OptionButton = ed.get("_state_opt")
+	for i in st_opt.item_count:
+		if str(st_opt.get_item_metadata(i)) == "sights":
+			st_opt.select(i)
+			ed.call("_set_state", "sights")
+	await get_tree().create_timer(2.4).timeout
+	print("[effect] sights held with trigger hand selected: state '%s' aim %.2f target '%s'" % [
+			ed.get("_state"), float(bag.call("rifle_aim_amount")),
+			(ed.get("_targets")[ed.get("_cur")] as Dictionary)["key"]])
+	await _shot(dir, "effC_sights_kept")
+	for i in st_opt.item_count:
+		if str(st_opt.get_item_metadata(i)) == "carry":
+			st_opt.select(i)
+			ed.call("_set_state", "carry")
+	await get_tree().create_timer(1.6).timeout
+	print("[effect] back to carry: state '%s' aim %.2f" % [
+			ed.get("_state"), float(bag.call("rifle_aim_amount"))])
 	var pos_s: Array = ed.get("_pos_s")
 	var rot_s: Array = ed.get("_rot_s")
 	var fs: Dictionary = ed.get("_finger_s")
