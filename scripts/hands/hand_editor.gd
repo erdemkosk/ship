@@ -510,6 +510,11 @@ func _collect_targets() -> Array:
 	for side: String in ["L", "R"]:
 		var id := str(claim.get(side, ""))
 		if id == "":
+			# A hand on nothing is still a hand: its idle hang and its rest
+			# pose are tuned here too.
+			if bool(_arms.call("is_resting", side)):
+				out.append({"key": "rest_" + side, "label": "%s hand · free (idle)" % side,
+						"kind": "hand", "id": "rest_" + side, "side": side, "node": null})
 			continue
 		var spec: Dictionary = GRIP_MAP.spec_for(id)
 		if spec.is_empty() or bool(spec.get("on_rim", false)):
@@ -568,7 +573,7 @@ func _select_target(i: int) -> void:
 	_sync_pose(t)
 	_gizmo.visible = _gizmo_chk.button_pressed
 	_build_states(t)
-	_pose_opt.disabled = t["kind"] != "grip"
+	_pose_opt.disabled = t["kind"] == "marker"
 
 
 # --- frame (position + rotation) ------------------------------------------
@@ -578,6 +583,19 @@ func _frame_of(t: Dictionary) -> Transform3D:
 	## +Y palm — the GripMap contract, which the rifle's markers also follow.
 	if t["kind"] == "marker":
 		return (t["node"] as Node3D).transform
+	if t["kind"] == "hand":
+		# Camera-local: the offset added to the idle home, and the hang axes.
+		var tune: Dictionary = HAND_TUNING.grip(t["id"])
+		var base := _authored_frame(t)
+		var xf := base
+		if tune.has("pos"):
+			xf.origin = HAND_TUNING.from_json(tune["pos"])
+		if tune.has("fingers") and tune.has("palm"):
+			var f: Vector3 = (HAND_TUNING.from_json(tune["fingers"]) as Vector3).normalized()
+			var pv: Vector3 = HAND_TUNING.from_json(tune["palm"])
+			pv = (pv - pv.project(f)).normalized()
+			xf.basis = Basis(pv.cross(f).normalized(), pv, f)
+		return xf
 	var spec: Dictionary = GRIP_MAP.spec_for(t["id"])
 	var sided: Dictionary = GRIP_MAP.sided(spec, t["side"])
 	var f: Vector3 = (sided.get("fingers", Vector3.FORWARD) as Vector3).normalized()
@@ -650,6 +668,12 @@ func _authored_frame(t: Dictionary) -> Transform3D:
 		if n.has_meta("authored_transform"):
 			return n.get_meta("authored_transform")
 		return n.transform
+	if t["kind"] == "hand":
+		var out := 1.0 if t["side"] == "R" else -1.0
+		var f0 := Vector3(out * 0.08, -0.86, -0.46).normalized()
+		var p0 := Vector3(-out * 0.95, -0.12, 0.16)
+		p0 = (p0 - p0.project(f0)).normalized()
+		return Transform3D(Basis(p0.cross(f0).normalized(), p0, f0), Vector3.ZERO)
 	var spec: Dictionary = GRIP_MAP._catalog_spec(t["id"])
 	var sided: Dictionary = GRIP_MAP.sided(spec, t["side"])
 	var f: Vector3 = (sided.get("fingers", Vector3.FORWARD) as Vector3).normalized()
@@ -684,7 +708,8 @@ func _apply_frame() -> void:
 		fields["fingers"] = HAND_TUNING.to_json(xf.basis.z.normalized())
 		fields["palm"] = HAND_TUNING.to_json(xf.basis.y.normalized())
 		HAND_TUNING.set_grip(t["id"], fields)
-		_arms.call("refresh_grip", t["id"])
+		if t["kind"] == "grip":
+			_arms.call("refresh_grip", t["id"])
 	_say("%s frame edited" % t["label"])
 
 
@@ -706,7 +731,8 @@ func _reset_frame() -> void:
 		for k in ["pos", "fingers", "palm"]:
 			fields.erase(k)
 		HAND_TUNING.set_grip(t["id"], fields)
-		_arms.call("refresh_grip", t["id"])
+		if t["kind"] == "grip":
+			_arms.call("refresh_grip", t["id"])
 	_sync_from_target()
 	_say("%s frame back to code default" % t["label"])
 
@@ -716,6 +742,9 @@ func _reset_frame() -> void:
 func _live_pose_name(t: Dictionary) -> String:
 	if t["kind"] == "grip":
 		return str(GRIP_MAP.spec_for(t["id"]).get("pose", "wrap"))
+	if t["kind"] == "hand":
+		var tune: Dictionary = HAND_TUNING.grip(t["id"])
+		return str(tune.get("pose", "open"))
 	return str(_hrig.call("pose_name", t["side"]))
 
 
@@ -734,7 +763,7 @@ func _sync_pose(t: Dictionary) -> void:
 		_pose_opt.add_item(str(names[i]))
 		if names[i] == name:
 			_pose_opt.select(i)
-	_pose_lbl.text = "pose" if t["kind"] == "grip" else "pose (chosen by code)"
+	_pose_lbl.text = "pose (chosen by code)" if t["kind"] == "marker" else "pose"
 	# Which other grips would this edit reach? A pose is shared by name.
 	var users := _pose_users(name)
 	var idle: bool = t["kind"] == "marker" and (name == "open" or name == "flat")
@@ -745,7 +774,7 @@ func _sync_pose(t: Dictionary) -> void:
 	_splay_s.editable = not idle
 	if idle:
 		_amt_lbl.text = "%s hand is not on this grip right now (pose '%s'). " % [
-				t["side"], name] + "Pick the state that puts it there (e.g. Sights)."
+				t["side"], name] + "Pick the state that puts it there (Sights), or the '%s hand · free' target." % t["side"]
 	elif users.size() > 1:
 		_amt_lbl.text = "pose '%s' is shared by: %s — edits reach all of them (Copy as… for a private one)" % [
 				name, ", ".join(users)]
@@ -806,14 +835,17 @@ func _apply_pose() -> void:
 
 func _choose_pose(i: int) -> void:
 	var t := _target()
-	if t.is_empty() or t["kind"] != "grip":
+	if t.is_empty() or t["kind"] == "marker":
 		return
 	var name := _pose_opt.get_item_text(i)
 	_push_undo()
 	var fields: Dictionary = HAND_TUNING.grip(t["id"]).duplicate()
 	fields["pose"] = name
+	if t["kind"] == "hand":
+		fields["amount"] = 1.0
 	HAND_TUNING.set_grip(t["id"], fields)
-	_arms.call("refresh_grip", t["id"])
+	if t["kind"] == "grip":
+		_arms.call("refresh_grip", t["id"])
 	_sync_pose(t)
 	_say("%s now uses pose '%s'" % [t["id"], name])
 
@@ -828,11 +860,14 @@ func _copy_pose() -> void:
 	var fields := _pose_fields()
 	_hrig.call("set_pose_override", name, fields)
 	HAND_TUNING.set_pose(name, fields)
-	if t["kind"] == "grip":
+	if t["kind"] != "marker":
 		var g: Dictionary = HAND_TUNING.grip(t["id"]).duplicate()
 		g["pose"] = name
+		if t["kind"] == "hand":
+			g["amount"] = 1.0
 		HAND_TUNING.set_grip(t["id"], g)
-		_arms.call("refresh_grip", t["id"])
+		if t["kind"] == "grip":
+			_arms.call("refresh_grip", t["id"])
 		_say("pose '%s' created and assigned to %s" % [name, t["id"]])
 	else:
 		_say("pose '%s' created (assign it in a sequence stop)" % name)
@@ -984,6 +1019,8 @@ func _target_global() -> Transform3D:
 		return Transform3D.IDENTITY
 	if t["kind"] == "marker":
 		return (t["node"] as Node3D).global_transform
+	if t["kind"] == "hand":
+		return _cam.global_transform * (_arms.call("rest_frame", t["side"]) as Transform3D)
 	var g: Node3D = _arms.call("grip_node_of", t["id"], t["side"]) as Node3D
 	if g != null:
 		return g.global_transform

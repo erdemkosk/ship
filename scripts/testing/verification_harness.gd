@@ -147,6 +147,8 @@ func run(args: PackedStringArray) -> void:
 			_hand_editor_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--hand-editor-test":
 			_hand_editor_test(rig, boat)
+		elif arg.begins_with("--hand-editor-free="):
+			_hand_editor_free(rig, arg.get_slice("=", 1))
 		elif arg.begins_with("--hand-editor-arms="):
 			_hand_editor_arms(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--hand-editor-grip-shot="):
@@ -1899,6 +1901,66 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.6).timeout
 	print("[hand-editor] after close: aim=%.2f" % float(bag.call("rifle_aim_amount")))
 	await _shot(dir, "editor4_closed")
+	_quit_cleanly()
+
+
+func _hand_editor_free(rig: Node3D, dir: String) -> void:
+	## Nothing in the hands: both idle hands must be selectable, the left
+	## one's hang movable and its pose editable.
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var panel_view: CanvasItem = panel.get("_panel") as CanvasItem
+		if panel_view != null:
+			panel_view.visible = false
+	rig.set("pitch", -0.55)
+	await get_tree().create_timer(1.0).timeout
+	# Spawn has the left hand on the wheel and the right on the telegraph;
+	# let go of both so there is an idle hand to edit.
+	var b: Node = rig.get("target")
+	b.set("helm_engaged", false)
+	b.set("telegraph_engaged", false)
+	await get_tree().create_timer(1.5).timeout
+	var ed: Node = get_tree().get_first_node_in_group("hand_editor")
+	ed.call("set_open", true)
+	await get_tree().create_timer(0.5).timeout
+	var keys: Array = ed.get("_targets").map(func(t): return t["key"])
+	print("[free] targets: ", keys)
+	var opt: OptionButton = ed.get("_target_opt")
+	for i in opt.item_count:
+		if opt.get_item_text(i).begins_with("L hand"):
+			opt.select(i)
+			ed.call("_select_target", i)
+	await get_tree().create_timer(0.3).timeout
+	var arms: Node = rig.get("_arms")
+	var hrig: Node = arms.get("rig")
+	var before: Vector3 = (arms.call("rest_frame", "L") as Transform3D).origin
+	var palm_before: Vector3 = hrig.call("palm_global", "L")
+	await _shot(dir, "free0_L_selected")
+	var pos_s: Array = ed.get("_pos_s")
+	ed.call("_push_undo")
+	(pos_s[1] as HSlider).value += 0.08
+	await get_tree().create_timer(0.8).timeout
+	var after: Vector3 = (arms.call("rest_frame", "L") as Transform3D).origin
+	var palm_after: Vector3 = hrig.call("palm_global", "L")
+	print("[free] L home moved %.3f (want 0.08), palm moved %.3f" % [
+			before.distance_to(after), palm_before.distance_to(palm_after)])
+	var fs: Dictionary = ed.get("_finger_s")
+	((fs["index"] as Array)[0] as HSlider).value = 1.2
+	await get_tree().create_timer(0.5).timeout
+	print("[free] L pose now '%s' amount %.2f; open.index=%s" % [hrig.call("pose_name", "L"),
+			hrig.call("pose_amount", "L"), (hrig.call("poses") as Dictionary)["open"].get("index", "-")])
+	await _shot(dir, "free1_L_raised_curled")
+	var pose_opt: OptionButton = ed.get("_pose_opt")
+	for i in pose_opt.item_count:
+		if pose_opt.get_item_text(i) == "fist":
+			pose_opt.select(i)
+			ed.call("_choose_pose", i)
+	await get_tree().create_timer(0.6).timeout
+	print("[free] after pick: L pose '%s' amount %.2f (want fist 1.00)" % [
+			hrig.call("pose_name", "L"), hrig.call("pose_amount", "L")])
+	await _shot(dir, "free2_L_fist")
+	ed.call("set_open", false)
 	_quit_cleanly()
 
 

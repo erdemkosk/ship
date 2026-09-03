@@ -26,6 +26,7 @@ const FACE_DRIVER := preload("res://scripts/hands/face_hand_driver.gd")
 const SWIM_DRIVER := preload("res://scripts/hands/swim_hand_driver.gd")
 const INTERACTION_BEHAVIOR := preload("res://scripts/hands/interaction_behavior.gd")
 const HELD_OBJECT_FRAMER := preload("res://scripts/hands/held_object_framer.gd")
+const HAND_TUNING := preload("res://scripts/hands/hand_tuning.gd")
 
 ## Fired at the exact contact phase of a hand-authored interaction.  The camera
 ## owns gameplay intent; the hand owns when flesh actually reaches the control.
@@ -62,6 +63,7 @@ var _gesture: Dictionary = {"L": null, "R": null}
 ## third of a second. Without this the hand simply held its last pose in the
 ## middle of the view, which reads as an arm stuck to the door it just opened.
 var _rest_t := {"L": 1.0, "R": 1.0}
+var _rest_frame_local := {}
 var _last_grip := {"L": Vector3.ZERO, "R": Vector3.ZERO}
 ## Semantic K/P/F continuity at release. Position-only withdrawal made a hand
 ## leave the rifle smoothly while its wrist snapped straight to the idle basis.
@@ -1423,10 +1425,17 @@ func _rest_hand(side: String) -> void:
 			+ (0.0 if side == "R" else 1.7)) * 0.010
 	# Visible in the lower third, a real step, but the wrist does not roll —
 	# that is what walked the watch off the left arm.
-	var home: Vector3 = c * Vector3(
+	# The editor's say over the idle hand: an offset to the home point and,
+	# optionally, its own finger/palm axes and pose (data/hand_tuning.json,
+	# grips "rest_L" / "rest_R" — camera-local, like everything else here).
+	var tune: Dictionary = HAND_TUNING.grip("rest_" + side)
+	var home_local := Vector3(
 			out * (0.168 + (1.0 - absf(s)) * 0.030 * w),
 			-0.30 + s * 0.085 * w + idle,
 			-0.28 - s * 0.12 * w)
+	if tune.has("pos"):
+		home_local += HAND_TUNING.from_json(tune["pos"]) as Vector3
+	var home: Vector3 = c * home_local
 	var u: float = clampf(_rest_t[side] / 0.34, 0.0, 1.0)
 	u = u * u * (3.0 - 2.0 * u)
 	var from: Vector3 = _last_grip[side] if u < 1.0 else home
@@ -1435,8 +1444,16 @@ func _rest_hand(side: String) -> void:
 	# down/forward and each palm stays side-on to the camera. Inferring this frame
 	# again from shoulder -> hand made both wrists roll through the step and
 	# periodically presented the broad open palm to the player.
-	var fingers: Vector3 = c.basis * Vector3(out * 0.08, -0.86, -0.46)
-	var palm: Vector3 = c.basis * Vector3(-out * 0.95, -0.12, 0.16)
+	var fingers_local := Vector3(out * 0.08, -0.86, -0.46)
+	var palm_local := Vector3(-out * 0.95, -0.12, 0.16)
+	if tune.has("fingers") and tune.has("palm"):
+		fingers_local = (HAND_TUNING.from_json(tune["fingers"]) as Vector3).normalized()
+		palm_local = HAND_TUNING.from_json(tune["palm"]) as Vector3
+		palm_local = (palm_local - palm_local.project(fingers_local)).normalized()
+	_rest_frame_local[side] = Transform3D(Basis(palm_local.cross(fingers_local).normalized(),
+			palm_local, fingers_local), home_local)
+	var fingers: Vector3 = c.basis * fingers_local
+	var palm: Vector3 = c.basis * palm_local
 	var previous: Dictionary = _last_axes.get(side, {}) as Dictionary
 	if u < 1.0 and previous.has("fingers") and previous.has("palm"):
 		# Rotation-minimising transport: follow the changing forearm direction but
@@ -1462,7 +1479,25 @@ func _rest_hand(side: String) -> void:
 		release_pose = "open"
 	if u >= 1.0:
 		_last_pose[side] = "open"
+		if tune.has("pose") and rig.has_pose(str(tune["pose"])):
+			release_pose = str(tune["pose"])
+			release_amount = float(tune.get("amount", 1.0))
+			_last_pose[side] = release_pose
 	rig.grip(side, contact, fingers, palm, 1.0, release_pose, release_amount)
+
+
+func rest_frame(side: String) -> Transform3D:
+	## Editor hook: where the idle hand is being asked to sit, camera-local
+	## (origin = palm, +Z fingers, +Y palm), as of the last rest frame.
+	return _rest_frame_local.get(side, Transform3D.IDENTITY)
+
+
+func is_resting(side: String) -> bool:
+	## Editor hook: this hand is on nothing — no fitting, no bag tool, not
+	## bracing the rifle — so its idle hang is what there is to edit.
+	return str(_claim.get(side, "")) == "" \
+			and not (_bag_hand_mode != "" and side == "R") \
+			and not (_rifle_support_target != null and side == "L")
 
 
 func _device_of(id: String) -> Node3D:
