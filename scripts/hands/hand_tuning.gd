@@ -59,6 +59,8 @@ static func reload() -> void:
 		_merge_file(RES_PATH)
 		if _exported():
 			_merge_file(USER_PATH)
+	if OS.is_stdout_verbose() or _report_on_load:
+		print(report())
 	_loaded = true
 	_dirty = false
 	version += 1
@@ -124,6 +126,34 @@ static func restore(snap: Dictionary) -> void:
 	_loaded = true
 	_dirty = true
 	version += 1
+
+
+## One line naming the file in force and what came out of it. Printed on
+## every load with --verbose, and by the --tuning-report probe, so "is my
+## tuning actually in this build?" is answerable on any machine.
+static func report() -> String:
+	var d := data()
+	var where := path_override if path_override != "" else RES_PATH
+	var lines: Array = ["[hand tuning] reading %s (exists: %s)%s" % [where,
+			FileAccess.file_exists(where),
+			", exported build also reads %s" % USER_PATH if _exported() else ""]]
+	for s in SECTIONS:
+		var sec: Dictionary = d.get(s, {})
+		if not sec.is_empty():
+			lines.append("  %s: %d — %s" % [s, sec.size(),
+					", ".join(PackedStringArray(sec.keys()))])
+	if lines.size() == 1:
+		lines.append("  nothing tuned; the code's own numbers are in force")
+	if not _exported() and FileAccess.file_exists(USER_PATH) and path_override == "":
+		lines.append("  note: %s exists and is IGNORED from source (it is for exported builds only)" % USER_PATH)
+	return "\n".join(PackedStringArray(lines))
+
+
+static var _report_on_load := false
+
+
+static func set_report_on_load(on: bool) -> void:
+	_report_on_load = on
 
 
 static func is_dirty() -> bool:

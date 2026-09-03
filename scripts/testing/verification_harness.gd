@@ -147,6 +147,8 @@ func run(args: PackedStringArray) -> void:
 			_hand_editor_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--hand-editor-test":
 			_hand_editor_test(rig, boat)
+		elif arg == "--tuning-report":
+			_tuning_report(rig, boat)
 		elif arg.begins_with("--reload-pocket="):
 			_reload_pocket(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--hand-editor-effect="):
@@ -1905,6 +1907,57 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.6).timeout
 	print("[hand-editor] after close: aim=%.2f" % float(bag.call("rifle_aim_amount")))
 	await _shot(dir, "editor4_closed")
+	_quit_cleanly()
+
+
+func _tuning_report(rig: Node3D, boat: RigidBody3D) -> void:
+	## "Is the tuning in this build, and is it actually being used?" — the
+	## file in force, what is in it, and the live objects measured against it.
+	var tuning := load("res://scripts/hands/hand_tuning.gd")
+	print(tuning.report())
+	await get_tree().create_timer(1.2).timeout
+	# Take a rifle out and compare its markers with the file.
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var pv: CanvasItem = panel.get("_panel") as CanvasItem
+		if pv != null:
+			pv.visible = false
+	rig.set("_bag_selected", 4)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	print("  (bag activated: %s)" % rig.call("_activate_bag_selection"))
+	await get_tree().create_timer(1.6).timeout
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var rifle: Node = bag.get("_active_item")
+	print("  (rifle in hand: %s, kind '%s')" % [rifle != null,
+			bag.call("active_item_kind")])
+	var all_match := true
+	if rifle != null and str(bag.call("active_item_kind")) == "hunting_rifle":
+		for m: String in ["PrimaryGrip", "SupportGrip", "BoltHandle", "Chamber"]:
+			var n := (rifle as Node).get_node_or_null(m) as Node3D
+			if n == null:
+				continue
+			var saved: Dictionary = tuning.marker("rifle/" + m)
+			if saved.is_empty():
+				print("  rifle/%-13s live %s   (nothing saved — code default)" % [m, n.position])
+				continue
+			var want: Vector3 = tuning.from_json(saved["pos"])
+			var ok: bool = n.position.distance_to(want) < 0.0006
+			all_match = all_match and ok
+			print("  rifle/%-13s live %s  file %s  applied: %s" % [m, n.position, want, ok])
+	var poses: Dictionary = tuning.data()["poses"]
+	var hrig: Node = (rig.get("_arms") as Node).get("rig")
+	for name in poses:
+		var live: Dictionary = (hrig.call("poses") as Dictionary).get(str(name), {})
+		var saved_p: Dictionary = poses[name]
+		var same := true
+		for k in saved_p:
+			if str(live.get(k, "")) != str(saved_p[k]):
+				same = false
+		all_match = all_match and same
+		print("  pose %-14s applied: %s" % [name, same])
+	print("[hand tuning] everything in the file is in force: %s" % all_match)
 	_quit_cleanly()
 
 
