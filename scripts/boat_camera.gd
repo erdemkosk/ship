@@ -140,6 +140,11 @@ func _ready() -> void:
 	_cam.top_level = true  # free of rig transform; we place it explicitly
 	_cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	_camera_attrs = CameraAttributesPractical.new()
+	# ADS rear notch is 0.475 m from the eye. Blur only in front of that
+	# plane so the notch and front post stay readable along the sight line.
+	_camera_attrs.dof_blur_near_enabled = false
+	_camera_attrs.dof_blur_near_distance = 0.45
+	_camera_attrs.dof_blur_near_transition = 0.24
 	_camera_attrs.dof_blur_far_enabled = false
 	_camera_attrs.dof_blur_far_distance = 0.82
 	_camera_attrs.dof_blur_far_transition = 0.48
@@ -585,6 +590,7 @@ func _reset_deck_bag() -> void:
 	if target != null and _cam != null and target.has_method("update_deck_bag_pose"):
 		target.update_deck_bag_pose(0.0, _cam, 0.0)
 	if _camera_attrs != null:
+		_camera_attrs.dof_blur_near_enabled = false
 		_camera_attrs.dof_blur_far_enabled = false
 		_camera_attrs.dof_blur_amount = 0.0
 
@@ -604,11 +610,15 @@ func _update_deck_bag(delta: float) -> void:
 		var aim_bag := _deck_bag()
 		if aim_bag != null and aim_bag.has_method("rifle_aim_amount"):
 			aim_blur = float(aim_bag.call("rifle_aim_amount"))
-		var blur := maxf(smoothstep(0.18, 0.86, _bag_focus), aim_blur * 0.62)
-		_camera_attrs.dof_blur_far_enabled = blur > 0.01
-		_camera_attrs.dof_blur_far_distance = lerpf(2.4, 0.82, blur)
-		_camera_attrs.dof_blur_far_transition = lerpf(1.6, 0.42, blur)
-		_camera_attrs.dof_blur_amount = 0.18 * blur
+		var bag_blur := smoothstep(0.18, 0.86, _bag_focus)
+		var sight_blur := smoothstep(0.15, 1.0, aim_blur) * (1.0 - bag_blur)
+		_camera_attrs.dof_blur_near_enabled = sight_blur > 0.01
+		# Looking into the bag still focuses nearby; aiming no longer blurs
+		# the distant target. The receiver and hands soften toward the eye.
+		_camera_attrs.dof_blur_far_enabled = bag_blur > 0.01
+		_camera_attrs.dof_blur_far_distance = lerpf(2.4, 0.82, bag_blur)
+		_camera_attrs.dof_blur_far_transition = lerpf(1.6, 0.42, bag_blur)
+		_camera_attrs.dof_blur_amount = maxf(0.18 * bag_blur, 0.22 * sight_blur)
 	var bag := _deck_bag()
 	if bag != null:
 		if _bag_take_pending and bool(bag.call("take_extraction_complete")):
