@@ -2552,17 +2552,41 @@ func _hand_editor_test(rig: Node3D, boat: RigidBody3D) -> void:
 			and stops.pose_at(1.31) == "power" and stops.pose_at(0.5) == "bolt_grip"
 	print("[hand-editor-test] stops: ", s_ok, " ", t)
 	ok = ok and s_ok
-	# 4. round trip through the file.
+	# 4. The rifle's bag-placement hold is its own layer. Moving it must not
+	# alter carry (or any of the existing hand states).
+	var deck_bag_script := load("res://scripts/deck_bag.gd")
+	var carry_default: Transform3D = deck_bag_script.rifle_hold_default("carry")
+	var sling_default: Transform3D = deck_bag_script.rifle_hold_default("sling")
+	var sling_pos := Vector3(0.031, -0.301, 0.241)
+	tuning.set_marker("rifle/Hold@sling", {"pos": tuning.to_json(sling_pos)})
+	tuning.set_pose("rifle_primary_grip_sling_test", {"index": [0.1, 1.2, 0.4]})
+	tuning.set_marker("rifle/PrimaryGrip@sling",
+			{"pose": "rifle_primary_grip_sling_test"})
+	var sling_edited: Transform3D = tuning.hold_frame("rifle/Hold", "sling",
+			sling_default)
+	var carry_untouched: Transform3D = tuning.hold_frame("rifle/Hold", "carry",
+			carry_default)
+	var sling_ok: bool = sling_edited.origin.is_equal_approx(sling_pos) \
+			and carry_untouched.is_equal_approx(carry_default) \
+			and tuning.marker_pose("rifle/PrimaryGrip", "rifle_primary", "sling") \
+					== "rifle_primary_grip_sling_test" \
+			and tuning.marker_pose("rifle/PrimaryGrip", "rifle_primary", "carry") \
+					== "rifle_primary"
+	print("[hand-editor-test] isolated sling hold: ", sling_ok)
+	ok = ok and sling_ok
+	# 5. round trip through the file.
 	var saved: bool = tuning.save()
 	tuning.reload()
 	var back: Dictionary = HandGripMap.spec_for("telegraph")
 	var t2: Dictionary = stops.times()
 	var r_ok: bool = saved and str(back.get("pose", "")) == "hook" \
 			and absf(float(t2["bolt_open_end"]) - 1.30) < 1e-4 \
-			and (tuning.pose("power")["index"] as Array)[2] == 0.3
+			and (tuning.pose("power")["index"] as Array)[2] == 0.3 \
+			and tuning.hold_frame("rifle/Hold", "sling", sling_default).origin \
+					.is_equal_approx(sling_pos)
 	print("[hand-editor-test] round trip: ", r_ok)
 	ok = ok and r_ok
-	# 5. rifle seek/pause contract on the real weapon. The bag does not open
+	# 6. rifle seek/pause contract on the real weapon. The bag does not open
 	# without a display (its focus animation never runs headless), so this part
 	# only counts when there is a window; --hand-editor-shot covers it there.
 	if DisplayServer.get_name() == "headless":

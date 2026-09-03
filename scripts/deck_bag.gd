@@ -11,12 +11,16 @@ const DeckBagLayoutScript := preload("res://scripts/deck_bag_layout.gd")
 const DeckBagRifleObstructionScript := preload("res://scripts/deck_bag_rifle_obstruction.gd")
 const DeckBagRifleReloadControllerScript := preload("res://scripts/deck_bag_rifle_reload_controller.gd")
 const HandTuning := preload("res://scripts/hands/hand_tuning.gd")
-## Where the rifle itself is held, camera-local, per situation. The editor
-## tunes these as "rifle/Hold@<situation>"; aiming is not here because that
-## hold is derived from the sight line, not from a fixed transform.
+## Where the rifle itself is held, per situation. Carry/reload are camera-local;
+## sling is bag-local. The editor tunes these as "rifle/Hold@<situation>";
+## aiming is not here because that hold is derived from the sight line, not
+## from a fixed transform.
 const RIFLE_HOLD_DEFAULTS := {
 	"carry": [Vector3(0.255, -0.195, -0.365), Vector3(38.0, -8.0, -7.0)],
 	"reload": [Vector3(0.020, -0.120, -0.520), Vector3(13.0, -7.0, -28.0)],
+	# The preview is raised slightly proud of the final seated slot so the hand
+	# can still support the rifle before E releases it into the webbing.
+	"sling": [Vector3(0.0, -0.312, 0.220), Vector3(0.0, -90.0, 0.0)],
 }
 
 
@@ -51,6 +55,9 @@ var _slot_items: Array = []
 var _active_item: Node3D
 var _active_label := ""
 var _preview_slot := -1
+## Hand-editor-only preview latch. It lets the isolated "sling" hold be tuned
+## without changing the real selected slot or the inventory placement rules.
+var _editor_rifle_sling_preview := false
 var _knife_hand_target: Node3D
 var _knife_draw := 1.0
 const KNIFE_RELEASE_DURATION := 0.34
@@ -618,6 +625,12 @@ func set_preview_slot(index: int) -> void:
 			and not slot_occupied(index) and can_place_active(index) else -1
 
 
+func set_editor_rifle_sling_preview(on: bool) -> void:
+	## The editor owns only the visual staging pose. Actual insertion still goes
+	## through can_place_active/place_active_in_slot and the authored slot frame.
+	_editor_rifle_sling_preview = on and active_item_kind() == KIND_RIFLE
+
+
 func place_active_in_slot(index: int) -> bool:
 	if not can_place_active(index):
 		return false
@@ -658,6 +671,7 @@ func _clear_active_item_state() -> void:
 	_active_item = null
 	_active_label = ""
 	_preview_slot = -1
+	_editor_rifle_sling_preview = false
 	_rifle_aim = 0.0
 	_rifle_aim_goal = false
 	_rifle_ads_settle = 0.0
@@ -815,7 +829,8 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 		_update_active_knife(delta, camera, bag_amount, target, grasping)
 	elif kind == KIND_RIFLE:
 		var rifle: Node3D = _active_item
-		var previewing_rifle := _preview_slot == RIFLE_SLOT and bag_amount > 0.62
+		var previewing_rifle := (_preview_slot == RIFLE_SLOT \
+				or _editor_rifle_sling_preview) and bag_amount > 0.62
 		rifle.call("tick", delta)
 		var reloading := bool(rifle.call("is_reloading"))
 		# Carrying it, aiming it, working the action and putting it away are
@@ -855,9 +870,9 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 			# Raise the actual sling transform as one rigid assembly. Solving the rifle
 			# backwards from a camera-right palm pushed nearly the entire long gun out
 			# of frame after the padded compartment made the composition wider.
-			var raised_slot := _slot_transform(RIFLE_SLOT)
+			var raised_slot := HandTuning.hold_frame("rifle/Hold", situation,
+					rifle_hold_default("sling"))
 			target = global_transform * raised_slot
-			target.origin += global_basis.z * 0.075 + global_basis.y * 0.018
 		else:
 			_rifle_reload_blend = 0.0
 			# One-hand patrol carry: butt low at the right hip, muzzle safely above
@@ -894,7 +909,7 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 				or (previewing_rifle and bag_amount >= 0.90) \
 				or (_rifle_aim > 0.82 and _preview_slot < 0) \
 				else _active_item.global_transform.interpolate_with(target, weapon_k)
-		if _preview_slot < 0 and not reloading:
+		if not previewing_rifle and not reloading:
 			weapon_frame = _rifle_obstruction.resolve(self, weapon_frame, rifle, camera)
 		_active_item.global_transform = weapon_frame
 		var primary_grip := rifle.call("primary_grip_node") as Node3D

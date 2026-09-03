@@ -214,8 +214,9 @@ static func situated(key: String, situation: String) -> Dictionary:
 	return out
 
 
-## Where a held object itself sits, camera-local. Same per-situation rule as
-## a grip; `fallback` is the code's own hold.
+## Where a held object itself sits in its situation's reference frame (usually
+## camera-local; the rifle sling is bag-local). Same per-situation rule as a
+## grip; `fallback` is the code's own hold.
 static func hold_frame(key: String, situation: String,
 		fallback: Transform3D) -> Transform3D:
 	var m := situated(key, situation)

@@ -74,8 +74,9 @@ var _play_btn: Button
 var _state_box: VBoxContainer
 var _state_opt: OptionButton
 var _attack_t: HSlider
-var _state := ""            # "", "carry", "sights", "reload", "hold", "attack"
+var _state := ""            # "", "carry", "sights", "reload", "sling", "hold", "attack"
 var _aim_latched := false
+var _sling_bag_latched := false
 
 # --- gizmo -----------------------------------------------------------------
 var _gizmo: Node3D
@@ -528,11 +529,11 @@ func _collect_targets() -> Array:
 			out.append({"key": "rifle/Hold",
 					"label": "Rifle · the weapon itself",
 					"kind": "weapon", "node": null, "item": item, "side": "R",
-					"ok_states": ["carry", "reload"],
+					"ok_states": ["carry", "reload", "sling"],
 					"needs": "carry", "needs_stop": "", "live": ""})
 			for spec: Array in [
 					["PrimaryGrip", "trigger hand", "R",
-							["carry", "sights"], "carry", "", ""],
+							["carry", "sights", "sling"], "carry", "", ""],
 					["SupportGrip", "fore-end hand", "L",
 							["sights", "reload"], "sights", "", ""],
 					["BoltHandle", "bolt knob", "R",
@@ -1015,7 +1016,7 @@ func _pose_users(name: String) -> Array:
 	return out
 
 
-func _private_pose() -> void:
+func _private_pose(push_history := true) -> void:
 	## Give the selected target a pose of its own, copied from the one it is
 	## using now, so further finger edits reach nothing else.
 	var t := _target()
@@ -1025,13 +1026,17 @@ func _private_pose() -> void:
 	# of it is that only this grip uses it. "_only" keeps it clear of the
 	# shared names (knife/Grip would otherwise slug to the existing
 	# "knife_grip" and quietly overwrite it).
-	var slug := str(t["key"]).replace("/", "_").to_snake_case()
+	# Rifle marker poses are also situation-specific. Including @sling here is
+	# what keeps a placement-hand edit out of carry and normal walking.
+	var pose_owner_key := _marker_key(t) if t["kind"] == "marker" else str(t["key"])
+	var slug := pose_owner_key.replace("/", "_").replace("@", "_").to_snake_case()
 	var name := slug + "_only"
 	var n := 2
 	while (_hrig.call("poses") as Dictionary).has(name) and name != _last_pose:
 		name = "%s_only%d" % [slug, n]
 		n += 1
-	_push_undo()
+	if push_history:
+		_push_undo()
 	var fields := _pose_fields()
 	_hrig.call("set_pose_override", name, fields)
 	HAND_TUNING.set_pose(name, fields)
@@ -1085,6 +1090,12 @@ func _apply_pose() -> void:
 	var t := _target()
 	if t.is_empty() or _last_pose == "":
 		return
+	# A sling finger edit must never rewrite the shared rifle_primary pose. Make
+	# a private situation-owned copy on the first edit, without adding a second
+	# undo step (the slider drag already captured one).
+	if t["kind"] == "marker" and _situation() == "sling" \
+			and not HAND_TUNING.marker(_marker_key(t)).has("pose"):
+		_private_pose(false)
 	var fields := _pose_fields()
 	_hrig.call("set_pose_override", _last_pose, fields)
 	HAND_TUNING.set_pose(_last_pose, fields)
@@ -1445,7 +1456,7 @@ func _build_states(t: Dictionary) -> void:
 	var states: Array = []
 	if item != null and item.has_method("reload_elapsed"):
 		states = [["Carry", "carry"], ["Sights (aim held)", "sights"],
-				["Reload — stops", "reload"]]
+				["Reload — stops", "reload"], ["Put in bag / sling", "sling"]]
 	elif item != null and item.has_method("seek_attack"):
 		states = [["Hold", "hold"], ["Swing — scrub", "attack"]]
 	_state_box.visible = not states.is_empty()
@@ -1459,6 +1470,11 @@ func _build_states(t: Dictionary) -> void:
 	# Keep the state across targets of the same tool; a rifle marker picked
 	# while the reload is scrubbed should not drop the reload.
 	var keep := _state
+	# Opening the editor while the rifle is already hovering over its sling must
+	# land on the matching isolated tuning key. Previously it silently selected
+	# Carry, so the sliders wrote @carry while the runtime was reading @sling.
+	if keep == "" and item != null and item.has_method("hand_situation"):
+		keep = str(item.call("hand_situation"))
 	var idx := 0
 	for i in states.size():
 		if states[i][1] == keep:
@@ -1470,6 +1486,18 @@ func _build_states(t: Dictionary) -> void:
 func _set_state(state: String) -> void:
 	var t := _target()
 	var item := _item_of(t) if not t.is_empty() else null
+	var bag: Node = rig.call("_deck_bag") if rig != null else null
+	# Like the held sights/reload previews, Sling must be a complete editor
+	# state: open the bag if needed, but restore it on exit only when the editor
+	# was the thing that opened it. A bag the player already had open stays open.
+	if state == "sling" and rig != null and rig.has_method("set_bag_open"):
+		if not bool(rig.get("_bag_open")):
+			_sling_bag_latched = bool(rig.call("set_bag_open", true))
+	elif _sling_bag_latched and rig != null and rig.has_method("set_bag_open"):
+		rig.call("set_bag_open", false)
+		_sling_bag_latched = false
+	if bag != null and bag.has_method("set_editor_rifle_sling_preview"):
+		bag.call("set_editor_rifle_sling_preview", state == "sling")
 	# Leave whatever the previous state was holding.
 	if _aim_latched and state != "sights":
 		Input.action_release("rifle_aim")

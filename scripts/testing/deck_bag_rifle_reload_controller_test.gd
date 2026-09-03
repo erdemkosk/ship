@@ -28,6 +28,11 @@ class FakeRifle extends Node3D:
 
 func _initialize() -> void:
 	var rifle := FakeRifle.new()
+	# Sample the middle of the authored cartridge-hold phase instead of a stale
+	# hard-coded timestamp; editor-tuned reload stops remain part of the contract.
+	var stops := preload("res://scripts/hands/rifle_reload_stops.gd")
+	rifle.elapsed = (stops.time_of("cartridge_show") \
+			+ stops.time_of("cartridge_move")) * 0.5
 	var camera := Camera3D.new()
 	var hand_target := Node3D.new()
 	root.add_child(rifle)
