@@ -147,6 +147,8 @@ func run(args: PackedStringArray) -> void:
 			_hand_editor_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--hand-editor-test":
 			_hand_editor_test(rig, boat)
+		elif arg.begins_with("--hand-editor-effect="):
+			_hand_editor_effect(rig, boat, arg.get_slice("=", 1))
 		elif arg.begins_with("--hand-editor-free="):
 			_hand_editor_free(rig, arg.get_slice("=", 1))
 		elif arg.begins_with("--hand-editor-arms="):
@@ -1832,7 +1834,7 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	print("[hand-editor] targets: ", ed.get("_targets").map(func(t): return t["key"]))
 	# Bolt handle, reload scrubbed to the open stop.
 	for i in opt.item_count:
-		if opt.get_item_text(i).ends_with("BoltHandle"):
+		if opt.get_item_text(i).contains("bolt knob"):
 			opt.select(i)
 			ed.call("_select_target", i)
 	await get_tree().create_timer(0.3).timeout
@@ -1901,6 +1903,118 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.6).timeout
 	print("[hand-editor] after close: aim=%.2f" % float(bag.call("rifle_aim_amount")))
 	await _shot(dir, "editor4_closed")
+	_quit_cleanly()
+
+
+func _hand_editor_effect(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Does an edit made in the editor actually move the rendered rifle hand?
+	## Plain carry — no reload, no sights — because that is what the player is
+	## looking at when they say nothing changes.
+	var tuning := load("res://scripts/hands/hand_tuning.gd")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(
+			"user://hand_tuning_probe.json"))
+	tuning.reload()
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var pv: CanvasItem = panel.get("_panel") as CanvasItem
+		if pv != null:
+			pv.visible = false
+	rig.set("_bag_selected", 4)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	rig.call("_activate_bag_selection")
+	await get_tree().create_timer(1.4).timeout
+	var arms: Node = rig.get("_arms")
+	var hrig: Node = arms.get("rig")
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var rifle: Node = bag.get("_active_item")
+	var ed: Node = get_tree().get_first_node_in_group("hand_editor")
+	ed.call("set_open", true)
+	await get_tree().create_timer(0.6).timeout
+	print("[effect] targets: ", ed.get("_targets").map(func(t): return "%s/%s" % [t["key"], t["side"]]))
+	print("[effect] support target set: %s  bag mode '%s'" % [
+			arms.get("_rifle_support_target") != null, arms.get("_bag_hand_mode")])
+	var opt: OptionButton = ed.get("_target_opt")
+	var pick := func(name: String) -> void:
+		for i in opt.item_count:
+			if opt.get_item_text(i).contains(name):
+				opt.select(i)
+				ed.call("_select_target", i)
+	var rifle_local := func(v: Vector3) -> Vector3:
+		return rifle.global_transform.affine_inverse() * v
+	# Pick the fore-end hand: the editor must put the left hand on it.
+	pick.call("fore-end")
+	await get_tree().create_timer(2.6).timeout
+	var lp: Vector3 = hrig.call("palm_global", "L")
+	var sg: Node3D = rifle.call("support_grip_node")
+	print("[effect] fore-end picked: state '%s', L palm %.3f m from the marker" % [
+			ed.get("_state"), lp.distance_to(sg.global_position)])
+	var pos_l: Array = ed.get("_pos_s")
+	var l0: Vector3 = rifle_local.call(hrig.call("palm_global", "L"))
+	(pos_l[0] as HSlider).value += 0.030
+	await get_tree().create_timer(0.9).timeout
+	print("[effect] fore-end move 30mm -> L palm moved %.4f m (rifle-local), editor says hand is %.3f m away" % [
+			l0.distance_to(rifle_local.call(hrig.call("palm_global", "L"))),
+			ed.call("_hand_distance", ed.get("_targets")[1])])
+	await _shot(dir, "effA_foreend")
+	# Bolt knob: must go to the reload stop where the hand is on the knob.
+	pick.call("bolt knob")
+	await get_tree().create_timer(1.6).timeout
+	var bp: Vector3 = hrig.call("palm_global", "R")
+	print("[effect] bolt picked: state '%s' reload t=%.2f, R palm %.3f m from knob, editor distance %.3f m (warns above 0.075)" % [
+			ed.get("_state"), float(rifle.call("reload_elapsed")),
+			bp.distance_to((rifle.call("bolt_handle_node") as Node3D).global_position),
+			ed.call("_hand_distance", ed.get("_targets")[2])])
+	await _shot(dir, "effB_bolt")
+	pick.call("trigger hand")
+	await get_tree().create_timer(1.4).timeout
+	var pos_s: Array = ed.get("_pos_s")
+	var rot_s: Array = ed.get("_rot_s")
+	var fs: Dictionary = ed.get("_finger_s")
+	var palm0: Vector3 = rifle_local.call(hrig.call("palm_global", "R"))
+	var tip0: Vector3 = rifle_local.call(hrig.call("digit_tip_global", "R", "index"))
+	await _shot(dir, "eff0_before")
+	# 1. position
+	ed.call("_push_undo")
+	(pos_s[1] as HSlider).value += 0.030
+	await get_tree().create_timer(0.9).timeout
+	var palm1: Vector3 = rifle_local.call(hrig.call("palm_global", "R"))
+	print("[effect] pos +30mm  -> palm moved %.4f m, marker %s" % [
+			palm0.distance_to(palm1), (rifle.call("primary_grip_node") as Node3D).position])
+	await _shot(dir, "eff1_pos")
+	# 2. rotation
+	(rot_s[2] as HSlider).value += 25.0
+	await get_tree().create_timer(0.9).timeout
+	var tip2: Vector3 = rifle_local.call(hrig.call("digit_tip_global", "R", "index"))
+	var palm2: Vector3 = rifle_local.call(hrig.call("palm_global", "R"))
+	print("[effect] turn Z +25deg -> palm moved %.4f m, index tip moved %.4f m" % [
+			palm1.distance_to(palm2), tip0.distance_to(tip2)])
+	await _shot(dir, "eff2_turn")
+	# 3. fingers
+	print("[effect] before fingers: editor pose '%s' locked=%s editable=%s live '%s' slider=%.2f" % [
+			ed.get("_last_pose"), ed.get("_finger_lock"),
+			((fs["index"] as Array)[0] as HSlider).editable,
+			hrig.call("pose_name", "R"), ((fs["index"] as Array)[0] as HSlider).value])
+	((fs["index"] as Array)[0] as HSlider).value = 1.40
+	((fs["middle"] as Array)[0] as HSlider).value = 0.10
+	await get_tree().create_timer(0.9).timeout
+	print("[effect] after fingers: table rifle_primary.index=%s live '%s' amt %.2f" % [
+			(hrig.call("poses") as Dictionary).get(str(ed.get("_last_pose")), {}).get("index", "-"),
+			hrig.call("pose_name", "R"), hrig.call("pose_amount", "R")])
+	var tip3: Vector3 = rifle_local.call(hrig.call("digit_tip_global", "R", "index"))
+	var mid3: Vector3 = rifle_local.call(hrig.call("digit_tip_global", "R", "middle"))
+	print("[effect] fingers -> index tip moved %.4f m, middle tip %s, solver %s" % [
+			tip2.distance_to(tip3), mid3, hrig.get("contact_solver_enabled")])
+	await _shot(dir, "eff3_fingers")
+	# 4. same three, solver off
+	var chk: CheckButton = ed.get("_solver_chk")
+	chk.button_pressed = false
+	await get_tree().create_timer(0.8).timeout
+	var tip4: Vector3 = rifle_local.call(hrig.call("digit_tip_global", "R", "index"))
+	print("[effect] solver off -> index tip moved a further %.4f m" % tip3.distance_to(tip4))
+	await _shot(dir, "eff4_solver_off")
+	ed.call("set_open", false)
 	_quit_cleanly()
 
 
@@ -1995,11 +2109,11 @@ func _hand_editor_arms(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	var fs: Dictionary = ed.get("_finger_s")
 	var pick := func(name: String) -> void:
 		for i in opt.item_count:
-			if opt.get_item_text(i).ends_with(name):
+			if opt.get_item_text(i).contains(name):
 				opt.select(i)
 				ed.call("_select_target", i)
 	# 1. Edit the trigger grip: 10 mm along Y, 6 degrees about Z, index curl.
-	pick.call("PrimaryGrip")
+	pick.call("trigger hand")
 	await get_tree().create_timer(0.3).timeout
 	ed.call("_push_undo")
 	var pg0: Node3D = rifle.call("primary_grip_node")
@@ -2026,7 +2140,7 @@ func _hand_editor_arms(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 			xf1.origin, pose1["index"], rel1.origin])
 	await _shot(dir, "arms0_R_edited")
 	# 2. Switch to the support grip and edit that.
-	pick.call("SupportGrip")
+	pick.call("fore-end")
 	await get_tree().create_timer(0.5).timeout
 	var xf_mid: Transform3D = pg.transform
 	print("[arms] right after switching: R marker moved %.4f, R idx=%s" % [
@@ -2047,7 +2161,7 @@ func _hand_editor_arms(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 			pose1["index"], pose2["index"], rel1.origin.distance_to(rel2.origin)])
 	print("[arms] file: %s" % JSON.stringify(tuning.data()))
 	await _shot(dir, "arms1_L_edited")
-	pick.call("PrimaryGrip")
+	pick.call("trigger hand")
 	await get_tree().create_timer(0.5).timeout
 	print("[arms] back on R: sliders pos %s rot %s marker %s" % [
 			[pos_s[0].value, pos_s[1].value, pos_s[2].value],

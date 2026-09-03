@@ -272,7 +272,7 @@ func _build_panel() -> void:
 	# Which moment of the tool's life the hand is shown in. Chosen here and
 	# HELD, so the sights or a mid-swing can be tuned without keeping a mouse
 	# button down with the same hand that works the sliders.
-	_section(vbox, "STATE")
+	_section(vbox, "WHAT THE HANDS ARE DOING")
 	_state_box = VBoxContainer.new()
 	vbox.add_child(_state_box)
 	var strow := HBoxContainer.new()
@@ -292,7 +292,7 @@ func _build_panel() -> void:
 	_state_box.visible = false
 
 	# --- sequence ------------------------------------------------------------
-	_section(vbox, "SEQUENCE  (reload stops)")
+	_section(vbox, "RELOAD — STOP BY STOP")
 	_seq_box = VBoxContainer.new()
 	vbox.add_child(_seq_box)
 	_timeline = Control.new()
@@ -325,9 +325,9 @@ func _build_panel() -> void:
 
 
 	# --- frame ---------------------------------------------------------------
-	_section(vbox, "GRIP FRAME  (object-local)")
+	_section(vbox, "WHERE THE HAND SITS")
 	for i in 3:
-		_pos_s.append(_slider(vbox, "pos %s" % ["X", "Y", "Z"][i], "%+.1f mm",
+		_pos_s.append(_slider(vbox, "move %s" % ["X", "Y", "Z"][i], "%+.1f mm",
 				-POS_SPAN, POS_SPAN, 0.0005, 0.0, 1000.0,
 				func(_v: float) -> void: _apply_frame()))
 	for i in 3:
@@ -390,7 +390,7 @@ func _build_panel() -> void:
 	_button(crow, "Reset pose", func() -> void: _reset_pose())
 
 	# --- solver / view -------------------------------------------------------
-	_section(vbox, "SOLVER · VIEW")
+	_section(vbox, "SOLVER AND VIEW")
 	_solver_chk = CheckButton.new()
 	_solver_chk.text = "finger contact solver"
 	_solver_chk.button_pressed = true
@@ -489,8 +489,12 @@ func _process(delta: float) -> void:
 		var live := _live_pose_name(t)
 		if live != _last_pose:
 			_sync_pose(t)
-		if not _finger_lock and _pose_users(_last_pose).size() <= 1:
-			_amt_lbl.text = "hand %s · pose amount %.2f · solver %s" % [t["side"],
+		var away := _hand_distance(t)
+		if away > 0.075:
+			_amt_lbl.text = "%s hand is %.0f cm away from this — nothing here will look like it moves. Pick a STATE that puts it on." % [
+					t["side"], away * 100.0]
+		elif not _finger_lock and _pose_users(_last_pose).size() <= 1:
+			_amt_lbl.text = "%s hand on it · pose amount %.2f · solver %s" % [t["side"],
 					_hrig.call("pose_amount", t["side"]),
 					"on" if bool(_hrig.get("contact_solver_enabled")) else "off"]
 	_timeline.queue_redraw()
@@ -503,17 +507,34 @@ func _collect_targets() -> Array:
 		var kind := str(bag.call("active_item_kind"))
 		var item: Node3D = bag.get("_active_item") as Node3D
 		if item != null and kind == "hunting_rifle":
-			for m: String in ["PrimaryGrip", "SupportGrip", "BoltHandle", "Chamber"]:
-				var n := item.get_node_or_null(m) as Node3D
+			# node, plain name, hand, and the state that actually puts that
+			# hand on it — a fore-end grip means nothing in low carry, where
+			# the rifle is held with the trigger hand alone.
+			# The bolt marker is the CLOSED knob; during the reload the metal
+			# has travelled rearward, and the hand is on the travelled frame.
+			# `live` names the method that reports it, so the gizmo and the
+			# "is a hand on this?" reading follow the hand, while the edit
+			# still writes the marker the live frame is derived from.
+			for spec: Array in [
+					["PrimaryGrip", "trigger hand", "R", "carry", "", ""],
+					["SupportGrip", "fore-end hand", "L", "sights", "", ""],
+					["BoltHandle", "bolt knob", "R", "reload", "bolt_open_end",
+							"bolt_grip_transform"],
+					["Chamber", "chamber / round", "R", "reload",
+							"cartridge_insert", ""]]:
+				var n := item.get_node_or_null(str(spec[0])) as Node3D
 				if n != null:
-					out.append({"key": "rifle/" + m, "label": "Rifle · " + m,
+					out.append({"key": "rifle/" + str(spec[0]),
+							"label": "Rifle · %s (%s)" % [spec[1], spec[2]],
 							"kind": "marker", "node": n, "item": item,
-							"side": "L" if m == "SupportGrip" else "R"})
+							"side": str(spec[2]), "needs": str(spec[3]),
+							"needs_stop": str(spec[4]), "live": str(spec[5])})
 		elif item != null and kind == "utility_knife":
 			var n := item.get_node_or_null("Grip") as Node3D
 			if n != null:
-				out.append({"key": "knife/Grip", "label": "Knife · Grip",
-						"kind": "marker", "node": n, "item": item, "side": "R"})
+				out.append({"key": "knife/Grip", "label": "Knife · handle (R)",
+						"kind": "marker", "node": n, "item": item, "side": "R",
+						"needs": "hold", "needs_stop": ""})
 	var claim: Dictionary = _arms.get("_claim")
 	for side: String in ["L", "R"]:
 		var id := str(claim.get(side, ""))
@@ -527,7 +548,7 @@ func _collect_targets() -> Array:
 		var spec: Dictionary = GRIP_MAP.spec_for(id)
 		if spec.is_empty() or bool(spec.get("on_rim", false)):
 			continue
-		out.append({"key": id, "label": "%s · %s hand" % [id, side],
+		out.append({"key": id, "label": "%s (%s hand)" % [id, side],
 				"kind": "grip", "id": id, "side": side, "node": null})
 	return out
 
@@ -597,6 +618,18 @@ func _select_target(i: int) -> void:
 	_sync_pose(t)
 	_gizmo.visible = _gizmo_chk.button_pressed
 	_build_states(t)
+	# Put the hand ON the thing that was picked. Otherwise the fore-end and
+	# the bolt are edited with no hand near them, and every slider looks dead.
+	var needs := str(t.get("needs", ""))
+	if needs != "" and needs != _state:
+		for si in _state_opt.item_count:
+			if str(_state_opt.get_item_metadata(si)) == needs:
+				_state_opt.select(si)
+				_set_state(needs)
+				_say("%s — showing '%s' so the hand is actually on it" % [
+						t["label"], _state_opt.get_item_text(si)])
+	if needs == "reload" and str(t.get("needs_stop", "")) != "":
+		_seq_go_to(str(t["needs_stop"]))
 	_pose_opt.disabled = t["kind"] == "marker"
 
 
@@ -812,6 +845,21 @@ func _sync_pose(t: Dictionary) -> void:
 					float(values[mini(j, values.size() - 1)]))
 			_syncing = false
 	_set_quiet(_splay_s, float(spec.get("thumb_splay", 0.0)))
+
+
+func _hand_distance(t: Dictionary) -> float:
+	## How far the hand that owns this target is from it, in metres — the
+	## NEAREST of palm and the two working fingertips, because a bolt knob is
+	## held by the fingers with the palm a hand's width away by design.
+	var xf := _target_global()
+	if xf == Transform3D.IDENTITY:
+		return 0.0
+	var side: String = t["side"]
+	var d: float = (_hrig.call("palm_global", side) as Vector3).distance_to(xf.origin)
+	for digit: String in ["index", "thumb"]:
+		d = minf(d, (_hrig.call("digit_tip_global", side, digit) as Vector3
+				).distance_to(xf.origin))
+	return d
 
 
 func _pose_users(name: String) -> Array:
@@ -1042,6 +1090,11 @@ func _target_global() -> Transform3D:
 	if t.is_empty():
 		return Transform3D.IDENTITY
 	if t["kind"] == "marker":
+		var item: Node = t.get("item")
+		var live := str(t.get("live", ""))
+		if live != "" and item != null and item.has_method(live):
+			return (item as Node3D).global_transform \
+					* (item.call(live) as Transform3D)
 		return (t["node"] as Node3D).global_transform
 	if t["kind"] == "hand":
 		return _cam.global_transform * (_arms.call("rest_frame", t["side"]) as Transform3D)
@@ -1308,6 +1361,14 @@ func _seq_refresh() -> void:
 	if _seq_cur >= 0 and _seq_cur < _seq_stops.size():
 		_stop_opt.select(_seq_cur)
 		_seq_select_stop(_seq_cur)
+
+
+func _seq_go_to(key: String) -> void:
+	for i in _seq_stops.size():
+		if str((_seq_stops[i] as Dictionary)["key"]) == key:
+			_stop_opt.select(i)
+			_seq_select_stop(i)
+			return
 
 
 func _seq_select_stop(i: int) -> void:
