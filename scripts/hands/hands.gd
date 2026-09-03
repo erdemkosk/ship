@@ -1162,7 +1162,8 @@ func _drive_rifle_support() -> void:
 	_last_grip["L"] = contact
 	_last_axes["L"] = axes.duplicate()
 	var support_pose := HAND_TUNING.marker_pose("rifle/SupportGrip",
-			"rifle_support")
+			"rifle_support", str(device.call("hand_situation")) \
+			if device != null and device.has_method("hand_situation") else "")
 	_last_pose["L"] = support_pose
 	_rest_t["L"] = 0.0
 	# Let the support elbow settle a little lower and farther outboard. The palm

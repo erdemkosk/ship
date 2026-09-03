@@ -97,6 +97,7 @@ var _shot_serial := 0
 var _loaded := true
 var _reload_elapsed := -1.0
 var _reload_paused := false
+var _hand_situation := "carry"
 var _reload_bolt_started := false
 var _reload_bolt_held := false
 var _reload_bolt_closing := false
@@ -148,8 +149,7 @@ func _build_model() -> void:
 	# the authored constants above; the rest pose is read AFTER that.
 	for marker: Node3D in [_primary_grip, _support_grip, _bolt_handle, _chamber]:
 		marker.set_meta("authored_transform", marker.transform)
-		HAND_TUNING.apply_marker("rifle/" + marker.name, marker)
-	_bolt_handle_rest = _bolt_handle.transform
+	_apply_marker_tuning()
 	_find_animation_player(_model)
 	_build_fire_only_animation()
 	_build_cartridge()
@@ -769,6 +769,40 @@ func chamber_node() -> Node3D:
 
 func bolt_handle_node() -> Node3D:
 	return _bolt_handle
+
+
+const HAND_SITUATIONS := ["carry", "sights", "reload", "sling"]
+
+
+func hand_situation() -> String:
+	return _hand_situation
+
+
+func set_hand_situation(name: String) -> void:
+	## Carrying, aiming, working the action and putting it away are four
+	## different holds. Each may be tuned on its own; the markers every other
+	## system reads are re-stamped whenever the situation changes, so nothing
+	## downstream has to know that this happens at all.
+	if name == _hand_situation or not HAND_SITUATIONS.has(name):
+		return
+	_hand_situation = name
+	_apply_marker_tuning()
+
+
+func refresh_marker_tuning() -> void:
+	## The editor changed an entry for the situation in force.
+	_apply_marker_tuning()
+
+
+func _apply_marker_tuning() -> void:
+	for marker: Node3D in [_primary_grip, _support_grip, _bolt_handle, _chamber]:
+		if marker == null:
+			continue
+		if marker.has_meta("authored_transform"):
+			marker.transform = marker.get_meta("authored_transform")
+		HAND_TUNING.apply_marker("rifle/" + marker.name, marker, _hand_situation)
+	if _bolt_handle != null:
+		_bolt_handle_rest = _bolt_handle.transform
 
 
 func refresh_marker_rest() -> void:

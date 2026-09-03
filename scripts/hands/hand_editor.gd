@@ -25,6 +25,7 @@ class_name HandEditor
 const HAND_TUNING := preload("res://scripts/hands/hand_tuning.gd")
 const GRIP_MAP := preload("res://scripts/hands/grip_map.gd")
 const RELOAD_STOPS := preload("res://scripts/hands/rifle_reload_stops.gd")
+const DECK_BAG := preload("res://scripts/deck_bag.gd")
 
 const DIGITS := ["thumb", "index", "middle", "ring", "pinky"]
 const JOINTS := ["knuckle", "mid", "tip"]
@@ -494,7 +495,7 @@ func _process(delta: float) -> void:
 		var live := _live_pose_name(t)
 		if live != _last_pose:
 			_sync_pose(t)
-		var away := _hand_distance(t)
+		var away := 0.0 if t["kind"] == "weapon" else _hand_distance(t)
 		if away > 0.075:
 			_amt_lbl.text = "%s hand is %.0f cm away from this — nothing here will look like it moves. Pick a STATE that puts it on." % [
 					t["side"], away * 100.0]
@@ -523,6 +524,12 @@ func _collect_targets() -> Array:
 			# node, plain name, hand, the states in which that hand is really
 			# on it, the state to switch to when it is not, the reload stop
 			# to scrub to, and the method reporting its live (animated) frame.
+			# Aiming is not tunable here: that hold comes off the sight line.
+			out.append({"key": "rifle/Hold",
+					"label": "Rifle · the weapon itself",
+					"kind": "weapon", "node": null, "item": item, "side": "R",
+					"ok_states": ["carry", "reload"],
+					"needs": "carry", "needs_stop": "", "live": ""})
 			for spec: Array in [
 					["PrimaryGrip", "trigger hand", "R",
 							["carry", "sights"], "carry", "", ""],
@@ -657,6 +664,29 @@ func _select_target(i: int, user := true) -> void:
 
 # --- frame (position + rotation) ------------------------------------------
 
+func _situation() -> String:
+	## Which of the tool's holds is on screen. The editor's own STATE picker
+	## is the authority while it is open; it is what the player is looking at.
+	match _state:
+		"sights":
+			return "sights"
+		"reload":
+			return "reload"
+		"hold", "attack", "":
+			return "carry"
+		_:
+			return _state
+
+
+func _marker_key(t: Dictionary) -> String:
+	## Grips are tuned PER SITUATION. The fore-end is held one way while the
+	## bolt is worked and another while the rifle is lowered into its sling;
+	## one entry for both meant fixing the reload broke putting it away.
+	if t["kind"] == "weapon" or str(t["key"]).begins_with("rifle/"):
+		return HAND_TUNING.situation_key(str(t["key"]), _situation())
+	return str(t["key"])
+
+
 func _grip_key(t: Dictionary) -> String:
 	## Where this target's frame is stored. A fitting that is mirrored for the
 	## left hand keeps one entry PER HAND, so tuning one never reaches into
@@ -679,6 +709,9 @@ func _frame_of(t: Dictionary) -> Transform3D:
 	## +Y palm — the GripMap contract, which the rifle's markers also follow.
 	if t["kind"] == "marker":
 		return (t["node"] as Node3D).transform
+	if t["kind"] == "weapon":
+		return HAND_TUNING.hold_frame(str(t["key"]), _situation(),
+				_authored_frame(t))
 	if t["kind"] == "hand":
 		# Camera-local: the offset added to the idle home, and the hang axes.
 		var tune: Dictionary = HAND_TUNING.grip(t["id"])
@@ -764,6 +797,8 @@ func _authored_frame(t: Dictionary) -> Transform3D:
 		if n.has_meta("authored_transform"):
 			return n.get_meta("authored_transform")
 		return n.transform
+	if t["kind"] == "weapon":
+		return DECK_BAG.rifle_hold_default(_situation())
 	if t["kind"] == "hand":
 		var out := 1.0 if t["side"] == "R" else -1.0
 		var f0 := Vector3(out * 0.08, -0.86, -0.46).normalized()
@@ -786,18 +821,31 @@ func _apply_frame() -> void:
 	if t.is_empty():
 		return
 	var xf := _slider_frame()
+	if t["kind"] == "weapon":
+		var q := _cur_basis.get_rotation_quaternion().normalized()
+		HAND_TUNING.set_marker(_marker_key(t), {
+			"pos": HAND_TUNING.to_json(xf.origin),
+			"quat": [snappedf(q.x, 0.00001), snappedf(q.y, 0.00001),
+					snappedf(q.z, 0.00001), snappedf(q.w, 0.00001)],
+			"turn_deg": HAND_TUNING.to_json(_rot_deg()),
+		})
+		_say("%s moved (%s)" % [t["label"], _situation()])
+		return
 	if t["kind"] == "marker":
 		(t["node"] as Node3D).transform = xf
 		var item: Node = t.get("item")
 		if item != null and item.has_method("refresh_marker_rest"):
 			item.call("refresh_marker_rest")
 		var q := _cur_basis.get_rotation_quaternion().normalized()
-		HAND_TUNING.set_marker(t["key"], {
+		HAND_TUNING.set_marker(_marker_key(t), {
 			"pos": HAND_TUNING.to_json(xf.origin),
 			"quat": [snappedf(q.x, 0.00001), snappedf(q.y, 0.00001),
 					snappedf(q.z, 0.00001), snappedf(q.w, 0.00001)],
 			"turn_deg": HAND_TUNING.to_json(_rot_deg()),   # for the reader
 		})
+		var owner: Node = t.get("item")
+		if owner != null and owner.has_method("refresh_marker_tuning"):
+			owner.call("refresh_marker_tuning")
 	else:
 		var key := _grip_key(t)
 		var fields: Dictionary = HAND_TUNING.grip(key).duplicate()
@@ -815,13 +863,20 @@ func _reset_frame() -> void:
 	if t.is_empty():
 		return
 	_push_undo()
+	if t["kind"] == "weapon":
+		HAND_TUNING.set_marker(_marker_key(t), {})
+		_sync_from_target()
+		_say("%s back to the code's own hold (%s)" % [t["label"], _situation()])
+		return
 	if t["kind"] == "marker":
 		var n: Node3D = t["node"]
 		if n.has_meta("authored_transform"):
 			n.transform = n.get_meta("authored_transform")
-		HAND_TUNING.set_marker(t["key"], {})
+		HAND_TUNING.set_marker(_marker_key(t), {})
 		var item: Node = t.get("item")
-		if item != null and item.has_method("refresh_marker_rest"):
+		if item != null and item.has_method("refresh_marker_tuning"):
+			item.call("refresh_marker_tuning")
+		elif item != null and item.has_method("refresh_marker_rest"):
 			item.call("refresh_marker_rest")
 	else:
 		var key := _grip_key(t)
@@ -856,7 +911,7 @@ func _live_pose_name(t: Dictionary) -> String:
 		return str(_seq_item.call("reload_stop_pose",
 				str((_seq_stops[_seq_cur] as Dictionary)["key"])))
 	return HAND_TUNING.marker_pose(str(t["key"]),
-			str(_hrig.call("pose_name", t["side"])))
+			str(_hrig.call("pose_name", t["side"])), _situation())
 
 
 func _pose_names() -> Array:
@@ -877,13 +932,16 @@ func _sync_pose(t: Dictionary) -> void:
 	_pose_lbl.text = "pose (chosen by code)" if t["kind"] == "marker" else "pose"
 	# Which other grips would this edit reach? A pose is shared by name.
 	var users := _pose_users(name)
-	var idle: bool = t["kind"] == "marker" and (name == "open" or name == "flat")
+	var idle: bool = t["kind"] == "weapon" \
+			or (t["kind"] == "marker" and (name == "open" or name == "flat"))
 	_finger_lock = idle
 	for d: String in DIGITS:
 		for j in 3:
 			(_finger_s[d][j] as HSlider).editable = not idle
 	_splay_s.editable = not idle
-	if idle:
+	if t["kind"] == "weapon":
+		_amt_lbl.text = "the weapon's own hold, tuned for '%s' — the hands follow it" % _situation()
+	elif idle:
 		_amt_lbl.text = "%s hand is not on this grip right now (pose '%s'). " % [
 				t["side"], name] + "Pick the state that puts it there (Sights), or the '%s hand · free' target." % t["side"]
 	elif users.size() > 1:
@@ -1004,9 +1062,9 @@ func _assign_pose(t: Dictionary, name: String) -> void:
 		_seq_item.call("set_reload_stop_pose",
 				str((_seq_stops[_seq_cur] as Dictionary)["key"]), name)
 		return
-	var m: Dictionary = HAND_TUNING.marker(str(t["key"])).duplicate()
+	var m: Dictionary = HAND_TUNING.marker(_marker_key(t)).duplicate()
 	m["pose"] = name
-	HAND_TUNING.set_marker(str(t["key"]), m)
+	HAND_TUNING.set_marker(_marker_key(t), m)
 
 
 func _pose_fields() -> Dictionary:
@@ -1110,9 +1168,11 @@ func _reapply_all(snap: Dictionary = {}) -> void:
 				n.transform = n.get_meta("authored_transform")
 			if snap.has("xf") and snap.get("key", "") == t["key"]:
 				n.transform = snap["xf"]
-			HAND_TUNING.apply_marker(t["key"], n)
+			HAND_TUNING.apply_marker(str(t["key"]), n, _situation())
 			var item: Node = t.get("item")
-			if item != null and item.has_method("refresh_marker_rest"):
+			if item != null and item.has_method("refresh_marker_tuning"):
+				item.call("refresh_marker_tuning")
+			elif item != null and item.has_method("refresh_marker_rest"):
 				item.call("refresh_marker_rest")
 	var cur := _target()
 	if not cur.is_empty():
@@ -1215,6 +1275,11 @@ func _target_global() -> Transform3D:
 			return (item as Node3D).global_transform \
 					* (item.call(live) as Transform3D)
 		return (t["node"] as Node3D).global_transform
+	if t["kind"] == "weapon":
+		var item: Node3D = t.get("item")
+		if item != null and is_instance_valid(item):
+			return item.global_transform
+		return _cam.global_transform * _frame_of(t)
 	if t["kind"] == "hand":
 		return _cam.global_transform * (_arms.call("rest_frame", t["side"]) as Transform3D)
 	var g: Node3D = _arms.call("grip_node_of", t["id"], t["side"]) as Node3D
@@ -1366,7 +1431,12 @@ func _update_bounds() -> void:
 # --- state ------------------------------------------------------------------
 
 func _item_of(t: Dictionary) -> Node:
-	return t.get("item") if t["kind"] == "marker" else null
+	## The tool this target belongs to — the weapon's own hold included, or
+	## selecting it empties the state picker and every edit lands under
+	## whatever situation happened to be left over.
+	if t["kind"] == "marker" or t["kind"] == "weapon":
+		return t.get("item")
+	return null
 
 
 func _build_states(t: Dictionary) -> void:
@@ -1410,6 +1480,11 @@ func _set_state(state: String) -> void:
 			and item.has_method("seek_attack"):
 		item.call("seek_attack", -1.0, false)
 	_state = state
+	var tool_item: Node = _item_of(t)
+	if tool_item == null and not t.is_empty():
+		tool_item = t.get("item")
+	if tool_item != null and tool_item.has_method("refresh_marker_tuning"):
+		tool_item.call("refresh_marker_tuning")
 	_seq_box.visible = state == "reload"
 	_attack_t.visible = state == "attack"
 	(_attack_t.get_meta("label") as Control).visible = state == "attack"
@@ -1454,9 +1529,9 @@ var _seq_cur := -1
 
 func _seq_rifle() -> Node:
 	var t := _target()
-	if t.is_empty() or t["kind"] != "marker":
+	if t.is_empty():
 		return null
-	var item: Node = t.get("item")
+	var item: Node = _item_of(t)
 	if item == null or not item.has_method("reload_stops"):
 		return null
 	return item

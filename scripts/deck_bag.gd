@@ -11,6 +11,23 @@ const DeckBagLayoutScript := preload("res://scripts/deck_bag_layout.gd")
 const DeckBagRifleObstructionScript := preload("res://scripts/deck_bag_rifle_obstruction.gd")
 const DeckBagRifleReloadControllerScript := preload("res://scripts/deck_bag_rifle_reload_controller.gd")
 const HandTuning := preload("res://scripts/hands/hand_tuning.gd")
+## Where the rifle itself is held, camera-local, per situation. The editor
+## tunes these as "rifle/Hold@<situation>"; aiming is not here because that
+## hold is derived from the sight line, not from a fixed transform.
+const RIFLE_HOLD_DEFAULTS := {
+	"carry": [Vector3(0.255, -0.195, -0.365), Vector3(38.0, -8.0, -7.0)],
+	"reload": [Vector3(0.020, -0.120, -0.520), Vector3(13.0, -7.0, -28.0)],
+}
+
+
+static func rifle_hold_default(situation: String) -> Transform3D:
+	var d: Array = RIFLE_HOLD_DEFAULTS.get(situation,
+			RIFLE_HOLD_DEFAULTS["carry"])
+	var e: Vector3 = d[1]
+	return Transform3D(Basis.from_euler(Vector3(deg_to_rad(e.x),
+			deg_to_rad(e.y), deg_to_rad(e.z))), d[0] as Vector3)
+
+
 const KIND_KNIFE := "utility_knife"
 const KIND_RIFLE := "hunting_rifle"
 
@@ -801,6 +818,13 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 		var previewing_rifle := _preview_slot == RIFLE_SLOT and bag_amount > 0.62
 		rifle.call("tick", delta)
 		var reloading := bool(rifle.call("is_reloading"))
+		# Carrying it, aiming it, working the action and putting it away are
+		# four different holds — of the hands AND of the weapon itself. The
+		# situation is settled here, once, and everything downstream tunes
+		# against it.
+		var situation := "sling" if previewing_rifle else ("reload" if reloading
+				else ("sights" if _rifle_aim > 0.5 else "carry"))
+		rifle.call("set_hand_situation", situation)
 		if reloading:
 			_rifle_aim_goal = false
 		_rifle_aim = move_toward(_rifle_aim, 1.0 if _rifle_aim_goal else 0.0,
@@ -822,10 +846,8 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 			# Left-hand work position: receiver rolled slightly toward the eyes,
 			# chamber visible, muzzle still safely above the horizon.
 			_rifle_reload_blend = minf(_rifle_reload_blend + delta / 0.28, 1.0)
-			var reload_basis := Basis.from_euler(Vector3(deg_to_rad(13.0),
-					deg_to_rad(-7.0), deg_to_rad(-28.0)))
-			var reload_pose := camera.global_transform * Transform3D(reload_basis,
-					Vector3(0.020, -0.120, -0.520))
+			var reload_pose := camera.global_transform * HandTuning.hold_frame(
+					"rifle/Hold", situation, rifle_hold_default("reload"))
 			target = _active_item.global_transform.interpolate_with(reload_pose,
 					smoothstep(0.0, 1.0, _rifle_reload_blend))
 		elif previewing_rifle:
@@ -843,10 +865,11 @@ func _update_active_item(delta: float, camera: Camera3D, bag_amount: float) -> v
 			# Keep the stock close to the chest and the muzzle diagonally up. The
 			# previous near-vertical, distant pose made this same unscaled model look
 			# miniature through perspective.
-			var carry_basis := Basis.from_euler(Vector3(deg_to_rad(38.0),
-					deg_to_rad(-8.0), deg_to_rad(-7.0)))
-			var carry := camera.global_transform * Transform3D(carry_basis,
-					Vector3(0.255, -0.195, -0.365))
+			# Where the weapon itself is held, in front of the eye. Tunable per
+			# situation: the rifle is brought in closer and turned to work the
+			# bolt than it is to walk with.
+			var carry := camera.global_transform * HandTuning.hold_frame(
+					"rifle/Hold", situation, rifle_hold_default("carry"))
 			var sight := rifle.call("aim_anchor_node") as Node3D
 			var eye_line := camera.global_transform * Transform3D(Basis.IDENTITY,
 					# Pre-compensate the measured shoulder/IK settle so the rendered
@@ -1005,7 +1028,8 @@ func _configure_normal_rifle_hand(rifle: Node3D, primary_grip: Node3D) -> void:
 	_rifle_primary_target.set_meta("contact_bounds",
 			rifle.call("primary_contact_bounds") as AABB)
 	_rifle_primary_target.set_meta("hand_pose", HandTuning.marker_pose(
-			"rifle/PrimaryGrip", "rifle_primary"))
+			"rifle/PrimaryGrip", "rifle_primary",
+			str(rifle.call("hand_situation"))))
 	_rifle_primary_target.set_meta("hand_attachment", false)
 	# The imported marker supplies the exact stock contact, but forcing its full
 	# wrist rotation in ADS bends the right hand over the receiver. Preserve the

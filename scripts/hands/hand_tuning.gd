@@ -197,10 +197,49 @@ static func set_pose(name: String, fields: Dictionary) -> void:
 	version += 1
 
 
+## A grip is not one thing. The same fore-end is held differently while
+## aiming, while working the bolt, and while the rifle is being lowered into
+## its sling — so every marker entry may be qualified by the situation, and
+## "<key>@<situation>" is read on top of the plain "<key>".
+static func situated(key: String, situation: String) -> Dictionary:
+	var base: Dictionary = marker(key)
+	if situation == "":
+		return base
+	var over: Dictionary = marker(situation_key(key, situation))
+	if over.is_empty():
+		return base
+	var out: Dictionary = base.duplicate()
+	for k in over:
+		out[k] = over[k]
+	return out
+
+
+## Where a held object itself sits, camera-local. Same per-situation rule as
+## a grip; `fallback` is the code's own hold.
+static func hold_frame(key: String, situation: String,
+		fallback: Transform3D) -> Transform3D:
+	var m := situated(key, situation)
+	if m.is_empty():
+		return fallback
+	var xf := fallback
+	if m.has("pos"):
+		xf.origin = from_json(m["pos"])
+	if m.has("quat"):
+		var q: Array = m["quat"]
+		if q.size() == 4:
+			xf.basis = Basis(Quaternion(float(q[0]), float(q[1]), float(q[2]),
+					float(q[3])).normalized())
+	return xf
+
+
+static func situation_key(key: String, situation: String) -> String:
+	return "%s@%s" % [key, situation]
+
+
 ## The finger pose a tool's grip should use, when the editor has given that
 ## grip a pose of its own. Code passes the name it would otherwise use.
-static func marker_pose(key: String, fallback: String) -> String:
-	return str(marker(key).get("pose", fallback))
+static func marker_pose(key: String, fallback: String, situation := "") -> String:
+	return str(situated(key, situation).get("pose", fallback))
 
 
 static func marker(key: String) -> Dictionary:
@@ -258,8 +297,8 @@ static func overlay_poses(base: Dictionary) -> Dictionary:
 
 ## Apply a saved marker transform (object-local metres / degrees) to a node.
 ## Returns true when something was applied.
-static func apply_marker(key: String, node: Node3D) -> bool:
-	var m := marker(key)
+static func apply_marker(key: String, node: Node3D, situation := "") -> bool:
+	var m := situated(key, situation)
 	if m.is_empty() or node == null:
 		return false
 	var xf := node.transform

@@ -147,6 +147,8 @@ func run(args: PackedStringArray) -> void:
 			_hand_editor_shot(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--hand-editor-test":
 			_hand_editor_test(rig, boat)
+		elif arg.begins_with("--situations="):
+			_situations(rig, boat, arg.get_slice("=", 1))
 		elif arg == "--tuning-report":
 			_tuning_report(rig, boat)
 		elif arg.begins_with("--reload-pocket="):
@@ -1940,6 +1942,100 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	_quit_cleanly()
 
 
+func _situations(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
+	## Carry, sights and reload must be tunable without touching each other —
+	## the weapon's own hold as well as the grips on it.
+	var tuning := load("res://scripts/hands/hand_tuning.gd")
+	tuning.path_override = "user://hand_tuning_situations.json"
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(tuning.path_override))
+	tuning.reload()
+	rig.call("set_mode", 1)
+	var panel: Node = get_tree().get_first_node_in_group("ui_panel")
+	if panel != null:
+		var pv: CanvasItem = panel.get("_panel") as CanvasItem
+		if pv != null:
+			pv.visible = false
+	rig.set("_bag_selected", 4)
+	rig.call("set_bag_open", true)
+	await get_tree().create_timer(0.95).timeout
+	rig.call("_activate_bag_selection")
+	await get_tree().create_timer(1.4).timeout
+	var bag: Node3D = boat.call("deck_bag_node") as Node3D
+	var rifle: Node3D = bag.get("_active_item")
+	var cam: Camera3D = rig.get("_cam")
+	var ed: Node = get_tree().get_first_node_in_group("hand_editor")
+	ed.call("set_open", true)
+	await get_tree().create_timer(0.6).timeout
+	var opt: OptionButton = ed.get("_target_opt")
+	var st: OptionButton = ed.get("_state_opt")
+	var pos_s: Array = ed.get("_pos_s")
+	var pick := func(name: String) -> void:
+		for i in opt.item_count:
+			if opt.get_item_text(i).contains(name):
+				opt.select(i)
+				ed.call("_select_target", i)
+	var go := func(state: String) -> void:
+		for i in st.item_count:
+			if str(st.get_item_metadata(i)) == state:
+				st.select(i)
+				ed.call("_set_state", state)
+	var weapon_local := func() -> Vector3:
+		return (cam.global_transform.affine_inverse() * rifle.global_transform).origin
+	print("[sit] targets: ", ed.get("_targets").map(func(t): return t["key"]))
+	# --- the weapon's own hold, in carry -----------------------------------
+	pick.call("the weapon itself")
+	go.call("carry")
+	await get_tree().create_timer(1.4).timeout
+	var carry0: Vector3 = weapon_local.call()
+	ed.call("_push_undo")
+	(pos_s[0] as HSlider).value += 0.060
+	await get_tree().create_timer(1.2).timeout
+	var carry1: Vector3 = weapon_local.call()
+	print("[sit] carry hold moved %.3f m (want 0.06)" % carry0.distance_to(carry1))
+	await _shot(dir, "s0_carry_moved")
+	# --- reload must be untouched by that ----------------------------------
+	go.call("reload")
+	await get_tree().create_timer(1.6).timeout
+	var reload0: Vector3 = weapon_local.call()
+	print("[sit] in reload the weapon sits %.3f m from the CARRY edit, %.3f m from the code default" % [
+			reload0.distance_to(carry1), reload0.distance_to(carry0)])
+	await _shot(dir, "s1_reload_default")
+	# --- and the reload can be tuned on its own ----------------------------
+	pick.call("the weapon itself")
+	await get_tree().create_timer(0.8).timeout
+	(pos_s[1] as HSlider).value -= 0.050
+	await get_tree().create_timer(1.2).timeout
+	var reload1: Vector3 = weapon_local.call()
+	print("[sit] reload hold moved %.3f m (want 0.05)" % reload0.distance_to(reload1))
+	await _shot(dir, "s2_reload_moved")
+	go.call("carry")
+	await get_tree().create_timer(1.6).timeout
+	var carry2: Vector3 = weapon_local.call()
+	print("[sit] back in carry the weapon is %.3f m from where carry was left (want 0)" % [
+			carry2.distance_to(carry1)])
+	await _shot(dir, "s3_carry_kept")
+	# --- a grip: fore-end in reload vs elsewhere ---------------------------
+	go.call("reload")
+	await get_tree().create_timer(1.2).timeout
+	pick.call("fore-end")
+	await get_tree().create_timer(1.2).timeout
+	var sg: Node3D = rifle.call("support_grip_node")
+	var fore0: Vector3 = sg.position
+	(pos_s[2] as HSlider).value += 0.040
+	await get_tree().create_timer(1.0).timeout
+	var fore_reload: Vector3 = sg.position
+	go.call("sights")
+	await get_tree().create_timer(1.8).timeout
+	var fore_sights: Vector3 = sg.position
+	print("[sit] fore-end: reload %s (moved %.3f), sights %s (%.3f from the reload edit)" % [
+			fore_reload, fore0.distance_to(fore_reload), fore_sights,
+			fore_sights.distance_to(fore_reload)])
+	print("[sit] file keys: ", tuning.data()["markers"].keys())
+	ed.call("set_open", false)
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(tuning.path_override))
+	_quit_cleanly()
+
+
 func _tuning_report(rig: Node3D, boat: RigidBody3D) -> void:
 	## "Is the tuning in this build, and is it actually being used?" — the
 	## file in force, what is in it, and the live objects measured against it.
@@ -2083,6 +2179,11 @@ func _hand_editor_effect(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 			if opt.get_item_text(i).contains(name):
 				opt.select(i)
 				ed.call("_select_target", i)
+	var target_named := func(key: String) -> Dictionary:
+		for t: Dictionary in ed.get("_targets"):
+			if str(t["key"]) == key:
+				return t
+		return {}
 	var rifle_local := func(v: Vector3) -> Vector3:
 		return rifle.global_transform.affine_inverse() * v
 	# Pick the fore-end hand: the editor must put the left hand on it.
@@ -2098,7 +2199,7 @@ func _hand_editor_effect(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.9).timeout
 	print("[effect] fore-end move 30mm -> L palm moved %.4f m (rifle-local), editor says hand is %.3f m away" % [
 			l0.distance_to(rifle_local.call(hrig.call("palm_global", "L"))),
-			ed.call("_hand_distance", ed.get("_targets")[1])])
+			ed.call("_hand_distance", target_named.call("rifle/SupportGrip"))])
 	await _shot(dir, "effA_foreend")
 	# Bolt knob: must go to the reload stop where the hand is on the knob.
 	pick.call("bolt knob")
@@ -2107,7 +2208,7 @@ func _hand_editor_effect(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	print("[effect] bolt picked: state '%s' reload t=%.2f, R palm %.3f m from knob, editor distance %.3f m (warns above 0.075)" % [
 			ed.get("_state"), float(rifle.call("reload_elapsed")),
 			bp.distance_to((rifle.call("bolt_handle_node") as Node3D).global_position),
-			ed.call("_hand_distance", ed.get("_targets")[2])])
+			ed.call("_hand_distance", target_named.call("rifle/BoltHandle"))])
 	await _shot(dir, "effB_bolt")
 	pick.call("trigger hand")
 	await get_tree().create_timer(1.4).timeout
