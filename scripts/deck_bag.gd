@@ -10,6 +10,7 @@ const DeckBagVisualBuilderScript := preload("res://scripts/deck_bag_visual_build
 const DeckBagLayoutScript := preload("res://scripts/deck_bag_layout.gd")
 const DeckBagRifleObstructionScript := preload("res://scripts/deck_bag_rifle_obstruction.gd")
 const DeckBagRifleReloadControllerScript := preload("res://scripts/deck_bag_rifle_reload_controller.gd")
+const HandTuning := preload("res://scripts/hands/hand_tuning.gd")
 const KIND_KNIFE := "utility_knife"
 const KIND_RIFLE := "hunting_rifle"
 
@@ -1003,7 +1004,8 @@ func _configure_normal_rifle_hand(rifle: Node3D, primary_grip: Node3D) -> void:
 	_rifle_primary_target.set_meta("held_grip_transform", primary_grip.transform)
 	_rifle_primary_target.set_meta("contact_bounds",
 			rifle.call("primary_contact_bounds") as AABB)
-	_rifle_primary_target.set_meta("hand_pose", "rifle_primary")
+	_rifle_primary_target.set_meta("hand_pose", HandTuning.marker_pose(
+			"rifle/PrimaryGrip", "rifle_primary"))
 	_rifle_primary_target.set_meta("hand_attachment", false)
 	# The imported marker supplies the exact stock contact, but forcing its full
 	# wrist rotation in ADS bends the right hand over the receiver. Preserve the

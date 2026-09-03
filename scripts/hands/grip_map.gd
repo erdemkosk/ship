@@ -443,19 +443,31 @@ static func welded(spec: Dictionary) -> bool:
 
 ## A span has two holds, one on each flank. The catalog stores the RIGHT
 ## edge; the left is that frame mirrored through the device's X.
-static func sided(spec: Dictionary, side: String) -> Dictionary:
-	if side != "L" or not (bool(spec.get("span", false)) \
+## The frame as ONE hand sees it. Eleven fittings and the switches are
+## authored for the right hand and mirrored in X for the left, so a tuned
+## frame cannot be stored under the bare id: written back through the mirror
+## it lands on the other hand, and both hands end up wearing each other's
+## grip. Per-side edits are therefore saved as "<id>@L" / "<id>@R" and
+## applied HERE, after the mirror, where they belong to one hand only.
+static func sided(spec: Dictionary, side: String, id := "") -> Dictionary:
+	var out: Dictionary = spec
+	if side == "L" and (bool(spec.get("span", false)) \
 			or bool(spec.get("handed", false))):
-		return spec
-	var out: Dictionary = spec.duplicate()
-	var pos: Vector3 = spec.get("pos", Vector3.ZERO)
-	var F: Vector3 = spec.get("fingers", Vector3(0.0, 0.0, -1.0))
-	var P: Vector3 = spec.get("palm", Vector3(0.0, -1.0, 0.0))
-	if bool(spec.get("span", false)):
-		out["pos"] = Vector3(-pos.x, pos.y, pos.z)
-	out["fingers"] = Vector3(-F.x, F.y, F.z)
-	out["palm"] = Vector3(-P.x, P.y, P.z)
+		out = spec.duplicate()
+		var pos: Vector3 = spec.get("pos", Vector3.ZERO)
+		var F: Vector3 = spec.get("fingers", Vector3(0.0, 0.0, -1.0))
+		var P: Vector3 = spec.get("palm", Vector3(0.0, -1.0, 0.0))
+		if bool(spec.get("span", false)):
+			out["pos"] = Vector3(-pos.x, pos.y, pos.z)
+		out["fingers"] = Vector3(-F.x, F.y, F.z)
+		out["palm"] = Vector3(-P.x, P.y, P.z)
+	if id != "":
+		out = HAND_TUNING.overlay_grip(side_key(id, side), out)
 	return out
+
+
+static func side_key(id: String, side: String) -> String:
+	return "%s@%s" % [id, side]
 
 
 static func local_frame(spec: Dictionary, contact: Vector3) -> Transform3D:

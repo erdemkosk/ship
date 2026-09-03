@@ -24,6 +24,7 @@ class_name HandEditor
 
 const HAND_TUNING := preload("res://scripts/hands/hand_tuning.gd")
 const GRIP_MAP := preload("res://scripts/hands/grip_map.gd")
+const RELOAD_STOPS := preload("res://scripts/hands/rifle_reload_stops.gd")
 
 const DIGITS := ["thumb", "index", "middle", "ring", "pinky"]
 const JOINTS := ["knuckle", "mid", "tip"]
@@ -388,6 +389,10 @@ func _build_panel() -> void:
 	crow.add_child(_copy_name)
 	_button(crow, "Copy as", func() -> void: _copy_pose())
 	_button(crow, "Reset pose", func() -> void: _reset_pose())
+	var mrow := HBoxContainer.new()
+	vbox.add_child(mrow)
+	_button(mrow, "Give this grip its own pose",
+			func() -> void: _private_pose())
 
 	# --- solver / view -------------------------------------------------------
 	_section(vbox, "SOLVER AND VIEW")
@@ -652,6 +657,23 @@ func _select_target(i: int, user := true) -> void:
 
 # --- frame (position + rotation) ------------------------------------------
 
+func _grip_key(t: Dictionary) -> String:
+	## Where this target's frame is stored. A fitting that is mirrored for the
+	## left hand keeps one entry PER HAND, so tuning one never reaches into
+	## the other; everything else keeps a single entry.
+	var id := str(t["id"])
+	if t["kind"] == "hand":
+		return id
+	if _mirrored(id):
+		return GRIP_MAP.side_key(id, str(t["side"]))
+	return id
+
+
+func _mirrored(id: String) -> bool:
+	var spec: Dictionary = GRIP_MAP._catalog_spec(id)
+	return bool(spec.get("handed", false)) or bool(spec.get("span", false))
+
+
 func _frame_of(t: Dictionary) -> Transform3D:
 	## Object-local transform of the target: origin = palm contact, +Z fingers,
 	## +Y palm — the GripMap contract, which the rifle's markers also follow.
@@ -671,7 +693,7 @@ func _frame_of(t: Dictionary) -> Transform3D:
 			xf.basis = Basis(pv.cross(f).normalized(), pv, f)
 		return xf
 	var spec: Dictionary = GRIP_MAP.spec_for(t["id"])
-	var sided: Dictionary = GRIP_MAP.sided(spec, t["side"])
+	var sided: Dictionary = GRIP_MAP.sided(spec, t["side"], str(t["id"]))
 	var f: Vector3 = (sided.get("fingers", Vector3.FORWARD) as Vector3).normalized()
 	var p: Vector3 = sided.get("palm", Vector3.UP) as Vector3
 	p = (p - p.project(f)).normalized()
@@ -777,11 +799,12 @@ func _apply_frame() -> void:
 			"turn_deg": HAND_TUNING.to_json(_rot_deg()),   # for the reader
 		})
 	else:
-		var fields: Dictionary = HAND_TUNING.grip(t["id"]).duplicate()
+		var key := _grip_key(t)
+		var fields: Dictionary = HAND_TUNING.grip(key).duplicate()
 		fields["pos"] = HAND_TUNING.to_json(xf.origin)
 		fields["fingers"] = HAND_TUNING.to_json(xf.basis.z.normalized())
 		fields["palm"] = HAND_TUNING.to_json(xf.basis.y.normalized())
-		HAND_TUNING.set_grip(t["id"], fields)
+		HAND_TUNING.set_grip(key, fields)
 		if t["kind"] == "grip":
 			_arms.call("refresh_grip", t["id"])
 	_say("%s frame edited" % t["label"])
@@ -801,10 +824,11 @@ func _reset_frame() -> void:
 		if item != null and item.has_method("refresh_marker_rest"):
 			item.call("refresh_marker_rest")
 	else:
-		var fields: Dictionary = HAND_TUNING.grip(t["id"]).duplicate()
+		var key := _grip_key(t)
+		var fields: Dictionary = HAND_TUNING.grip(key).duplicate()
 		for k in ["pos", "fingers", "palm"]:
 			fields.erase(k)
-		HAND_TUNING.set_grip(t["id"], fields)
+		HAND_TUNING.set_grip(key, fields)
 		if t["kind"] == "grip":
 			_arms.call("refresh_grip", t["id"])
 	_sync_from_target()
@@ -815,11 +839,24 @@ func _reset_frame() -> void:
 
 func _live_pose_name(t: Dictionary) -> String:
 	if t["kind"] == "grip":
-		return str(GRIP_MAP.spec_for(t["id"]).get("pose", "wrap"))
+		return str(GRIP_MAP.sided(GRIP_MAP.spec_for(t["id"]), str(t["side"]),
+				str(t["id"])).get("pose", "wrap"))
 	if t["kind"] == "hand":
 		var tune: Dictionary = HAND_TUNING.grip(t["id"])
 		return str(tune.get("pose", "open"))
-	return str(_hrig.call("pose_name", t["side"]))
+	# A marker: the pose comes from the reload stop that is up, or from the
+	# marker's own override, or from the code. Reading the LIVE name instead
+	# lags by a frame after a re-assignment, and a finger edit made in that
+	# frame went into the shared pose it had just been moved off.
+	# The reload's stops pose the hand that works the action — the right one.
+	# The fore-end hand is not part of that sequence, and reading a stop's
+	# pose for it reported 'open' while it was really holding the fore-end.
+	if _state == "reload" and str(t["side"]) == "R" \
+			and _seq_item != null and _seq_cur >= 0:
+		return str(_seq_item.call("reload_stop_pose",
+				str((_seq_stops[_seq_cur] as Dictionary)["key"])))
+	return HAND_TUNING.marker_pose(str(t["key"]),
+			str(_hrig.call("pose_name", t["side"])))
 
 
 func _pose_names() -> Array:
@@ -879,6 +916,24 @@ func _hand_distance(t: Dictionary) -> float:
 	return d
 
 
+## Everything a pose reaches. A pose is shared BY NAME, so tuning the
+## cartridge pinch also moves the fuse-box finger and the backpack hand
+## unless the target is given a pose of its own.
+const CODE_POSE_USERS := {
+	"rifle_primary": ["rifle trigger hand"],
+	"rifle_support": ["rifle fore-end hand"],
+	"bolt_grip": ["rifle bolt"],
+	"pinch": ["rifle cartridge", "backpack hand"],
+	"knife_grip": ["knife"],
+	"power": ["backpack hand"],
+	"handle": ["backpack hand"],
+	"open": ["every idle hand", "swimming"],
+	"wrap": ["ladder rungs", "wiping the mask"],
+	"point": ["bag pointer"],
+	"rim": ["the wheel"],
+}
+
+
 func _pose_users(name: String) -> Array:
 	var out: Array = []
 	for id in GRIP_MAP.ENTRIES:
@@ -886,16 +941,72 @@ func _pose_users(name: String) -> Array:
 			out.append(str(id))
 	if str(GRIP_MAP.SWITCH.get("pose", "")) == name:
 		out.append("switches")
-	match name:
-		"rifle_primary", "bolt_grip", "pinch":
-			out.append("rifle (R)")
-		"rifle_support":
-			out.append("rifle (L)")
-		"knife_grip":
-			out.append("knife")
-		"open":
-			out.append("every idle hand")
+	# Anything the file has already pointed at this pose.
+	for key in HAND_TUNING.data()["grips"]:
+		if str((HAND_TUNING.data()["grips"][key] as Dictionary).get("pose", "")) == name:
+			out.append(str(key))
+	for key in HAND_TUNING.data()["markers"]:
+		if str((HAND_TUNING.data()["markers"][key] as Dictionary).get("pose", "")) == name:
+			out.append(str(key))
+	for stop in RELOAD_STOPS.ORDER:
+		if RELOAD_STOPS.pose_of(str(stop)) == name and not out.has("reload stops"):
+			out.append("reload stops")
+	for u in CODE_POSE_USERS.get(name, []):
+		if not out.has(u):
+			out.append(str(u))
 	return out
+
+
+func _private_pose() -> void:
+	## Give the selected target a pose of its own, copied from the one it is
+	## using now, so further finger edits reach nothing else.
+	var t := _target()
+	if t.is_empty() or _last_pose == "":
+		return
+	# Named after the grip, not after the pose it was copied from: the point
+	# of it is that only this grip uses it. "_only" keeps it clear of the
+	# shared names (knife/Grip would otherwise slug to the existing
+	# "knife_grip" and quietly overwrite it).
+	var slug := str(t["key"]).replace("/", "_").to_snake_case()
+	var name := slug + "_only"
+	var n := 2
+	while (_hrig.call("poses") as Dictionary).has(name) and name != _last_pose:
+		name = "%s_only%d" % [slug, n]
+		n += 1
+	_push_undo()
+	var fields := _pose_fields()
+	_hrig.call("set_pose_override", name, fields)
+	HAND_TUNING.set_pose(name, fields)
+	_assign_pose(t, name)
+	# The live pose catches up next frame; the editor must already be editing
+	# the private copy, or the next slider move goes back into the shared one.
+	_last_pose = name
+	_sync_pose(t)
+	_say("'%s' is now used by %s alone" % [name, t["label"]])
+
+
+func _assign_pose(t: Dictionary, name: String) -> void:
+	## Point whatever is actually choosing this hand's pose at `name`.
+	if t["kind"] != "marker":
+		var g: Dictionary = HAND_TUNING.grip(_grip_key(t)).duplicate()
+		g["pose"] = name
+		if t["kind"] == "hand":
+			g["amount"] = 1.0
+		HAND_TUNING.set_grip(_grip_key(t), g)
+		if t["kind"] == "grip":
+			_arms.call("refresh_grip", t["id"])
+		return
+	# A marker in the reload is posed by the stop that is up — but only for
+	# the hand the sequence drives; otherwise the tool reads the pose off the
+	# marker itself.
+	if _state == "reload" and str(t["side"]) == "R" \
+			and _seq_item != null and _seq_cur >= 0:
+		_seq_item.call("set_reload_stop_pose",
+				str((_seq_stops[_seq_cur] as Dictionary)["key"]), name)
+		return
+	var m: Dictionary = HAND_TUNING.marker(str(t["key"])).duplicate()
+	m["pose"] = name
+	HAND_TUNING.set_marker(str(t["key"]), m)
 
 
 func _pose_fields() -> Dictionary:
@@ -928,11 +1039,11 @@ func _choose_pose(i: int) -> void:
 		return
 	var name := _pose_opt.get_item_text(i)
 	_push_undo()
-	var fields: Dictionary = HAND_TUNING.grip(t["id"]).duplicate()
+	var fields: Dictionary = HAND_TUNING.grip(_grip_key(t)).duplicate()
 	fields["pose"] = name
 	if t["kind"] == "hand":
 		fields["amount"] = 1.0
-	HAND_TUNING.set_grip(t["id"], fields)
+	HAND_TUNING.set_grip(_grip_key(t), fields)
 	if t["kind"] == "grip":
 		_arms.call("refresh_grip", t["id"])
 	_sync_pose(t)
@@ -949,17 +1060,8 @@ func _copy_pose() -> void:
 	var fields := _pose_fields()
 	_hrig.call("set_pose_override", name, fields)
 	HAND_TUNING.set_pose(name, fields)
-	if t["kind"] != "marker":
-		var g: Dictionary = HAND_TUNING.grip(t["id"]).duplicate()
-		g["pose"] = name
-		if t["kind"] == "hand":
-			g["amount"] = 1.0
-		HAND_TUNING.set_grip(t["id"], g)
-		if t["kind"] == "grip":
-			_arms.call("refresh_grip", t["id"])
-		_say("pose '%s' created and assigned to %s" % [name, t["id"]])
-	else:
-		_say("pose '%s' created (assign it in a sequence stop)" % name)
+	_assign_pose(t, name)
+	_say("pose '%s' created and assigned to %s" % [name, t["label"]])
 	_sync_pose(t)
 
 

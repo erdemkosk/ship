@@ -854,7 +854,7 @@ func _pick_hand(id: String, preferred := "", reach_slack := 0.0) -> String:
 
 
 func _asked_axes(id: String, side: String) -> Dictionary:
-	var spec: Dictionary = GripMap.sided(GripMap.spec_for(id), side)
+	var spec: Dictionary = GripMap.sided(GripMap.spec_for(id), side, id)
 	var local_contact: Vector3 = GripMap.contact_of(spec, boat, id)
 	spec = GripMap.oriented_at_contact(spec, local_contact)
 	var device := _device_of(id)
@@ -874,7 +874,7 @@ func _side_contact(id: String, side: String) -> Vector3:
 		if _cam == null:
 			return Vector3.ZERO
 		return _cam.global_position - _cam.global_basis.z * 0.40
-	var spec: Dictionary = GripMap.sided(GripMap.spec_for(id), side)
+	var spec: Dictionary = GripMap.sided(GripMap.spec_for(id), side, id)
 	var local_contact: Vector3 = GripMap.contact_of(spec, boat, id)
 	spec = GripMap.oriented_at_contact(spec, local_contact)
 	var local: Transform3D = GripMap.local_frame(spec, local_contact)
@@ -952,7 +952,7 @@ func _drive_bag_hand(_delta: float) -> void:
 			knife_palm -= knife_palm.project(knife_fingers)
 			if knife_palm.length_squared() > 0.0001:
 				axes["palm"] = knife_palm.normalized()
-		pose = "knife_grip"
+		pose = HAND_TUNING.marker_pose("knife/Grip", "knife_grip")
 		pose_amount = float(_bag_hand_target.get_meta("grip_closure", 1.0))
 		var held_device := _bag_hand_target.get_meta("held_device") as Node3D \
 				if _bag_hand_target.has_meta("held_device") else null
@@ -1161,14 +1161,16 @@ func _drive_rifle_support() -> void:
 	rig.clear_held_attachment("L")
 	_last_grip["L"] = contact
 	_last_axes["L"] = axes.duplicate()
-	_last_pose["L"] = "rifle_support"
+	var support_pose := HAND_TUNING.marker_pose("rifle/SupportGrip",
+			"rifle_support")
+	_last_pose["L"] = support_pose
 	_rest_t["L"] = 0.0
 	# Let the support elbow settle a little lower and farther outboard. The palm
 	# remains welded beneath the fore-end, but the forearm now meets it at a small
 	# anatomical wrist angle instead of forming one unnaturally straight beam.
 	rig.set_elbow_hint("L", 0.32, 0.22)
 	rig.grip("L", contact, axes["fingers"], axes["palm"], 1.0,
-			"rifle_support", 1.0, false)
+			support_pose, 1.0, false)
 
 
 func _drive(side: String, delta: float) -> void:
@@ -1533,7 +1535,7 @@ func _grip_node(id: String, side: String) -> Node3D:
 		# be re-stamped on every use; otherwise the first side ever touched wins
 		# for the rest of the session.
 		if bool(spec.get("latch", false)):
-			var live: Dictionary = GripMap.sided(spec, side)
+			var live: Dictionary = GripMap.sided(spec, side, id)
 			var live_contact: Vector3 = GripMap.contact_of(live, boat, id)
 			live = GripMap.oriented_at_contact(live, live_contact)
 			cached.transform = GripMap.local_frame(live, live_contact)
@@ -1552,7 +1554,7 @@ func _grip_node(id: String, side: String) -> Node3D:
 	elif bool(spec.get("on_rim", false)) or spec.is_empty():
 		g.transform = Transform3D.IDENTITY
 	else:
-		var sided: Dictionary = GripMap.sided(spec, side)
+		var sided: Dictionary = GripMap.sided(spec, side, id)
 		var local_contact: Vector3 = GripMap.contact_of(sided, boat, id)
 		sided = GripMap.oriented_at_contact(sided, local_contact)
 		g.transform = GripMap.local_frame(sided, local_contact)

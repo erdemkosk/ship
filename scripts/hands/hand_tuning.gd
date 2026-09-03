@@ -197,6 +197,12 @@ static func set_pose(name: String, fields: Dictionary) -> void:
 	version += 1
 
 
+## The finger pose a tool's grip should use, when the editor has given that
+## grip a pose of its own. Code passes the name it would otherwise use.
+static func marker_pose(key: String, fallback: String) -> String:
+	return str(marker(key).get("pose", fallback))
+
+
 static func marker(key: String) -> Dictionary:
 	return data()["markers"].get(key, {})
 

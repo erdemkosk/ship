@@ -1880,6 +1880,36 @@ func _hand_editor_shot(rig: Node3D, boat: RigidBody3D, dir: String) -> void:
 	await get_tree().create_timer(0.2).timeout
 	print("[hand-editor] after undo moved %.4f m (want 0)" % before.distance_to(
 			(rifle.call("bolt_handle_node") as Node3D).position))
+	# A pose of its own: the fore-end hand must stop sharing rifle_support.
+	var pick_e := func(name: String) -> void:
+		for i in opt.item_count:
+			if opt.get_item_text(i).contains(name):
+				opt.select(i)
+				ed.call("_select_target", i)
+	pick_e.call("fore-end")
+	await get_tree().create_timer(1.8).timeout
+	var hrig_p: Node = (rig.get("_arms") as Node).get("rig")
+	var shared_before: Array = (hrig_p.call("poses") as Dictionary)["rifle_support"]["middle"]
+	print("[effect] fore-end pose before private copy: '%s'" % hrig_p.call("pose_name", "L"))
+	ed.call("_private_pose")
+	await get_tree().create_timer(1.0).timeout
+	var own := str(hrig_p.call("pose_name", "L"))
+	var fs_p: Dictionary = ed.get("_finger_s")
+	((fs_p["middle"] as Array)[0] as HSlider).value = 0.20
+	await get_tree().create_timer(0.8).timeout
+	var shared_after: Array = (hrig_p.call("poses") as Dictionary)["rifle_support"]["middle"]
+	var own_vals: Array = (hrig_p.call("poses") as Dictionary).get(own, {}).get("middle", [])
+	var ht := load("res://scripts/hands/hand_tuning.gd")
+	print("[effect] file says fore-end pose = '%s'; rig knows it: %s; editor _last_pose '%s'" % [
+			ht.marker_pose("rifle/SupportGrip", "(none)"),
+			(hrig_p.call("poses") as Dictionary).has(
+					ht.marker_pose("rifle/SupportGrip", "x")),
+			ed.get("_last_pose")])
+	print("[effect] private pose '%s': own middle=%s, shared rifle_support middle %s -> %s (untouched: %s)" % [
+			own, own_vals, shared_before, shared_after,
+			str(shared_before) == str(shared_after)])
+	await _shot(dir, "effD_private_pose")
+
 	# Solver off must change the rendered curl: compare the index tip with the
 	# switch on and off while the hand grips the trigger.
 	var hrig_s: Node = (rig.get("_arms") as Node).get("rig")
